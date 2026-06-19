@@ -1,0 +1,241 @@
+{
+  "version": 2,
+  "description": "Starter TF-IDF training data for sheet/header detection. Extend this file over time.",
+  "examples": [
+    {
+      "text": "load",
+      "field": "L"
+    },
+    {
+      "text": "mw",
+      "field": "L"
+    },
+    {
+      "text": "unit load",
+      "field": "L"
+    },
+    {
+      "text": "generation",
+      "field": "L"
+    },
+    {
+      "text": "power output",
+      "field": "L"
+    },
+    {
+      "text": "coal flow",
+      "field": "Fin"
+    },
+    {
+      "text": "total coal flow",
+      "field": "Fin"
+    },
+    {
+      "text": "total coal consumption",
+      "field": "Fin"
+    },
+    {
+      "text": "coal consumption",
+      "field": "Fin"
+    },
+    {
+      "text": "fuel flow",
+      "field": "Fin"
+    },
+    {
+      "text": "feed water flow",
+      "field": "Ffw"
+    },
+    {
+      "text": "feedwater flow",
+      "field": "Ffw"
+    },
+    {
+      "text": "steam flow",
+      "field": "Ffw"
+    },
+    {
+      "text": "main steam flow",
+      "field": "Ffw"
+    },
+    {
+      "text": "main stm flow",
+      "field": "Ffw"
+    },
+    {
+      "text": "moisture",
+      "field": "M"
+    },
+    {
+      "text": "inherent moisture",
+      "field": "M"
+    },
+    {
+      "text": "total moisture",
+      "field": "M"
+    },
+    {
+      "text": "tm %",
+      "field": "M"
+    },
+    {
+      "text": "im %",
+      "field": "M"
+    },
+    {
+      "text": "ash",
+      "field": "A"
+    },
+    {
+      "text": "ash %",
+      "field": "A"
+    },
+    {
+      "text": "volatile matter",
+      "field": "VM"
+    },
+    {
+      "text": "fixed carbon",
+      "field": "FC"
+    },
+    {
+      "text": "gross calorific value",
+      "field": "GCV"
+    },
+    {
+      "text": "gcv",
+      "field": "GCV"
+    },
+    {
+      "text": "calorific value",
+      "field": "GCV"
+    },
+    {
+      "text": "sulphur",
+      "field": "S"
+    },
+    {
+      "text": "sulfur",
+      "field": "S"
+    },
+    {
+      "text": "fly ash",
+      "field": "Pfa"
+    },
+    {
+      "text": "fly ash esp",
+      "field": "Pfa"
+    },
+    {
+      "text": "bottom ash",
+      "field": "Pba"
+    },
+    {
+      "text": "unburnt carbon fly ash",
+      "field": "Cfa"
+    },
+    {
+      "text": "unburnt carbon bottom ash",
+      "field": "Cba"
+    },
+    {
+      "text": "fg temp in",
+      "field": "Tgi"
+    },
+    {
+      "text": "flue gas temp in",
+      "field": "Tgi"
+    },
+    {
+      "text": "fg temp out",
+      "field": "Tgo"
+    },
+    {
+      "text": "flue gas temp out",
+      "field": "Tgo"
+    },
+    {
+      "text": "boiler outlet temp",
+      "field": "Tgo"
+    },
+    {
+      "text": "pa temp in",
+      "field": "Tpai"
+    },
+    {
+      "text": "primary air temp in",
+      "field": "Tpai"
+    },
+    {
+      "text": "pa temp out",
+      "field": "Tpao"
+    },
+    {
+      "text": "primary air temp out",
+      "field": "Tpao"
+    },
+    {
+      "text": "sa temp in",
+      "field": "Tsai"
+    },
+    {
+      "text": "secondary air temp in",
+      "field": "Tsai"
+    },
+    {
+      "text": "sa temp out",
+      "field": "Tsao"
+    },
+    {
+      "text": "secondary air temp out",
+      "field": "Tsao"
+    },
+    {
+      "text": "pa flow",
+      "field": "Fpa"
+    },
+    {
+      "text": "primary air flow",
+      "field": "Fpa"
+    },
+    {
+      "text": "sa flow",
+      "field": "Fsa"
+    },
+    {
+      "text": "secondary air flow",
+      "field": "Fsa"
+    },
+    {
+      "text": "ambient temp",
+      "field": "Tref"
+    },
+    {
+      "text": "ref air temp",
+      "field": "Tref"
+    }
+  ],
+  "negative_phrases": [
+    "date",
+    "time",
+    "shift",
+    "count",
+    "remarks",
+    "sample",
+    "analysis",
+    "report",
+    "unit",
+    "boiler",
+    "operator",
+    "batch",
+    "serial",
+    "total",
+    "average",
+    "status",
+    "value",
+    "values",
+    "temperature",
+    "pressure",
+    "flow rate"
+  ]
+}

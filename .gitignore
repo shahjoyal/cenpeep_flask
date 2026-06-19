@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Environment variables
+.env
+
+# VSCode
+.vscode/
+
+# PyCharm
+.idea/
+
+# Mac
+.DS_Store
+
+# Logs
+*.log
+
+# Build
+build/
+dist/
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Excel temp files
+~$*.xlsx
+~$*.xlsm
+~$*.xls
+
+# Uploaded files
+uploads/
+
+# Model files
+models/
+*.joblib
+*.pkl
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Vercel
+.vercel/
+
+# Node
+node_modules/
+
+# Windows
+Thumbs.db
