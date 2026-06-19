@@ -6,7 +6,8 @@ import pymongo
 
 load_dotenv()
 
-app = Flask(__name__, static_folder="static", template_folder="templates")
+# Serve frontend files from /public
+app = Flask(__name__, static_folder="public", template_folder="public")
 CORS(app)
 
 # Allow bigger uploads; default 50 MB, override with MAX_UPLOAD_MB.
@@ -38,7 +39,6 @@ app.register_blueprint(upload_bp, url_prefix="/api/upload")
 app.register_blueprint(sessions_bp, url_prefix="/api/sessions")
 
 
-# Health check
 @app.route("/api/health")
 def health():
     db_status = "disconnected"
@@ -56,24 +56,32 @@ def health():
     })
 
 
-# Quick ping route for Vercel debugging
 @app.route("/ping")
 def ping():
+    public_dir = app.static_folder or os.path.join(app.root_path, "public")
+    files = []
+
+    if os.path.isdir(public_dir):
+        for root, dirs, filenames in os.walk(public_dir):
+            for f in filenames:
+                files.append(os.path.relpath(os.path.join(root, f), public_dir))
+
     return jsonify({
         "ok": True,
         "cwd": os.getcwd(),
-        "root": app.root_path
+        "root": app.root_path,
+        "public": public_dir,
+        "files": sorted(files)
     })
 
 
-# Serve static files from local public/
 @app.route("/public/<path:filename>")
 def public_files(filename):
-    pub = os.path.join(app.root_path, "public")
-    file_path = os.path.join(pub, filename)
+    public_dir = app.static_folder or os.path.join(app.root_path, "public")
+    file_path = os.path.join(public_dir, filename)
 
     if os.path.isfile(file_path):
-        return send_from_directory(pub, filename)
+        return send_from_directory(public_dir, filename)
 
     return jsonify({
         "ok": False,
@@ -82,25 +90,24 @@ def public_files(filename):
     }), 404
 
 
-# SPA fallback
 @app.route("/")
 @app.route("/<path:path>")
 def spa(path="index.html"):
-    pub = os.path.join(app.root_path, "public")
-    requested_file = os.path.join(pub, path)
-    index_file = os.path.join(pub, "index.html")
+    public_dir = app.static_folder or os.path.join(app.root_path, "public")
+    requested_file = os.path.join(public_dir, path)
+    index_file = os.path.join(public_dir, "index.html")
 
     if os.path.isfile(requested_file):
-        return send_from_directory(pub, path)
+        return send_from_directory(public_dir, path)
 
     if os.path.isfile(index_file):
-        return send_from_directory(pub, "index.html")
+        return send_from_directory(public_dir, "index.html")
 
     return jsonify({
         "ok": False,
         "error": "public/index.html not found",
         "root": app.root_path,
-        "public": pub
+        "public": public_dir
     }), 404
 
 
