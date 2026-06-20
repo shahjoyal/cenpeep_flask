@@ -22,16 +22,30 @@ prediction, so the caller can apply a threshold and skip low-confidence
 guesses rather than mislabeling a column.
 """
 
+from __future__ import annotations
+
 import os
 import pickle
 import re
+import tempfile
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from .training_data import get_training_data, is_non_field_header
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'field_classifier.pkl')
+
+def _is_vercel() -> bool:
+    return os.getenv("VERCEL", "").lower() in {"1", "true", "yes"}
+
+
+MODULE_DIR = os.path.dirname(__file__)
+LOCAL_MODEL_PATH = os.path.join(MODULE_DIR, "field_classifier.pkl")
+RUNTIME_MODEL_PATH = os.path.join(tempfile.gettempdir(), "field_classifier.pkl")
+
+# On Vercel, /var/task is read-only, so never write there.
+# Use /tmp instead. Locally, keep the model next to this file.
+DEFAULT_MODEL_PATH = RUNTIME_MODEL_PATH if _is_vercel() else LOCAL_MODEL_PATH
 
 # Below this cosine-similarity score, a prediction is considered "no match"
 # rather than forced onto the nearest label. Tunable as training data grows.
@@ -41,8 +55,8 @@ DEFAULT_CONFIDENCE_THRESHOLD = 0.45
 def _normalize(text):
     """Light cleanup: lowercase, strip punctuation/numbers-only noise, collapse whitespace."""
     text = str(text)
-    text = re.sub(r'[\(\)\[\]/\\\-_,.:;]+', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"[\(\)\[\]/\\\-_,.:;]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
@@ -74,7 +88,7 @@ class FieldClassifier:
         # Combine word unigrams/bigrams with char n-grams (3-5) for robustness
         # against abbreviations and merged/garbled plant-tag naming.
         self.vectorizer = TfidfVectorizer(
-            analyzer='char_wb',
+            analyzer="char_wb",
             ngram_range=(3, 5),
             sublinear_tf=True,
             min_df=1,
@@ -85,28 +99,64 @@ class FieldClassifier:
         return self
 
     # ── Persistence ─────────────────────────────────────────────────────────
-    def save(self, path=MODEL_PATH):
-        with open(path, 'wb') as f:
-            pickle.dump({
-                'vectorizer': self.vectorizer,
-                'train_vectors': self.train_vectors,
-                'train_labels': self.train_labels,
-                'train_texts': self.train_texts,
-            }, f)
+    def save(self, path=None):
+        """
+        Save model state.
+
+        On Vercel, defaults to /tmp/field_classifier.pkl.
+        Locally, defaults to ml/field_classifier.pkl.
+        """
+        target_path = path or DEFAULT_MODEL_PATH
+        target_dir = os.path.dirname(target_path)
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+
+        with open(target_path, "wb") as f:
+            pickle.dump(
+                {
+                    "vectorizer": self.vectorizer,
+                    "train_vectors": self.train_vectors,
+                    "train_labels": self.train_labels,
+                    "train_texts": self.train_texts,
+                },
+                f,
+            )
 
     @classmethod
-    def load(cls, path=MODEL_PATH):
+    def load(cls, path=None):
+        """
+        Load a previously saved model if present.
+        If not found, train a fresh one.
+        """
         clf = cls()
-        if os.path.exists(path):
-            with open(path, 'rb') as f:
-                state = pickle.load(f)
-            clf.vectorizer = state['vectorizer']
-            clf.train_vectors = state['train_vectors']
-            clf.train_labels = state['train_labels']
-            clf.train_texts = state['train_texts']
-        else:
+        target_path = path or DEFAULT_MODEL_PATH
+
+        # Prefer the requested path, then fall back to the local repo path
+        # if we're running somewhere other than Vercel.
+        candidates = [target_path]
+        if not _is_vercel() and target_path != LOCAL_MODEL_PATH:
+            candidates.append(LOCAL_MODEL_PATH)
+
+        loaded = False
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                with open(candidate, "rb") as f:
+                    state = pickle.load(f)
+                clf.vectorizer = state["vectorizer"]
+                clf.train_vectors = state["train_vectors"]
+                clf.train_labels = state["train_labels"]
+                clf.train_texts = state["train_texts"]
+                loaded = True
+                break
+
+        if not loaded:
             clf.train()
-            clf.save(path)
+            # Only persist if possible. On Vercel, write to /tmp, not /var/task.
+            try:
+                clf.save(target_path)
+            except OSError:
+                pass
+
         return clf
 
     # ── Inference ───────────────────────────────────────────────────────────
@@ -161,16 +211,20 @@ class FieldClassifier:
             if exclude_mask[i]:
                 results.append((None, 0.0, None))
                 continue
+
             best_idx = row.argmax()
             best_score = float(row[best_idx])
+
             if best_score < threshold:
                 results.append((None, best_score, None))
                 continue
+
             predicted_label = self.train_labels[best_idx]
             if predicted_label == "OUT_OF_SCOPE":
                 results.append((None, best_score, self.train_texts[best_idx]))
             else:
                 results.append((predicted_label, best_score, self.train_texts[best_idx]))
+
         return results
 
 
@@ -186,10 +240,21 @@ def get_classifier():
 
 
 def retrain_and_save():
-    """Force a fresh train from current training_data.py and persist it."""
+    """
+    Force a fresh train from current training_data.py and persist it.
+
+    On Vercel, persistence goes to /tmp only. This avoids the read-only
+    /var/task filesystem error.
+    """
     clf = FieldClassifier()
     clf.train()
-    clf.save()
+
+    try:
+        clf.save()
+    except OSError:
+        # If saving fails for any reason, still keep the trained model in memory.
+        pass
+
     global _classifier_instance
     _classifier_instance = clf
     return clf

@@ -45,6 +45,7 @@ Multiple load/data readings for the same field → averaged automatically
 """
 
 import io
+import os
 import re
 import time
 import statistics
@@ -621,6 +622,15 @@ def retrain_model():
     training_data.py (adding new header phrasings, fixing a mislabeled
     example, etc.) so changes take effect without restarting the server.
     """
+    # Vercel's filesystem is read-only under /var/task. Retraining and saving
+    # to disk is therefore disabled there. The API still works because the
+    # classifier can train in memory and/or use /tmp via ml/field_classifier.py.
+    if os.getenv("VERCEL", "").lower() in {"1", "true", "yes"}:
+        return jsonify({
+            'ok': False,
+            'error': 'Retraining is disabled on Vercel because the filesystem is read-only.',
+        }), 400
+
     try:
         from ml.field_classifier import retrain_and_save
         clf = retrain_and_save()
