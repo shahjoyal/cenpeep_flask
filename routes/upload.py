@@ -1,28 +1,54 @@
 """
 upload.py — Flask upload route for CENPEEP
 ==========================================
+Accepts .xlsx / .xls files and does two things:
 
-This version uses:
-- chunk-friendly workbook parsing
-- a lightweight TF-IDF + cosine matcher for header detection
-- editable starter training data in basic_training_data.json
-- larger file uploads via MAX_CONTENT_LENGTH in app.py
+1. SMART MULTI-SHEET PARSE (new):
+   • Reads every sheet in the workbook.
+   • For each sheet, tries to identify CENPEEP input fields by scanning:
+       – the standard "CenPeep Corrected" column layout (col A=particulars,
+         col B=UOM, col C=symbol, col D=formula/INPUT, col E=value)
+       – a "raw / field-name header" layout where the first row contains
+         field names and subsequent rows are data rows (handles multiple
+         load readings → averages them).
+   • Returns per-sheet metadata + a merged `extracted` dict (last-wins
+     for conflicts; the CenPeep sheet always wins if present).
+
+2. LEGACY SINGLE-SHEET PARSE (kept for backward compat).
 """
 
-from __future__ import annotations
+"""
+upload.py — Flask upload route for CENPEEP  (v2: ML detection + chunked parsing)
+==================================================================================
+Accepts .xlsx / .xls files and does three things:
+
+1. SMART MULTI-SHEET PARSE — reads every sheet, tries the strict CenPeep
+   column layout first, then a generic raw-tabular layout.
+
+2. ML FIELD DETECTION (new) — for any column NOT matched by the rule-based
+   symbol/label lookup, a basic trainable TF-IDF + cosine-similarity model
+   (see ml/field_classifier.py) scores the header text against known
+   CENPEEP field phrasings and assigns a field id if confident enough.
+   This is what lets a sheet with totally different header wording (e.g.
+   "MAIN STM TEMP-L", "Primary Air APH Temp I/L A") still get its columns
+   identified, instead of relying only on exact alias matches.
+
+3. CHUNKED / STREAMED PARSING (new) — large sheets (many rows and/or wide
+   column counts) are read via openpyxl's read_only streaming mode and
+   processed in fixed-size row chunks, so we never hold the full sheet plus
+   multiple copies of it in memory at once. This is what allows bigger
+   files (the route's max upload size has also been raised) to be parsed
+   without timing out or exhausting memory.
+
+Multiple load/data readings for the same field → averaged automatically
+(unchanged from v1, now chunk-aware).
+"""
 
 import io
-import json
-import math
-import os
 import re
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field as dc_field
-from itertools import chain
-from datetime import date, datetime, time
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
-
-from flask import Blueprint, jsonify, request
+import time
+import statistics
+from flask import Blueprint, request, jsonify
 
 try:
     import openpyxl
@@ -36,708 +62,572 @@ try:
 except ImportError:
     HAS_XLRD = False
 
-upload_bp = Blueprint("upload", __name__)
+from ml.field_classifier import get_classifier, DEFAULT_CONFIDENCE_THRESHOLD
+from ml.training_data import is_non_field_header
 
-MAX_PREVIEW_ROWS = int(os.getenv("UPLOAD_PREVIEW_ROWS", "60"))
-HEADER_SCAN_ROWS = int(os.getenv("UPLOAD_HEADER_SCAN_ROWS", "8"))
-CHUNK_SIZE = int(os.getenv("UPLOAD_CHUNK_ROWS", "500"))
-SIMILARITY_THRESHOLD = float(os.getenv("UPLOAD_SIMILARITY_THRESHOLD", "0.18"))
+upload_bp = Blueprint('upload', __name__)
 
-ALLOWED_EXTS = {".xlsx", ".xls", ".xlsm"}
+# ─── Chunking config ───────────────────────────────────────────────────────────
+CHUNK_ROWS = 300          # rows processed per chunk for large sheets
+LARGE_SHEET_ROW_THRESHOLD = 500   # sheets bigger than this use chunked streaming
+HEADER_SCAN_ROWS = 5      # how many leading rows we scan to find the header row
 
+# ─── Symbol → CENPEEP field-id map ────────────────────────────────────────────
+SYM_MAP = {
+    'L': 'L', 'Ffw': 'Ffw', 'Fin': 'Fin',
+    'Cba': 'Cba', 'Cfa': 'Cfa', 'Pfa': 'Pfa', 'Pba': 'Pba',
+    'M': 'M', 'A': 'A', 'VM': 'VM', 'FC': 'FC', 'GCV': 'GCV', 'S': 'S',
+    'O2in': 'O2in', 'COin': 'COin', 'O2out': 'O2out', 'COout': 'COout',
+    'Tgi': 'Tgi', 'Tgo': 'Tgo',
+    'Tpai': 'Tpai', 'Tpao': 'Tpao', 'Tsai': 'Tsai', 'Tsao': 'Tsao',
+    'Fsa': 'Fsa', 'Fpa': 'Fpa', 'Tref': 'Tref',
+    # Design — proximate
+    'Md': 'Md', 'Ad': 'Ad', 'VMd': 'VMd', 'FCd': 'FCd',
+    # Design — ultimate
+    'Cd': 'Cd', 'Sd': 'Sd', 'Hd': 'Hd', 'Nd': 'Nd', 'Od': 'Od',
+    'Gcvd': 'GCVd', 'GCVd': 'GCVd', 'Trad': 'Trad', 'Mwvd': 'Mwvd',
+}
 
-# ---------------------------------------------------------------------------
-# JSON safety
-# ---------------------------------------------------------------------------
+# Also accept case-insensitive & common variants
+SYM_MAP_LOWER = {k.lower(): v for k, v in SYM_MAP.items()}
 
-def convert_json_safe(obj):
-    """Recursively convert datetime/time/date objects into JSON-safe values."""
-    if isinstance(obj, dict):
-        return {k: convert_json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [convert_json_safe(x) for x in obj]
-    if isinstance(obj, tuple):
-        return [convert_json_safe(x) for x in obj]
-    if isinstance(obj, datetime):
-        return obj.strftime("%Y-%m-%d %H:%M:%S")
-    if isinstance(obj, date):
-        return obj.isoformat()
-    if isinstance(obj, time):
-        return obj.strftime("%H:%M:%S")
-    return obj
-
-
-# ---------------------------------------------------------------------------
-# Training data / vocabulary
-# ---------------------------------------------------------------------------
-
-def _normalize_text(value: object) -> str:
-    if value is None:
-        return ""
-    text = str(value).lower().strip()
-    # split camelCase / PascalCase
-    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
-    text = text.replace("/", " ").replace("-", " ")
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _tokenize(text: object) -> List[str]:
-    norm = _normalize_text(text)
-    if not norm:
-        return []
-    tokens = norm.split()
-    expanded: List[str] = []
-    for tok in tokens:
-        # break very long concatenations if they exist
-        if len(tok) > 18 and tok.isalpha():
-            expanded.extend(re.findall(r"[a-z]+|[0-9]+", tok))
-        else:
-            expanded.append(tok)
-    return expanded
+# Human-readable label guesses for unknown-layout headers
+LABEL_ALIASES = {
+    'load': 'L', 'unit load': 'L', 'mw': 'L',
+    'steam flow': 'Ffw', 'steamflow': 'Ffw',
+    'coal flow': 'Fin', 'coalflow': 'Fin', 'fuel flow': 'Fin',
+    'moisture': 'M', 'ash': 'A',
+    'volatile matter': 'VM', 'vm': 'VM',
+    'fixed carbon': 'FC', 'fc': 'FC',
+    'gcv': 'GCV', 'gross calorific value': 'GCV',
+    'sulphur': 'S', 'sulfur': 'S',
+    'o2 in': 'O2in', 'o2in': 'O2in',
+    'o2 out': 'O2out', 'o2out': 'O2out',
+    'co in': 'COin', 'coin': 'COin',
+    'co out': 'COout', 'coout': 'COout',
+    'fg temp in': 'Tgi', 'flue gas temp in': 'Tgi',
+    'fg temp out': 'Tgo', 'flue gas temp out': 'Tgo',
+    'pa temp in': 'Tpai', 'sa temp in': 'Tsai',
+    'pa temp out': 'Tpao', 'sa temp out': 'Tsao',
+    'pa flow': 'Fpa', 'sa flow': 'Fsa',
+    'unburnt bottom': 'Cba', 'unburnt fly': 'Cfa',
+    'fly ash': 'Pfa', 'bottom ash': 'Pba',
+}
 
 
 def _to_num(val):
+    """Safely convert a cell value to float, or return None."""
     if val is None:
         return None
     if isinstance(val, (int, float)):
         return float(val)
-    if isinstance(val, str):
-        txt = val.strip().replace(",", "")
-        if not txt:
-            return None
-        try:
-            return float(txt)
-        except ValueError:
-            return None
     try:
-        return float(val)
+        return float(str(val).strip().replace(',', ''))
     except (ValueError, TypeError):
         return None
 
 
-def _looks_like_header_cell(val: object) -> bool:
-    if val is None:
-        return False
-    if isinstance(val, (int, float)):
-        return False
-    txt = _normalize_text(val)
-    return len(txt) >= 2 and any(ch.isalpha() for ch in txt)
+def _sym_to_field(sym):
+    """Map a symbol string to a CENPEEP field id."""
+    s = str(sym).strip()
+    return SYM_MAP.get(s) or SYM_MAP_LOWER.get(s.lower())
 
 
-def _iter_nonempty_texts(row: Sequence[object]) -> List[str]:
-    out = []
-    for cell in row:
-        if cell is None:
-            continue
-        txt = str(cell).strip()
-        if txt:
-            out.append(txt)
-    return out
+def _label_to_field(label):
+    """Map a header label string to a CENPEEP field id."""
+    norm = re.sub(r'[^a-z0-9 ]', '', str(label).lower().strip())
+    # Direct symbol match first
+    fid = _sym_to_field(label.strip())
+    if fid:
+        return fid
+    return LABEL_ALIASES.get(norm)
 
 
-@dataclass
-class TFIDFExample:
-    text: str
-    field: str
-    tokens: List[str]
-    vector: Dict[str, float] = dc_field(default_factory=dict)
-
-
-class BasicTFIDFClassifier:
-    def __init__(self, examples: List[Dict[str, str]], negative_phrases: List[str]):
-        self.examples: List[TFIDFExample] = [
-            TFIDFExample(text=e["text"], field=e["field"], tokens=_tokenize(e["text"]))
-            for e in examples
-            if e.get("text") and e.get("field")
-        ]
-        self.negative_phrases = [_normalize_text(x) for x in negative_phrases if x]
-        self.idf: Dict[str, float] = {}
-        self.field_aliases: Dict[str, List[str]] = defaultdict(list)
-        self._fit()
-
-    def _fit(self):
-        doc_freq = Counter()
-        for ex in self.examples:
-            for tok in set(ex.tokens):
-                doc_freq[tok] += 1
-            self.field_aliases[ex.field].append(ex.text)
-
-        n_docs = max(len(self.examples), 1)
-        self.idf = {
-            tok: math.log((1 + n_docs) / (1 + df)) + 1.0
-            for tok, df in doc_freq.items()
-        }
-        for ex in self.examples:
-            ex.vector = self._vectorize_tokens(ex.tokens)
-
-    def _vectorize_tokens(self, tokens: List[str]) -> Dict[str, float]:
-        if not tokens:
-            return {}
-        counts = Counter(tokens)
-        total = sum(counts.values())
-        vec: Dict[str, float] = {}
-        for tok, cnt in counts.items():
-            tf = cnt / total
-            idf = self.idf.get(tok, 1.0)
-            vec[tok] = tf * idf
-        return vec
-
-    @staticmethod
-    def _cosine(a: Dict[str, float], b: Dict[str, float]) -> float:
-        if not a or not b:
-            return 0.0
-        dot = 0.0
-        for tok, av in a.items():
-            bv = b.get(tok)
-            if bv is not None:
-                dot += av * bv
-        norm_a = math.sqrt(sum(v * v for v in a.values()))
-        norm_b = math.sqrt(sum(v * v for v in b.values()))
-        if not norm_a or not norm_b:
-            return 0.0
-        return dot / (norm_a * norm_b)
-
-    def _blocked(self, text: str) -> bool:
-        norm = _normalize_text(text)
-        if not norm:
-            return True
-        if len(norm) <= 1:
-            return True
-
-        blocked_exact = {
-            "date", "time", "shift", "count", "remarks", "sample", "analysis",
-            "report", "unit", "boiler", "operator", "status", "average", "total",
-            "value", "values", "temperature", "pressure", "flow rate", "flow",
-            "column", "row", "sheet"
-        }
-        if norm in blocked_exact:
-            return True
-
-        for p in self.negative_phrases:
-            if p and p == norm:
-                return True
-        return False
-
-    def predict(self, text: str, sheet_name: str = "") -> Tuple[Optional[str], float]:
-        if self._blocked(text):
-            return None, 0.0
-
-        norm = _normalize_text(text)
-        tokens = _tokenize(norm)
-        if not tokens:
-            return None, 0.0
-
-        sheet_norm = _normalize_text(sheet_name)
-        hint = self._sheet_hint(norm, sheet_norm)
-        if hint:
-            return hint, 1.0
-
-        query_vec = self._vectorize_tokens(tokens)
-
-        best_field = None
-        best_score = 0.0
-        for ex in self.examples:
-            score = self._cosine(query_vec, ex.vector)
-            overlap = len(set(tokens) & set(ex.tokens)) / max(len(set(tokens) | set(ex.tokens)), 1)
-            score = score * 0.8 + overlap * 0.2
-            if score > best_score:
-                best_score = score
-                best_field = ex.field
-
-        if sheet_norm and any(k in sheet_norm for k in ("coal", "avg", "day", "hr", "loi")):
-            best_score += 0.02
-
-        if best_score >= SIMILARITY_THRESHOLD:
-            return best_field, min(best_score, 0.99)
-        return None, 0.0
-
-    @staticmethod
-    def _sheet_hint(norm_text: str, sheet_norm: str) -> Optional[str]:
-        hint_pairs = [
-            ("load", "L"),
-            ("mw", "L"),
-            ("main steam flow", "Ffw"),
-            ("feed water flow", "Ffw"),
-            ("feedwater flow", "Ffw"),
-            ("coal consumption", "Fin"),
-            ("total coal consumption", "Fin"),
-            ("coal flow", "Fin"),
-            ("g c v", "GCV"),
-            ("gcv", "GCV"),
-            ("gross calorific value", "GCV"),
-            ("volatile matter", "VM"),
-            ("fixed carbon", "FC"),
-            ("moisture", "M"),
-            ("im", "M"),
-            ("tm", "M"),
-            ("ash", "A"),
-            ("sulphur", "S"),
-            ("sulfur", "S"),
-            ("fly ash", "Pfa"),
-            ("bottom ash", "Pba"),
-            ("unburnt carbon fly ash", "Cfa"),
-            ("unburnt carbon bottom ash", "Cba"),
-            ("flue gas temp in", "Tgi"),
-            ("fg temp in", "Tgi"),
-            ("flue gas temp out", "Tgo"),
-            ("fg temp out", "Tgo"),
-            ("primary air temp in", "Tpai"),
-            ("primary air temp out", "Tpao"),
-            ("secondary air temp in", "Tsai"),
-            ("secondary air temp out", "Tsao"),
-            ("primary air flow", "Fpa"),
-            ("secondary air flow", "Fsa"),
-            ("ambient temp", "Tref"),
-            ("ref air temp", "Tref"),
-        ]
-
-        if sheet_norm:
-            if "tp 24" in sheet_norm or "coal analysis" in sheet_norm:
-                if "generation" in norm_text or "load" in norm_text:
-                    return "L"
-                if "coal consumption" in norm_text or "coal flow" in norm_text:
-                    return "Fin"
-                if "im" in norm_text or "tm" in norm_text:
-                    return "M"
-                if "ash" in norm_text:
-                    return "A"
-                if "volatile" in norm_text:
-                    return "VM"
-                if "fixed carbon" in norm_text:
-                    return "FC"
-                if "gcv" in norm_text or "calorific" in norm_text:
-                    return "GCV"
-
-            if "hr avg" in sheet_norm or "day avg" in sheet_norm:
-                if "load" in norm_text:
-                    return "L"
-                if "coal" in norm_text:
-                    return "Fin"
-                if "steam flow" in norm_text or "feed water" in norm_text:
-                    return "Ffw"
-                if "main stm temp" in norm_text or "ms temp" in norm_text:
-                    return "Tgo"
-
-            if "loi" in sheet_norm:
-                if "bottom ash" in norm_text:
-                    return "Pba"
-                if "fly ash" in norm_text:
-                    return "Pfa"
-
-        for phrase, field in hint_pairs:
-            if phrase in norm_text:
-                return field
-        return None
-
-
-def _load_training_data() -> Tuple[List[Dict[str, str]], List[str]]:
-    here = os.path.dirname(__file__)
-    path = os.path.join(here, "basic_training_data.json")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("examples", []), data.get("negative_phrases", [])
-    except Exception:
-        return [], []
-
-
-EXAMPLES, NEGATIVE_PHRASES = _load_training_data()
-CLASSIFIER = BasicTFIDFClassifier(EXAMPLES, NEGATIVE_PHRASES)
-
-FIELD_ALIASES = {
-    "L": ["load", "unit load", "mw", "generation", "power output"],
-    "Ffw": ["feed water flow", "feedwater flow", "steam flow", "main steam flow", "main stm flow"],
-    "Fin": ["coal flow", "total coal consumption", "total coal flow", "coal consumption", "fuel flow"],
-    "M": ["moisture", "im %", "tm %", "total moisture"],
-    "A": ["ash", "ash %", "ash percentage"],
-    "VM": ["volatile matter", "vm", "volatile"],
-    "FC": ["fixed carbon", "fc", "carbon fixed"],
-    "GCV": ["gcv", "gross calorific value", "calorific value", "kcal kg"],
-    "S": ["sulphur", "sulfur", "s %"],
-    "Pfa": ["fly ash", "fly ash esp", "fa"],
-    "Pba": ["bottom ash", "ba"],
-    "Cfa": ["unburnt carbon fly ash", "unburnt carbon in fly ash"],
-    "Cba": ["unburnt carbon bottom ash", "unburnt carbon in bottom ash"],
-    "Tgi": ["flue gas temp in", "fg temp in", "gas temp in"],
-    "Tgo": ["flue gas temp out", "fg temp out", "boiler outlet temp"],
-    "Tpai": ["pa temp in", "primary air temp in"],
-    "Tpao": ["pa temp out", "primary air temp out"],
-    "Tsai": ["sa temp in", "secondary air temp in"],
-    "Tsao": ["sa temp out", "secondary air temp out"],
-    "Fpa": ["pa flow", "primary air flow"],
-    "Fsa": ["sa flow", "secondary air flow"],
-    "Tref": ["ambient temp", "ref air temp", "room temp"],
-}
-FIELD_ALIASES_NORMALIZED = {
-    field: [_normalize_text(alias) for alias in aliases]
-    for field, aliases in FIELD_ALIASES.items()
-}
-
-
-# ---------------------------------------------------------------------------
-# Workbook readers
-# ---------------------------------------------------------------------------
-
-def _collect_rows_from_openpyxl(ws) -> Iterable[List[object]]:
-    for row in ws.iter_rows(values_only=True):
-        yield list(row)
-
-
-def _collect_rows_from_xlrd(ws) -> Iterable[List[object]]:
-    for r in range(ws.nrows):
-        yield [ws.cell_value(r, c) for c in range(ws.ncols)]
-
-
-def _read_all_sheets(file_bytes, filename):
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-
-    if ext == "xls":
-        if not HAS_XLRD:
-            raise RuntimeError("xlrd not installed; cannot read .xls files")
-        wb = xlrd.open_workbook(file_contents=file_bytes)
-        sheets = []
-        for name in wb.sheet_names():
-            ws = wb.sheet_by_name(name)
-            sheets.append((name, lambda ws=ws: _collect_rows_from_xlrd(ws), ws.nrows, ws.ncols))
-        return sheets
-
-    if not HAS_OPENPYXL:
-        raise RuntimeError("openpyxl not installed")
-
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
-    sheets = []
-    for name in wb.sheetnames:
-        ws = wb[name]
-        sheets.append((name, lambda ws=ws: _collect_rows_from_openpyxl(ws), ws.max_row or 0, ws.max_column or 0))
-    return sheets
-
-
-# ---------------------------------------------------------------------------
-# Parsing helpers
-# ---------------------------------------------------------------------------
-
-@dataclass
-class FieldBucket:
-    count: int = 0
-    total: float = 0.0
-    preview_values: List[float] = dc_field(default_factory=list)
-
-    def add(self, value: float):
-        self.count += 1
-        self.total += value
-        if len(self.preview_values) < 10:
-            self.preview_values.append(value)
-
-    @property
-    def average(self) -> float:
-        return self.total / self.count if self.count else 0.0
-
-
-def _parse_standard_cenpeep(rows: List[List[object]], sheet_name: str):
-    extracted: Dict[str, float] = {}
+# ─── Strategy 1: Standard CENPEEP column layout ───────────────────────────────
+def _parse_cenpeep_layout(rows):
+    """
+    Expects rows like:
+      col0=Particulars, col1=UOM, col2=Symbol, col3=Formula/INPUT, col4=Value
+    Returns (extracted_dict, raw_rows_list).
+    """
+    extracted = {}
     raw_rows = []
-    md_seen = False
-    ad_seen = False
+    design_md_seen = False
+    design_ad_seen = False
 
     for row in rows:
         if len(row) < 5:
             continue
-        particulars, uom, symbol, formula, value = row[:5]
+        particulars = row[0]
+        uom = row[1]
+        symbol = row[2]
+        formula = row[3]
+        value = row[4]
+
         if not symbol or value is None:
             continue
 
-        is_input = isinstance(formula, str) and formula.strip().lower() == "input"
+        is_input = isinstance(formula, str) and formula.strip().lower() == 'input'
         is_plain = (formula is None) and isinstance(value, (int, float))
+
         if not is_input and not is_plain:
             continue
 
+        sym = str(symbol).strip()
         num = _to_num(value)
         if num is None:
             continue
 
-        sym_norm = _normalize_text(symbol).replace(" ", "")
-        field_id = None
-
-        for field, aliases in FIELD_ALIASES.items():
-            if sym_norm == _normalize_text(field).replace(" ", ""):
-                field_id = field
-                break
-            if any(_normalize_text(alias).replace(" ", "") == sym_norm for alias in aliases):
-                field_id = field
-                break
-
-        if sym_norm == "md":
-            field_id = "Md2" if md_seen else "Md"
-            md_seen = True
-        elif sym_norm == "ad":
-            field_id = "Ad2" if ad_seen else "Ad"
-            ad_seen = True
+        # Handle duplicate Md / Ad design symbols
+        field_id = _sym_to_field(sym)
+        if sym == 'Md':
+            field_id = 'Md2' if design_md_seen else 'Md'
+            design_md_seen = True
+        if sym == 'Ad':
+            field_id = 'Ad2' if design_ad_seen else 'Ad'
+            design_ad_seen = True
 
         if not field_id:
             continue
 
         extracted[field_id] = num
         raw_rows.append({
-            "particulars": str(particulars) if particulars else str(symbol),
-            "uom": str(uom) if uom else "",
-            "symbol": str(symbol),
-            "value": num,
+            'particulars': str(particulars) if particulars else sym,
+            'uom': str(uom) if uom else '',
+            'symbol': sym,
+            'value': num,
         })
 
-    return extracted, raw_rows, {}
+    return extracted, raw_rows
 
 
-def _guess_data_start(rows: List[List[object]]) -> int:
-    """Return index of first likely data row among buffered rows."""
-    for idx, row in enumerate(rows):
-        numeric = sum(1 for c in row if _to_num(c) is not None)
-        text = sum(1 for c in row if _looks_like_header_cell(c))
-        if numeric >= 2:
-            return idx
-        if numeric >= 1 and text <= 2 and idx >= 1:
-            return idx
-    return len(rows)
+# ─── Header row detection (real sheets often bury the header a few rows down) ─
+def _find_header_row(sample_rows):
+    """
+    Scans the first few rows of a sheet and picks the one most likely to be
+    a header row: most non-empty string cells, few/no numeric cells.
+    Returns the row index (0-based, relative to sample_rows) or None.
+    """
+    best_idx, best_score = None, 0
+    for i, row in enumerate(sample_rows):
+        str_cells = sum(1 for c in row if isinstance(c, str) and c.strip())
+        num_cells = sum(1 for c in row if isinstance(c, (int, float)))
+        # A header row should be mostly text, not numbers
+        score = str_cells - num_cells
+        if str_cells >= 3 and score > best_score:
+            best_score = score
+            best_idx = i
+    return best_idx
 
 
-def _build_column_context(rows: List[Sequence[object]], max_cols: int) -> List[str]:
-    context: List[str] = []
-    for col_idx in range(max_cols):
-        parts: List[str] = []
-        for row in rows:
-            if col_idx < len(row):
-                cell = row[col_idx]
-                if cell is None:
-                    continue
-                txt = str(cell).strip()
-                if txt and _looks_like_header_cell(txt):
-                    parts.append(txt)
-        context.append(" ".join(parts))
-    return context
+# ─── Column → field mapping (rule-based alias lookup + ML fallback) ──────────
+def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE_THRESHOLD):
+    """
+    Given a list of header strings (one per column), returns:
+      col_map: {col_idx: field_id}
+      col_source: {col_idx: 'rule' | 'ml'}
+      col_confidence: {col_idx: float}   (1.0 for rule matches)
+    Rule-based alias lookup runs first (cheap, exact); any column it can't
+    place is handed to the ML classifier as a batch (fast — single vectorized
+    call rather than one call per column).
+    """
+    col_map = {}
+    col_source = {}
+    col_confidence = {}
+    unmatched_idx = []
+    unmatched_text = []
+
+    for col_idx, hdr in enumerate(headers):
+        if hdr is None or not str(hdr).strip():
+            continue
+        if is_non_field_header(hdr):
+            continue
+        fid = _label_to_field(str(hdr))
+        if fid:
+            col_map[col_idx] = fid
+            col_source[col_idx] = 'rule'
+            col_confidence[col_idx] = 1.0
+        else:
+            unmatched_idx.append(col_idx)
+            unmatched_text.append(str(hdr))
+
+    if use_ml and unmatched_text:
+        clf = get_classifier()
+        preds = clf.predict_batch(unmatched_text, threshold=ml_threshold)
+        for col_idx, (fid, score, matched_example) in zip(unmatched_idx, preds):
+            if fid:
+                col_map[col_idx] = fid
+                col_source[col_idx] = 'ml'
+                col_confidence[col_idx] = round(score, 3)
+
+    return col_map, col_source, col_confidence
 
 
-def _merge_alias_and_model_prediction(text: str, sheet_name: str) -> Tuple[Optional[str], float]:
-    norm = _normalize_text(text)
-    if not norm:
-        return None, 0.0
+# ─── Strategy 2: Raw tabular layout (header row + data rows), ML-augmented ───
+def _parse_raw_layout(rows, use_ml=True):
+    """
+    Handles sheets where some early row is a header row with field names /
+    symbols / free-text labels, and subsequent rows are data.
 
-    for field, aliases in FIELD_ALIASES_NORMALIZED.items():
-        for alias in aliases:
-            if not alias:
-                continue
-            if alias == norm:
-                return field, 0.99
-            if len(alias.split()) > 1 and alias in norm:
-                return field, 0.96
-            if len(alias.split()) == 1 and alias in norm.split():
-                return field, 0.96
+    Multiple data rows = multiple readings → averaged automatically.
+    Unmatched headers are sent through the ML classifier as a fallback.
+    Returns (extracted_dict, raw_rows_list, sheet_summary, col_meta).
+    """
+    sample = rows[:HEADER_SCAN_ROWS]
+    header_row_idx = _find_header_row(sample)
 
-    return CLASSIFIER.predict(text, sheet_name=sheet_name)
+    if header_row_idx is None:
+        return {}, [], {}, {}
 
+    headers = rows[header_row_idx]
+    data_rows = rows[header_row_idx + 1:]
 
-def _parse_tabular_sheet(sheet_name: str, row_iter: Iterator[List[object]]):
-    buffered: List[List[object]] = []
-    for _ in range(HEADER_SCAN_ROWS):
-        try:
-            buffered.append(next(row_iter))
-        except StopIteration:
-            break
-
-    if not buffered:
-        return {}, [], {}
-
-    data_start = _guess_data_start(buffered)
-    header_rows = buffered[:max(data_start, 1)]
-    max_cols = max((len(r) for r in header_rows), default=0)
-    _ = _build_column_context(header_rows, max_cols)
-
-    col_map: Dict[int, str] = {}
-    confidence: Dict[int, float] = {}
-
-    # First pass: try combined header context row by row.
-    for col_idx in range(max_cols):
-        parts: List[str] = []
-        for row in header_rows:
-            if col_idx < len(row):
-                cell = row[col_idx]
-                if cell is None:
-                    continue
-                txt = str(cell).strip()
-                if txt and _looks_like_header_cell(txt):
-                    parts.append(txt)
-        header_text = " ".join(parts)
-
-        field_id, conf = _merge_alias_and_model_prediction(header_text, sheet_name)
-        if field_id:
-            col_map[col_idx] = field_id
-            confidence[col_idx] = conf
-
-    # Second pass: if not enough matches, try each header cell independently.
-    if len(col_map) < 2:
-        for col_idx in range(max_cols):
-            for row in header_rows:
-                if col_idx >= len(row):
-                    continue
-                cell = row[col_idx]
-                field_id, conf = _merge_alias_and_model_prediction(cell, sheet_name)
-                if field_id:
-                    col_map[col_idx] = field_id
-                    confidence[col_idx] = conf
-                    break
+    col_map, col_source, col_confidence = _map_columns_to_fields(headers, use_ml=use_ml)
 
     if not col_map:
-        return {}, [], {}
+        return {}, [], {}, {}
 
-    field_stats: Dict[str, FieldBucket] = defaultdict(FieldBucket)
-    raw_rows = []
+    # Collect numeric values per field across all data rows
+    field_values = {fid: [] for fid in col_map.values()}
+    for row in data_rows:
+        for col_idx, fid in col_map.items():
+            val = row[col_idx] if col_idx < len(row) else None
+            num = _to_num(val)
+            if num is not None:
+                field_values[fid].append(num)
 
-    data_rows = chain(buffered[data_start:], row_iter)
-    for row_index, row in enumerate(data_rows, start=data_start):
-        if not any(cell is not None and str(cell).strip() for cell in row):
-            continue
-
-        for col_idx, field_id in col_map.items():
-            if col_idx >= len(row):
-                continue
-            num = _to_num(row[col_idx])
-            if num is None:
-                continue
-            field_stats[field_id].add(num)
-
-        if len(raw_rows) < MAX_PREVIEW_ROWS:
-            preview = []
-            for col_idx, field_id in col_map.items():
-                val = row[col_idx] if col_idx < len(row) else None
-                preview.append({
-                    "col": col_idx,
-                    "field": field_id,
-                    "value": convert_json_safe(val),
-                })
-            raw_rows.append({"rowIndex": row_index + 1, "preview": preview})
-
-        if CHUNK_SIZE > 0 and (row_index - data_start + 1) % CHUNK_SIZE == 0:
-            pass
-
-    extracted = {fid: bucket.average for fid, bucket in field_stats.items()}
-    summary = {
-        fid: {
-            "count": bucket.count,
-            "values": bucket.preview_values,
-            "average": bucket.average,
+    extracted, raw_rows, sheet_summary = _finalize_field_values(field_values)
+    col_meta = {
+        col_idx: {
+            'fieldId': fid,
+            'header': str(headers[col_idx]),
+            'source': col_source[col_idx],
+            'confidence': col_confidence[col_idx],
         }
-        for fid, bucket in field_stats.items()
+        for col_idx, fid in col_map.items()
     }
-    return extracted, raw_rows, summary
+    return extracted, raw_rows, sheet_summary, col_meta
 
 
-def _parse_sheet_rows_stream(sheet_name: str, row_iter: Iterator[List[object]]):
-    buffered: List[List[object]] = []
-    for _ in range(min(HEADER_SCAN_ROWS, 30)):
-        try:
-            buffered.append(next(row_iter))
-        except StopIteration:
-            break
+def _finalize_field_values(field_values):
+    """Average collected numeric readings per field; build raw_rows + summary."""
+    extracted = {}
+    raw_rows = []
+    sheet_summary = {}
+    for fid, vals in field_values.items():
+        if not vals:
+            continue
+        avg = statistics.mean(vals)
+        extracted[fid] = avg
+        sheet_summary[fid] = {'count': len(vals), 'values': vals[:50], 'average': avg}
+        raw_rows.append({
+            'particulars': fid, 'uom': '', 'symbol': fid,
+            'value': avg, 'readings': len(vals),
+        })
+    return extracted, raw_rows, sheet_summary
 
-    ext1, raw1, summary1 = _parse_standard_cenpeep(buffered, sheet_name)
-    if len(ext1) >= 2:
+
+# ─── Per-sheet parser (tries both strategies) ─────────────────────────────────
+def _parse_sheet_rows(rows, sheet_name, use_ml=True):
+    """
+    Tries CenPeep column layout first, then raw tabular layout (ML-augmented).
+    Returns a dict with keys: extracted, rawRows, strategy, summary, columns.
+    """
+    # Strategy 1: standard CENPEEP layout
+    ext1, raw1 = _parse_cenpeep_layout(rows)
+    if len(ext1) >= 5:
         return {
-            "sheetName": sheet_name,
-            "strategy": "cenpeep_column",
-            "extracted": ext1,
-            "rawRows": raw1,
-            "summary": summary1,
+            'sheetName': sheet_name,
+            'strategy': 'cenpeep_column',
+            'extracted': ext1,
+            'rawRows': raw1,
+            'summary': {},
+            'columns': {},
         }
 
-    full_iter = iter(buffered + list(row_iter))
-    ext2, raw2, summary2 = _parse_tabular_sheet(sheet_name, full_iter)
+    # Strategy 2: raw tabular, with ML fallback for unrecognized headers
+    ext2, raw2, summary, col_meta = _parse_raw_layout(rows, use_ml=use_ml)
     if ext2:
+        ml_used = any(c['source'] == 'ml' for c in col_meta.values())
         return {
-            "sheetName": sheet_name,
-            "strategy": "tfidf_tabular_stream",
-            "extracted": ext2,
-            "rawRows": raw2,
-            "summary": summary2,
+            'sheetName': sheet_name,
+            'strategy': 'raw_tabular_ml' if ml_used else 'raw_tabular',
+            'extracted': ext2,
+            'rawRows': raw2,
+            'summary': summary,
+            'columns': col_meta,
         }
 
     return {
-        "sheetName": sheet_name,
-        "strategy": "unrecognized",
-        "extracted": {},
-        "rawRows": [],
-        "summary": {},
+        'sheetName': sheet_name,
+        'strategy': 'unrecognized',
+        'extracted': {},
+        'rawRows': [],
+        'summary': {},
+        'columns': {},
     }
 
 
-def parse_workbook(file_bytes, filename):
-    sheets = _read_all_sheets(file_bytes, filename)
+# ─── Workbook reader (chunked / streaming) ────────────────────────────────────
+def _iter_sheet_rows_streamed(ws, ext_xls=False, xlrd_sheet=None):
+    """
+    Yields rows one at a time from a worksheet without materializing the
+    whole sheet in memory. Works for both openpyxl read_only worksheets
+    and xlrd sheets (legacy .xls).
+    """
+    if ext_xls:
+        for r in range(xlrd_sheet.nrows):
+            yield [xlrd_sheet.cell_value(r, c) for c in range(xlrd_sheet.ncols)]
+    else:
+        for row in ws.iter_rows(values_only=True):
+            yield list(row)
+
+
+def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
+    """
+    Chunked version of sheet parsing for large sheets: reads CHUNK_ROWS rows
+    at a time, identifies the header row from the first chunk, maps columns
+    to fields once, then streams remaining chunks through the field-value
+    accumulator and discards each chunk immediately after — so memory stays
+    bounded by chunk size, not total sheet size.
+
+    Falls back cleanly to "unrecognized" if no header / no fields found.
+    Returns the same shape as _parse_sheet_rows().
+    """
+    chunk = []
+    header_row_idx = None
+    headers = None
+    col_map = col_source = col_confidence = None
+    field_values = {}
+    cenpeep_check_rows = []  # first rows, used to check for CenPeep column layout
+    row_count = 0
+
+    for row in row_iter:
+        row_count += 1
+        cenpeep_check_rows_cap = 200  # CenPeep layout is always near the top
+        if len(cenpeep_check_rows) < cenpeep_check_rows_cap:
+            cenpeep_check_rows.append(row)
+
+        if headers is None:
+            # Still hunting for the header row in the first few rows
+            chunk.append(row)
+            if len(chunk) >= HEADER_SCAN_ROWS:
+                idx = _find_header_row(chunk)
+                if idx is not None:
+                    header_row_idx = idx
+                    headers = chunk[header_row_idx]
+                    col_map, col_source, col_confidence = _map_columns_to_fields(
+                        headers, use_ml=use_ml
+                    )
+                    field_values = {fid: [] for fid in set(col_map.values())}
+                    # Process any data rows already buffered after the header
+                    for data_row in chunk[header_row_idx + 1:]:
+                        _accumulate_row(data_row, col_map, field_values)
+                    chunk = []
+                elif len(chunk) > HEADER_SCAN_ROWS * 4:
+                    # Header never found in a reasonable window — give up
+                    # gracefully rather than buffering the whole sheet.
+                    break
+            continue
+
+        # Header already known — accumulate this row directly, no buffering
+        _accumulate_row(row, col_map, field_values)
+
+    # First, check whether this is actually a strict CenPeep column-layout
+    # sheet (Particulars/UOM/Symbol/Formula/Value) — that strategy wins if
+    # it finds enough fields, same priority as the non-chunked path.
+    ext1, raw1 = _parse_cenpeep_layout(cenpeep_check_rows)
+    if len(ext1) >= 5:
+        return {
+            'sheetName': sheet_name,
+            'strategy': 'cenpeep_column',
+            'extracted': ext1,
+            'rawRows': raw1,
+            'summary': {},
+            'columns': {},
+            'rowsScanned': row_count,
+        }
+
+    if not col_map:
+        return {
+            'sheetName': sheet_name,
+            'strategy': 'unrecognized',
+            'extracted': {},
+            'rawRows': [],
+            'summary': {},
+            'columns': {},
+            'rowsScanned': row_count,
+        }
+
+    extracted, raw_rows, summary = _finalize_field_values(field_values)
+    ml_used = any(col_source.get(i) == 'ml' for i in col_map)
+    col_meta = {
+        col_idx: {
+            'fieldId': fid,
+            'header': str(headers[col_idx]),
+            'source': col_source[col_idx],
+            'confidence': col_confidence[col_idx],
+        }
+        for col_idx, fid in col_map.items()
+    }
+
+    return {
+        'sheetName': sheet_name,
+        'strategy': 'raw_tabular_ml_chunked' if ml_used else 'raw_tabular_chunked',
+        'extracted': extracted,
+        'rawRows': raw_rows,
+        'summary': summary,
+        'columns': col_meta,
+        'rowsScanned': row_count,
+    }
+
+
+def _accumulate_row(row, col_map, field_values):
+    """Pull numeric values for mapped columns out of one data row."""
+    for col_idx, fid in col_map.items():
+        val = row[col_idx] if col_idx < len(row) else None
+        num = _to_num(val)
+        if num is not None:
+            field_values.setdefault(fid, []).append(num)
+
+
+def _sheet_row_estimate(ws):
+    """Best-effort row count for an openpyxl worksheet (read_only safe)."""
+    try:
+        return ws.max_row or 0
+    except Exception:
+        return 0
+
+
+# ─── Main parse entry-point ───────────────────────────────────────────────────
+def parse_workbook(file_bytes, filename, use_ml=True):
+    """
+    Parse all sheets, automatically choosing chunked streaming for large
+    sheets (row count above LARGE_SHEET_ROW_THRESHOLD) and the simpler
+    in-memory path for small ones. Returns:
+      {
+        sheetResults: [ { sheetName, strategy, extracted, rawRows, summary, columns }, … ],
+        extracted:    { merged field dict — CenPeep sheet wins },
+        primarySheet: str,
+        totalFields:  int,
+        parseTimeMs:  float,
+      }
+    """
+    t_start = time.time()
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     sheet_results = []
-    merged_extracted: Dict[str, float] = {}
-    primary_sheet = sheets[0][0] if sheets else ""
 
-    for sheet_name, rows_factory, _, _ in sheets:
-        result = _parse_sheet_rows_stream(sheet_name, rows_factory())
-        sheet_results.append(result)
+    if ext == 'xls':
+        if not HAS_XLRD:
+            raise RuntimeError('xlrd not installed; cannot read .xls files')
+        wb = xlrd.open_workbook(file_contents=file_bytes)
+        for name in wb.sheet_names():
+            ws = wb.sheet_by_name(name)
+            row_iter = _iter_sheet_rows_streamed(None, ext_xls=True, xlrd_sheet=ws)
+            if ws.nrows > LARGE_SHEET_ROW_THRESHOLD:
+                result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
+            else:
+                rows = list(row_iter)
+                result = _parse_sheet_rows(rows, name, use_ml=use_ml)
+            sheet_results.append(result)
 
-    preferred_order = []
+    else:
+        if not HAS_OPENPYXL:
+            raise RuntimeError('openpyxl not installed')
+        # read_only=True streams the worksheet instead of materializing
+        # the whole workbook as Cell objects — this is the key change that
+        # lets large files (10MB+, wide sheets, 1000+ rows) parse without
+        # blowing up memory the way the original full-load approach did.
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        for name in wb.sheetnames:
+            ws = wb[name]
+            est_rows = _sheet_row_estimate(ws)
+            row_iter = _iter_sheet_rows_streamed(ws)
+            if est_rows > LARGE_SHEET_ROW_THRESHOLD:
+                result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
+            else:
+                rows = list(row_iter)
+                result = _parse_sheet_rows(rows, name, use_ml=use_ml)
+            sheet_results.append(result)
+        wb.close()
+
+    # Merge: generic sheets first, CenPeep sheet last (wins conflicts)
+    merged_extracted = {}
+    cenpeep_result = None
     for sr in sheet_results:
-        name = _normalize_text(sr["sheetName"])
-        if "cenpeep" in name:
-            preferred_order.insert(0, sr)
+        if 'cenpeep' in sr['sheetName'].lower():
+            cenpeep_result = sr
         else:
-            preferred_order.append(sr)
+            merged_extracted.update(sr['extracted'])
 
-    for sr in preferred_order:
-        merged_extracted.update(sr["extracted"])
-        if sr["extracted"] and not primary_sheet:
-            primary_sheet = sr["sheetName"]
+    primary_sheet = sheet_results[0]['sheetName'] if sheet_results else ''
+    if cenpeep_result:
+        merged_extracted.update(cenpeep_result['extracted'])
+        primary_sheet = cenpeep_result['sheetName']
 
-    if any("cenpeep" in _normalize_text(sr["sheetName"]) for sr in sheet_results):
-        primary_sheet = next(
-            sr["sheetName"]
-            for sr in sheet_results
-            if "cenpeep" in _normalize_text(sr["sheetName"])
-        )
-
-    result = {
-        "sheetResults": sheet_results,
-        "extracted": merged_extracted,
-        "primarySheet": primary_sheet,
-        "totalFields": len(merged_extracted),
-        "detectionModel": {
-            "type": "tfidf_header_matcher",
-            "trainingExamples": len(EXAMPLES),
-            "threshold": SIMILARITY_THRESHOLD,
-        },
+    return {
+        'sheetResults': sheet_results,
+        'extracted': merged_extracted,
+        'primarySheet': primary_sheet,
+        'totalFields': len(merged_extracted),
+        'parseTimeMs': round((time.time() - t_start) * 1000, 1),
     }
-    return convert_json_safe(result)
 
 
-@upload_bp.route("/", methods=["POST"])
+# ─── Route ────────────────────────────────────────────────────────────────────
+ALLOWED_EXTS = {'.xlsx', '.xls'}
+
+
+@upload_bp.route('/', methods=['POST'])
 def upload_file():
-    if "file" not in request.files:
-        return jsonify({"ok": False, "error": "No file uploaded"}), 400
+    if 'file' not in request.files:
+        return jsonify({'ok': False, 'error': 'No file uploaded'}), 400
 
-    f = request.files["file"]
+    f = request.files['file']
     if not f.filename:
-        return jsonify({"ok": False, "error": "Empty filename"}), 400
+        return jsonify({'ok': False, 'error': 'Empty filename'}), 400
 
-    ext = "." + f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
+    ext = '.' + f.filename.rsplit('.', 1)[-1].lower() if '.' in f.filename else ''
     if ext not in ALLOWED_EXTS:
-        return jsonify({"ok": False, "error": "Only .xlsx / .xls / .xlsm files are accepted"}), 400
+        return jsonify({'ok': False, 'error': 'Only .xlsx / .xls files are accepted'}), 400
 
     try:
         file_bytes = f.read()
-        result = parse_workbook(file_bytes, f.filename)
-
-        first_sheet_rows = result["sheetResults"][0]["rawRows"] if result["sheetResults"] else []
-
-        response = {
-            "ok": True,
-            "filename": f.filename,
+        result = parse_workbook(file_bytes, f.filename, use_ml=True)
+        return jsonify({
+            'ok': True,
+            'filename': f.filename,
+            'fileSizeMB': round(len(file_bytes) / (1024 * 1024), 2),
             **result,
-            "sheetName": result["primarySheet"],
-            "rawRows": first_sheet_rows,
-        }
-        return jsonify(convert_json_safe(response))
+            # Keep legacy fields for backward compat with existing frontend
+            'sheetName': result['primarySheet'],
+            'rawRows': result['sheetResults'][0]['rawRows'] if result['sheetResults'] else [],
+        })
+    except MemoryError:
+        return jsonify({
+            'ok': False,
+            'error': 'File is too large to process even with chunked parsing. '
+                     'Try splitting it into smaller sheets/files.',
+        }), 413
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@upload_bp.route('/retrain', methods=['POST'])
+def retrain_model():
+    """
+    Retrains the ML field classifier from the current contents of
+    ml/training_data.py and persists it to disk. Call this after editing
+    training_data.py (adding new header phrasings, fixing a mislabeled
+    example, etc.) so changes take effect without restarting the server.
+    """
+    try:
+        from ml.field_classifier import retrain_and_save
+        clf = retrain_and_save()
+        return jsonify({
+            'ok': True,
+            'trainingExamples': len(clf.train_labels),
+            'message': 'Field classifier retrained successfully.',
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500

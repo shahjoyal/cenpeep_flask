@@ -1,121 +1,76 @@
 import os
-from flask import Flask, send_from_directory, jsonify
+from flask import Flask, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 import pymongo
 
 load_dotenv()
 
-# Serve frontend files from /public
-app = Flask(__name__, static_folder="public", template_folder="public")
+app = Flask(__name__, static_folder='static', template_folder='templates')
 CORS(app)
-
-# Allow bigger uploads; default 50 MB, override with MAX_UPLOAD_MB.
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
-app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB (was 10MB — real plant
+                                                       # sheets with many tags/rows
+                                                       # exceeded the old limit)
 
 # MongoDB connection
-MONGO_URI = os.getenv("MONGODB_URI", "")
+MONGO_URI = os.getenv('MONGODB_URI', '')
 db = None
-
-if MONGO_URI and "<username>" not in MONGO_URI:
+if MONGO_URI and '<username>' not in MONGO_URI:
     try:
         client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
         client.server_info()
         db = client.get_default_database()
-        print("✅ MongoDB connected")
+        print('✅ MongoDB connected')
     except Exception as e:
-        print(f"❌ MongoDB connection failed: {e}")
+        print(f'❌ MongoDB connection failed: {e}')
 else:
-    print("⚠️  MONGODB_URI not set — sessions disabled")
+    print('⚠️  MONGODB_URI not set — sessions disabled')
 
-app.config["DB"] = db
+app.config['DB'] = db
 
 # Register blueprints
 from routes.upload import upload_bp
 from routes.sessions import sessions_bp
 
-app.register_blueprint(upload_bp, url_prefix="/api/upload")
-app.register_blueprint(sessions_bp, url_prefix="/api/sessions")
+app.register_blueprint(upload_bp, url_prefix='/api/upload')
+app.register_blueprint(sessions_bp, url_prefix='/api/sessions')
 
-
-@app.route("/api/health")
+# Health check
+@app.route('/api/health')
 def health():
-    db_status = "disconnected"
+    db_status = 'disconnected'
     if db is not None:
         try:
-            db.command("ping")
-            db_status = "connected"
-        except Exception:
-            db_status = "disconnected"
-
-    return jsonify({
-        "ok": True,
-        "db": db_status,
-        "maxUploadMB": MAX_UPLOAD_MB
-    })
+            db.command('ping')
+            db_status = 'connected'
+        except:
+            db_status = 'disconnected'
+    return {'ok': True, 'db': db_status}
 
 
-@app.route("/ping")
-def ping():
-    public_dir = app.static_folder or os.path.join(app.root_path, "public")
-    files = []
+@app.errorhandler(413)
+def too_large(e):
+    return {
+        'ok': False,
+        'error': f"File exceeds the {app.config['MAX_CONTENT_LENGTH'] // (1024*1024)}MB upload limit.",
+    }, 413
 
-    if os.path.isdir(public_dir):
-        for root, dirs, filenames in os.walk(public_dir):
-            for f in filenames:
-                files.append(os.path.relpath(os.path.join(root, f), public_dir))
-
-    return jsonify({
-        "ok": True,
-        "cwd": os.getcwd(),
-        "root": app.root_path,
-        "public": public_dir,
-        "files": sorted(files)
-    })
-
-
-@app.route("/public/<path:filename>")
+# Serve static files from local public/
+@app.route('/public/<path:filename>')
 def public_files(filename):
-    public_dir = app.static_folder or os.path.join(app.root_path, "public")
-    file_path = os.path.join(public_dir, filename)
+    return send_from_directory(os.path.join(app.root_path, 'public'), filename)
 
-    if os.path.isfile(file_path):
-        return send_from_directory(public_dir, filename)
-
-    return jsonify({
-        "ok": False,
-        "error": "File not found in public folder",
-        "requested": filename
-    }), 404
-
-
-@app.route("/")
-@app.route("/<path:path>")
-def spa(path="index.html"):
-    public_dir = app.static_folder or os.path.join(app.root_path, "public")
-    requested_file = os.path.join(public_dir, path)
-    index_file = os.path.join(public_dir, "index.html")
-
-    if os.path.isfile(requested_file):
-        return send_from_directory(public_dir, path)
-
-    if os.path.isfile(index_file):
-        return send_from_directory(public_dir, "index.html")
-
-    return jsonify({
-        "ok": False,
-        "error": "public/index.html not found",
-        "root": app.root_path,
-        "public": public_dir
-    }), 404
+# SPA fallback
+@app.route('/')
+@app.route('/<path:path>')
+def spa(path='index.html'):
+    pub = os.path.join(app.root_path, 'public')
+    if path and os.path.exists(os.path.join(pub, path)):
+        return send_from_directory(pub, path)
+    return send_from_directory(pub, 'index.html')
 
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 3000))
-    print(f"🚀 CENPEEP Flask running at http://localhost:{port}")
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=os.getenv("FLASK_ENV") != "production"
-    )
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 3000))
+    print(f'🚀 CENPEEP Flask running at http://localhost:{port}')
+    app.run(host='0.0.0.0', port=port, debug=True)

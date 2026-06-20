@@ -82,23 +82,39 @@ function initUpload() {
 
       // ── Build sheet summary panel ────────────────────────────────────────
       const sheetResults = data.sheetResults || [];
+      const strategyLabel = {
+        cenpeep_column:          '(CenPeep layout)',
+        raw_tabular:             '(raw data, averaged)',
+        raw_tabular_ml:          '(raw data + AI field detection)',
+        raw_tabular_chunked:     '(large sheet, chunked)',
+        raw_tabular_ml_chunked:  '(large sheet, chunked + AI field detection)',
+        unrecognized:            '(no fields found)',
+      };
       const summaryLines = sheetResults.map(sr => {
         const n     = Object.keys(sr.extracted || {}).length;
-        const strat = sr.strategy === 'cenpeep_column' ? '(CenPeep layout)'
-                    : sr.strategy === 'raw_tabular'    ? '(raw data, averaged)'
-                    : '(no fields found)';
+        const strat = strategyLabel[sr.strategy] || '';
+
         // Show averaging info if relevant
         const avgInfo = Object.entries(sr.summary || {})
           .filter(([, s]) => s.count > 1)
           .map(([fid, s]) => `${fid}: avg of ${s.count} readings = ${s.average.toFixed(2)}`);
+
+        // Show which fields were found via the ML classifier (vs exact rule match)
+        const mlCols = Object.values(sr.columns || {}).filter(c => c.source === 'ml');
+        const mlInfo = mlCols.map(c => `"${c.header}" → ${c.fieldId} (${Math.round(c.confidence*100)}% confidence)`);
+
         let line = `📄 <b>${sr.sheetName}</b> — ${n} fields ${strat}`;
+        if (sr.rowsScanned) line += ` · ${sr.rowsScanned.toLocaleString()} rows scanned`;
         if (avgInfo.length) line += `<br><small style="color:#6b7280;padding-left:1em">↳ Averaged: ${avgInfo.join('; ')}</small>`;
+        if (mlInfo.length)  line += `<br><small style="color:#7c3aed;padding-left:1em">🤖 AI-detected: ${mlInfo.slice(0,6).join('; ')}${mlInfo.length>6 ? ` +${mlInfo.length-6} more` : ''}</small>`;
         return line;
       }).join('<br>');
 
+      const timeNote = data.parseTimeMs ? ` in ${(data.parseTimeMs/1000).toFixed(1)}s` : '';
+
       // Inject summary into status element (allow HTML)
       statusEl.className   = 'upload-status success';
-      statusEl.innerHTML   = `✓ <b>${populated} fields</b> auto-populated from "${data.filename}"
+      statusEl.innerHTML   = `✓ <b>${populated} fields</b> auto-populated from "${data.filename}" (${data.fileSizeMB || '?'} MB)${timeNote}
         <br><small style="color:#6b7280">${summaryLines}</small>`;
 
       showToast(`Excel imported — ${populated} fields auto-populated from ${sheetResults.length} sheet(s)`, 'success');
