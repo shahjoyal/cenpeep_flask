@@ -17,18 +17,22 @@ TRAINING_EXAMPLES = [
     # ── L — Unit Load ──────────────────────────────────────────────────────
     ("Load", "L"), ("Unit Load", "L"), ("Load MW", "L"), ("Generation Load", "L"),
     ("MW Load", "L"), ("Gross Load", "L"), ("Unit Load MW", "L"), ("Generation", "L"),
-    ("Power Generation", "L"), ("Load (MW)", "L"),
+    ("Power Generation", "L"), ("Load (MW)", "L"), ("GENERATION", "L"), ("Net Generation", "L"),
 
     # ── Ffw — Steam Flow / Feed water flow ────────────────────────────────
     ("Steam Flow", "Ffw"), ("Main Steam Flow", "Ffw"), ("Feed water Flow", "Ffw"),
     ("Feedwater Flow", "Ffw"), ("FW Flow", "Ffw"), ("MS Flow", "Ffw"),
-    ("Feed Water Flow TPH", "Ffw"), ("Boiler Feed Water Flow", "Ffw"),
+    ("Feed Water Flow TPH", "Ffw"), ("Boiler Feed Water Flow", "Ffw"), ("MAIN STEAM Flow", "Ffw"),
+    ("FW FLOW", "Ffw"), ("FEED WATER FLOW", "Ffw"),
 
     # ── Fin — Total Coal Flow ──────────────────────────────────────────────
     ("Total Coal consumption", "Fin"), ("Coal Flow", "Fin"), ("Total Coal Flow", "Fin"),
     ("Coal Consumption", "Fin"), ("Total Coal consumption TPH", "Fin"),
     ("Coal Feed Rate", "Fin"), ("Fuel Flow", "Fin"), ("Total Fuel Flow", "Fin"),
-    ("Coal Rate", "Fin"), ("Total Coal Firing Rate", "Fin"),
+    ("Coal Rate", "Fin"), ("Total Coal Firing Rate", "Fin"), ("Feeder A Coal flow rate", "Fin"),
+    ("Feeder B Coal flow rate", "Fin"), ("Feeder C Coal flow rate", "Fin"),
+    ("Feeder D Coal flow rate", "Fin"), ("Feeder E Coal flow rate", "Fin"),
+    ("Feeder F Coal flow rate", "Fin"), ("Feeder G Coal flow rate", "Fin"),
 
     # ── Cba — Unburnt C Bottom Ash ────────────────────────────────────────
     ("Unburnt Carbon Bottom Ash", "Cba"), ("Bottom Ash Unburnt Carbon", "Cba"),
@@ -51,7 +55,7 @@ TRAINING_EXAMPLES = [
     # ── M — Moisture (coal proximate, "as fired") ─────────────────────────
     ("Moisture", "M"), ("Moisture %", "M"), ("IM %", "M"), ("Inherent Moisture", "M"),
     ("Total Moisture", "M"), ("TM %", "M"), ("Moisture As Received", "M"),
-    ("Coal Moisture", "M"), ("M %", "M"),
+    ("Coal Moisture", "M"), ("M %", "M"), ("T.M. %", "M"), ("TM%", "M"),
 
     # ── A — Ash ──────────────────────────────────────────────────────────────
     ("Ash", "A"), ("Ash %", "A"), ("Ash Content", "A"), ("ASH  %", "A"),
@@ -68,7 +72,7 @@ TRAINING_EXAMPLES = [
     # ── GCV — Gross Calorific Value (as fired) ────────────────────────────
     ("GCV", "GCV"), ("Gross Calorific Value", "GCV"), ("GCV kcal/kg", "GCV"),
     ("G.C.V. (KCal/Kg)", "GCV"), ("Calorific Value", "GCV"), ("GCV As Received", "GCV"),
-    ("Coal GCV", "GCV"),
+    ("Coal GCV", "GCV"), ("G.C.V. (KCal/Kg)", "GCV"),
 
     # ── S — Sulfur ────────────────────────────────────────────────────────────
     ("Sulfur", "S"), ("Sulphur", "S"), ("Sulfur %", "S"), ("S %", "S"),
@@ -77,7 +81,8 @@ TRAINING_EXAMPLES = [
     # ── O2in — O2 APH In ────────────────────────────────────────────────────
     ("O2 at APH Inlet", "O2in"), ("O2 APH In", "O2in"), ("O2 at APH I/L Left", "O2in"),
     ("O2 at APH I/L Right", "O2in"), ("O2 APH Inlet %", "O2in"), ("Oxygen APH Inlet", "O2in"),
-    ("O2 Air Preheater Inlet", "O2in"),
+    ("O2 Air Preheater Inlet", "O2in"), ("O2 IN FG BEFORE APH", "O2in"), 
+    ("O2 BEFORE APH", "O2in"), ("O2 IN FG BEFORE  APH", "O2in"),
 
     # ── CO2in — CO2 APH In ──────────────────────────────────────────────────
     ("CO2 at APH Inlet", "CO2in"), ("CO2 APH In", "CO2in"), ("CO2 Air Preheater Inlet", "CO2in"),
@@ -112,6 +117,9 @@ TRAINING_EXAMPLES = [
     ("APH I/L FG Temp 1 Left", "Tgi"), ("APH I/L FG Temp 1 Right", "Tgi"),
     ("APH I/L FG Temp 2 Left", "Tgi"), ("APH I/L FG Temp 2 Right", "Tgi"),
     ("APH Inlet FG Temperature Left side", "Tgi"), ("APH Inlet FG Temperature Right side", "Tgi"),
+    ("Primary APH I/L FG Temp (L)", "Tgi"), ("Primary APH I/L FG Temp (R)", "Tgi"),
+    ("Secondry APH I/L FG Temp (Left)", "Tgi"), ("Secondry APH I/L FG Temp (Right)", "Tgi"),
+    ("Secondry APH I/L FG Temp  (Left)", "Tgi"), ("Secondry APH I/L FG Temp  (Right)", "Tgi"),
 
     # ── Tgo — FG Temp APH Out ────────────────────────────────────────────────
     ("Flue Gas Temp APH Outlet", "Tgo"), ("FG Temp APH Out", "Tgo"),
@@ -124,6 +132,8 @@ TRAINING_EXAMPLES = [
     ("APH O/L FG Temp 2 Left", "Tgo"), ("APH O/L FG Temp 2 Right", "Tgo"),
     ("APH O/L FG Temp 3 Left", "Tgo"), ("APH O/L FG Temp 3 Right", "Tgo"),
     ("APH Outlet FG Temperature Left side", "Tgo"), ("APH Outlet FG Temperature Right side", "Tgo"),
+    ("Primary APH O/L FG Temp (left)", "Tgo"), ("Primary APH O/L FG Temp (Right)", "Tgo"),
+    ("Secondry APH O/L FG Temp  (Left)", "Tgo"), ("Secondry APH O/L FG Temp  (Right)", "Tgo"),
 
     # ── Boiler outlet main steam temp has no dedicated CENPEEP symbol in
     #    this field set — it stays unmatched by design (see OUT_OF_SCOPE
@@ -139,7 +149,8 @@ TRAINING_EXAMPLES = [
     # outlet) is the COLD/pre-APH reading — confirmed against real plant
     # data where this column reads ~30-40°C vs ~380°C for the windbox side.
     ("PAF-A O/L PA Temp", "Tpai"), ("PAF O/L PA Temp", "Tpai"),
-    ("Primary Air Fan Outlet Temperature", "Tpai"),
+    ("Primary Air Fan Outlet Temperature", "Tpai"), ("AH A PA I/L TEMP", "Tpai"),
+    ("AH B PA I/L TEMP", "Tpai"), ("AH A PA I/L Temp", "Tpai"), ("AH B PA I/L Temp", "Tpai"),
 
     # ── Tpao — PA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
     ("Primary Air Temp Out", "Tpao"), ("PA Temp Out", "Tpao"),
@@ -148,7 +159,9 @@ TRAINING_EXAMPLES = [
     # NOTE: "Boiler side PA Temp" is the HOT/post-APH reading in real plant
     # data (~380°C, entering the mills/furnace) — confirmed against sample data.
     ("Boiler side A PA Temp", "Tpao"), ("Boiler side B PA Temp", "Tpao"),
-    ("Boiler side PA Temperature", "Tpao"),
+    ("Boiler side PA Temperature", "Tpao"), ("AH A PA O/L TEMP", "Tpao"),
+    ("AH B PA O/L TEMP", "Tpao"), ("AH A PA O/L Temp", "Tpao"),
+    ("AH B PA O/L Temp", "Tpao"),
 
     # ── Tsai — SA Temp In (APH inlet / fan-outlet side, COLD) ────────────────
     ("Secondary Air Temp In", "Tsai"), ("SA Temp In", "Tsai"),
@@ -157,7 +170,8 @@ TRAINING_EXAMPLES = [
     # NOTE: "FDF O/L SA Temp" (Forced Draft Fan outlet) is the COLD/pre-APH
     # reading in real plant data (~30°C) — confirmed against sample data.
     ("FDF-A O/L SA Temp", "Tsai"), ("FDF O/L SA Temp", "Tsai"),
-    ("Forced Draft Fan Outlet Temperature", "Tsai"),
+    ("Forced Draft Fan Outlet Temperature", "Tsai"), ("AH A SA I/L TEMP", "Tsai"),
+    ("AH B SA I/L TEMP", "Tsai"), ("AH A SA I/L Temp", "Tsai"), ("AH B SA I/L Temp", "Tsai"),
 
     # ── Tsao — SA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
     ("Secondary Air Temp Out", "Tsao"), ("SA Temp Out", "Tsao"),
@@ -166,17 +180,21 @@ TRAINING_EXAMPLES = [
     # NOTE: "Boiler side SA Temp" is the HOT/post-APH reading in real plant
     # data (~370°C, entering the windbox) — confirmed against sample data.
     ("Boiler side A SA Temp", "Tsao"), ("Boiler side B SA Temp", "Tsao"),
-    ("Boiler side SA Temperature", "Tsao"),
+    ("Boiler side SA Temperature", "Tsao"), ("AH A SA O/L TEMP", "Tsao"),
+    ("AH B SA O/L TEMP", "Tsao"), ("AH A SA O/L Temp", "Tsao"),
+    ("AH B SA O/L Temp", "Tsao"),
 
     # ── Fsa — SA Flow ──────────────────────────────────────────────────────────
     ("Secondary Air Flow", "Fsa"), ("SA Flow", "Fsa"), ("SA air flow", "Fsa"),
     ("Boiler side A SA flow", "Fsa"), ("Boiler side B SA flow", "Fsa"),
-    ("Total Secondary Air Flow", "Fsa"),
+    ("Total Secondary Air Flow", "Fsa"), ("SA FLOW TO FURNACE - L", "Fsa"),
+    ("SA FLOW TO FURNACE - R", "Fsa"), ("SA FLOW TO FURNACE", "Fsa"),
 
     # ── Fpa — PA Flow ──────────────────────────────────────────────────────────
     ("Primary Air Flow", "Fpa"), ("PA Flow", "Fpa"), ("PA air flow", "Fpa"),
     ("Coal Mill A PA Flow", "Fpa"), ("Coal Mill PA Flow", "Fpa"),
-    ("Total Primary Air Flow", "Fpa"),
+    ("Total Primary Air Flow", "Fpa"), ("TOTAL PA FLOW", "Fpa"),
+    ("Total PA Flow", "Fpa"),
 
     # ── Tref — Ambient / Reference Temp ─────────────────────────────────────
     ("Ambient Temperature", "Tref"), ("Reference Temperature", "Tref"),
@@ -246,7 +264,12 @@ OUT_OF_SCOPE_EXAMPLES = [
     "Furnace exit FG temp", "Furnace exit gas temperature",
     "ECO Outlet FG Temp", "Economizer Outlet Gas Temp",
     "Economizer Outlet Flue Gas Temperature", "ECO O/L FG Temp Left",
-    "ECO O/L FG Temp Right", "Economizer exit temperature",
+    "ECO O/L FG Temp Right", "Economizer exit temperature", "MAIN STEAM Pressure",
+    "MAIN STEAM Temp", "CRH STEAM", "HRH STEAM TEMP", "CONDENSOR VACCUM",
+    "SH SPARY FLOW(L)", "SH SPARY FLOW(R)", "RH SPARY FLOW(L)", "RH SPARY FLOW(R)",
+    "HPH-5A EXTRACTION STEAM PRESSURE", "HPH -5A EXTRACTION STEAM TEMPERATURE",
+    "PA Fan-A MTR CURRENT", "PA Fan-B MTR CURRENT", "FDF-A MTR CURRENT",
+    "FDF-B MTR CURRENT", "SCC",
 ]
 
 def get_training_data():
