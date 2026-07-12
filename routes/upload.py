@@ -576,7 +576,7 @@ def parse_workbook(file_bytes, filename, use_ml=True):
 
 
 # ─── Route ────────────────────────────────────────────────────────────────────
-ALLOWED_EXTS = {'.xlsx', '.xls'}
+ALLOWED_EXTS = {'.xlsx', '.xls', '.xlsm'}
 
 
 @upload_bp.route('/', methods=['POST'])
