@@ -636,7 +636,7 @@ def upload_file():
 
     ext = '.' + f.filename.rsplit('.', 1)[-1].lower() if '.' in f.filename else ''
     if ext not in ALLOWED_EXTS:
-        return jsonify({'ok': False, 'error': 'Only .xlsx / .xls files are accepted'}), 400
+        return jsonify({'ok': False, 'error': 'Only .xlsx / .xls / .xlsm files are accepted'}), 400
 
     try:
         file_bytes = f.read()
