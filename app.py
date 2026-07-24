@@ -61,7 +61,7 @@ def too_large(e):
 def public_files(filename):
     return send_from_directory(os.path.join(app.root_path, 'public'), filename)
 
-# SPA fallback
+# SPAas fallback
 @app.route('/')
 @app.route('/<path:path>')
 def spa(path='index.html'):
