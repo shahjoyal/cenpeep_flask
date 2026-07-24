@@ -105,8 +105,8 @@ function initUpload() {
 
         let line = `📄 <b>${sr.sheetName}</b> — ${n} fields ${strat}`;
         if (sr.rowsScanned) line += ` · ${sr.rowsScanned.toLocaleString()} rows scanned`;
-        if (avgInfo.length) line += `<br><small style="color:#6b7280;padding-left:1em">↳ Averaged: ${avgInfo.join('; ')}</small>`;
-        if (mlInfo.length)  line += `<br><small style="color:#7c3aed;padding-left:1em">🤖 AI-detected: ${mlInfo.slice(0,6).join('; ')}${mlInfo.length>6 ? ` +${mlInfo.length-6} more` : ''}</small>`;
+        if (avgInfo.length) line += `<br><small style="color:#94a3b8;padding-left:1em">↳ Averaged: ${avgInfo.join('; ')}</small>`;
+        if (mlInfo.length)  line += `<br><small style="color:#a78bfa;padding-left:1em">🤖 AI-detected: ${mlInfo.slice(0,6).join('; ')}${mlInfo.length>6 ? ` +${mlInfo.length-6} more` : ''}</small>`;
         return line;
       }).join('<br>');
 
@@ -115,7 +115,7 @@ function initUpload() {
       // Inject summary into status element (allow HTML)
       statusEl.className   = 'upload-status success';
       statusEl.innerHTML   = `✓ <b>${populated} fields</b> auto-populated from "${data.filename}" (${data.fileSizeMB || '?'} MB)${timeNote}
-        <br><small style="color:#6b7280">${summaryLines}</small>`;
+        <br><small style="color:#94a3b8">${summaryLines}</small>`;
 
       showToast(`Excel imported — ${populated} fields auto-populated from ${sheetResults.length} sheet(s)`, 'success');
 
