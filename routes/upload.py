@@ -52,29 +52,16 @@ import statistics
 from flask import Blueprint, request, jsonify
 
 try:
+    import python_calamine
+    HAS_CALAMINE = True
+except ImportError:
+    HAS_CALAMINE = False
+
+try:
     import openpyxl
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
-
-
-def _is_readable_worksheet(ws):
-    """
-    True if `ws` is a sheet we can actually pull rows from.
-
-    Chartsheets (and any other non-data sheet type, e.g. dialog/macro
-    sheets in some legacy workbooks) don't expose iter_rows/cells the way
-    a normal worksheet does — trying to read them the same way raises
-    "'Chartsheet' object has no attribute 'iter_rows'".
-
-    NOTE: we deliberately check by capability (hasattr) rather than
-    isinstance(ws, openpyxl.worksheet.worksheet.Worksheet) — in
-    read_only=True mode (used below for streaming), real data sheets come
-    back as openpyxl.worksheet._read_only.ReadOnlyWorksheet, which is a
-    *different* class that does NOT inherit from Worksheet, so an
-    isinstance check against Worksheet would incorrectly skip every sheet.
-    """
-    return hasattr(ws, 'iter_rows')
 
 try:
     import xlrd
@@ -132,17 +119,6 @@ LABEL_ALIASES = {
     'pa flow': 'Fpa', 'sa flow': 'Fsa',
     'unburnt bottom': 'Cba', 'unburnt fly': 'Cfa',
     'fly ash': 'Pfa', 'bottom ash': 'Pba',
-
-    # ── Aliases added for the Unit 6 operating-parameters workbook ────────
-    'total unit generation': 'L', 'unit generation': 'L', 'gross generation': 'L',
-    'main steam flow': 'Ffw', 'feed water flow': 'Ffw', 'feedwater flow': 'Ffw',
-    'total coal flow': 'Fin',
-    'gah i/l o2 left': 'O2in', 'gah i/l o2 right': 'O2in', 'gah i/l o2 average': 'O2in',
-    'gah o/l o2 left': 'O2out', 'gah o/l o2 right': 'O2out', 'gah o/l o2 average': 'O2out',
-    'gah i/l temp (left)': 'Tgi', 'gah i/l temp (right)': 'Tgi', 'gah i/l temp average': 'Tgi',
-    'gah o/l temp average': 'Tgo',
-    'ubc in bottom ash': 'Cba', 'ubc in fly ash': 'Cfa',
-    'gcv kcal/kg': 'GCV',
 }
 
 
@@ -233,21 +209,46 @@ def _parse_cenpeep_layout(rows):
 
 
 # ─── Header row detection (real sheets often bury the header a few rows down) ─
-def _find_header_row(sample_rows):
+def _find_header_row(sample_rows, use_ml=True):
     """
     Scans the first few rows of a sheet and picks the one most likely to be
-    a header row: most non-empty string cells, few/no numeric cells.
-    Returns the row index (0-based, relative to sample_rows) or None.
+    a header row.
+
+    Some real plant exports stack MULTIPLE header-shaped rows on top of each
+    other before the data starts — e.g. row0 = human-readable description
+    ("Main Steam Flow"), row1 = an aggregation label repeated across every
+    column ("Hourly Average"), row2 = the raw PI/DCS tag code
+    ("U6_MN_STM_TOT_FL"). All three are "mostly text, few numbers", so a
+    pure text-density heuristic can't tell them apart — and can easily pick
+    the least useful one (a tag-code row scores just as high on density as
+    the readable row, sometimes higher if it has fewer blank/merged cells).
+
+    So: first shortlist rows that look header-shaped (mostly text, few
+    numbers), then, among the shortlist, actually try mapping each one to
+    CENPEEP fields and pick whichever row yields the most matched fields.
+    This directly optimizes for what the header row is FOR, instead of a
+    proxy heuristic. Text-density score is only used as a tie-breaker.
     """
-    best_idx, best_score = None, 0
+    candidates = []
     for i, row in enumerate(sample_rows):
         str_cells = sum(1 for c in row if isinstance(c, str) and c.strip())
         num_cells = sum(1 for c in row if isinstance(c, (int, float)))
-        # A header row should be mostly text, not numbers
         score = str_cells - num_cells
-        if str_cells >= 3 and score > best_score:
-            best_score = score
-            best_idx = i
+        if str_cells >= 3:
+            candidates.append((i, score, row))
+
+    if not candidates:
+        return None
+
+    best_idx, best_field_count, best_score = None, -1, -10 ** 9
+    for i, score, row in candidates:
+        col_map, _, _ = _map_columns_to_fields(row, use_ml=use_ml)
+        field_count = len(set(col_map.values()))
+        if field_count > best_field_count or (
+            field_count == best_field_count and score > best_score
+        ):
+            best_idx, best_field_count, best_score = i, field_count, score
+
     return best_idx
 
 
@@ -305,7 +306,7 @@ def _parse_raw_layout(rows, use_ml=True):
     Returns (extracted_dict, raw_rows_list, sheet_summary, col_meta).
     """
     sample = rows[:HEADER_SCAN_ROWS]
-    header_row_idx = _find_header_row(sample)
+    header_row_idx = _find_header_row(sample, use_ml=use_ml)
 
     if header_row_idx is None:
         return {}, [], {}, {}
@@ -403,12 +404,15 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True):
 def _iter_sheet_rows_streamed(ws, ext_xls=False, xlrd_sheet=None):
     """
     Yields rows one at a time from a worksheet without materializing the
-    whole sheet in memory. Works for both openpyxl read_only worksheets
-    and xlrd sheets (legacy .xls).
+    whole sheet in memory. Works for openpyxl read_only worksheets,
+    xlrd sheets (legacy .xls fallback), and calamine sheets.
     """
     if ext_xls:
         for r in range(xlrd_sheet.nrows):
             yield [xlrd_sheet.cell_value(r, c) for c in range(xlrd_sheet.ncols)]
+    elif HAS_CALAMINE and isinstance(ws, python_calamine.CalamineSheet):
+        for row in ws.iter_rows():
+            yield row
     else:
         for row in ws.iter_rows(values_only=True):
             yield list(row)
@@ -443,7 +447,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
             # Still hunting for the header row in the first few rows
             chunk.append(row)
             if len(chunk) >= HEADER_SCAN_ROWS:
-                idx = _find_header_row(chunk)
+                idx = _find_header_row(chunk, use_ml=use_ml)
                 if idx is not None:
                     header_row_idx = idx
                     headers = chunk[header_row_idx]
@@ -548,7 +552,44 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     sheet_results = []
 
-    if ext == 'xls':
+    if HAS_CALAMINE:
+        # calamine (Rust) reads the workbook's shared strings/values directly
+        # without building openpyxl's Python style-object graph. This matters
+        # a lot in practice: real plant/historian exports often carry tens of
+        # thousands of near-duplicate per-cell styles, and openpyxl's style
+        # resolution during load_workbook() can dominate parse time — e.g. a
+        # ~5MB sheet with ~46,000 named styles took ~26s to even open with
+        # openpyxl vs ~0.1s with calamine. This is what makes parsing
+        # 100MB-class uploads practical within a normal request timeout.
+        wb = python_calamine.CalamineWorkbook.from_filelike(io.BytesIO(file_bytes))
+        for meta in wb.sheets_metadata:
+            name = meta.name
+            # Skip chart sheets / dialog sheets / macro sheets — they carry
+            # no tabular cell data. Checked via explicit sheet-type metadata
+            # (robust) rather than trying to read them and catching the
+            # resulting AttributeError.
+            if meta.typ != python_calamine.SheetTypeEnum.WorkSheet:
+                sheet_results.append({
+                    'sheetName': name,
+                    'strategy': 'skipped_non_worksheet',
+                    'extracted': {},
+                    'rawRows': [],
+                    'summary': {},
+                    'columns': {},
+                    'rowsScanned': 0,
+                })
+                continue
+            ws = wb.get_sheet_by_name(name)
+            est_rows = ws.height or 0
+            row_iter = _iter_sheet_rows_streamed(ws)
+            if est_rows > LARGE_SHEET_ROW_THRESHOLD:
+                result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
+            else:
+                rows = list(row_iter)
+                result = _parse_sheet_rows(rows, name, use_ml=use_ml)
+            sheet_results.append(result)
+
+    elif ext == 'xls':
         if not HAS_XLRD:
             raise RuntimeError('xlrd not installed; cannot read .xls files')
         wb = xlrd.open_workbook(file_contents=file_bytes)
@@ -564,7 +605,7 @@ def parse_workbook(file_bytes, filename, use_ml=True):
 
     else:
         if not HAS_OPENPYXL:
-            raise RuntimeError('openpyxl not installed')
+            raise RuntimeError('Neither python-calamine nor openpyxl is installed')
         # read_only=True streams the worksheet instead of materializing
         # the whole workbook as Cell objects — this is the key change that
         # lets large files (10MB+, wide sheets, 1000+ rows) parse without
@@ -572,13 +613,14 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         for name in wb.sheetnames:
             ws = wb[name]
-            # Chartsheets (and any other non-data sheet type, e.g. dialog
-            # sheets/macro sheets in some legacy workbooks) don't expose
-            # iter_rows/cells the way a normal Worksheet does — trying to
-            # read them the same way blows up with
-            # "'Chartsheet' object has no attribute 'iter_rows'".
-            # Skip anything that isn't a real Worksheet instead of crashing.
-            if not _is_readable_worksheet(ws):
+            # Chartsheets (and other non-worksheet sheet types, e.g. dialogsheets)
+            # have no cell grid and no iter_rows() — attempting to read them the
+            # same way as a normal worksheet raises
+            # "'Chartsheet' object has no attribute 'iter_rows'". Skip them
+            # instead of crashing the whole upload. Checked by capability
+            # (has iter_rows) rather than isinstance, since read_only=True
+            # workbooks use ReadOnlyWorksheet, not the normal Worksheet class.
+            if not hasattr(ws, 'iter_rows'):
                 sheet_results.append({
                     'sheetName': name,
                     'strategy': 'skipped_non_worksheet',
@@ -586,6 +628,7 @@ def parse_workbook(file_bytes, filename, use_ml=True):
                     'rawRows': [],
                     'summary': {},
                     'columns': {},
+                    'rowsScanned': 0,
                 })
                 continue
             est_rows = _sheet_row_estimate(ws)
@@ -607,7 +650,14 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         else:
             merged_extracted.update(sr['extracted'])
 
-    primary_sheet = sheet_results[0]['sheetName'] if sheet_results else ''
+    # Fallback primary sheet: prefer whichever sheet actually produced the
+    # most fields, rather than unconditionally the workbook's first sheet —
+    # a chart sheet, an empty cover sheet, or a sheet openpyxl/calamine just
+    # happens to list first can otherwise "win" despite contributing nothing.
+    if sheet_results:
+        primary_sheet = max(sheet_results, key=lambda sr: len(sr['extracted']))['sheetName']
+    else:
+        primary_sheet = ''
     if cenpeep_result:
         merged_extracted.update(cenpeep_result['extracted'])
         primary_sheet = cenpeep_result['sheetName']
@@ -641,6 +691,10 @@ def upload_file():
     try:
         file_bytes = f.read()
         result = parse_workbook(file_bytes, f.filename, use_ml=True)
+        primary_sheet_result = next(
+            (sr for sr in result['sheetResults'] if sr['sheetName'] == result['primarySheet']),
+            result['sheetResults'][0] if result['sheetResults'] else None,
+        )
         return jsonify({
             'ok': True,
             'filename': f.filename,
@@ -648,7 +702,7 @@ def upload_file():
             **result,
             # Keep legacy fields for backward compat with existing frontend
             'sheetName': result['primarySheet'],
-            'rawRows': result['sheetResults'][0]['rawRows'] if result['sheetResults'] else [],
+            'rawRows': primary_sheet_result['rawRows'] if primary_sheet_result else [],
         })
     except MemoryError:
         return jsonify({

@@ -56,6 +56,12 @@ def _normalize(text):
     """Light cleanup: lowercase, strip punctuation/numbers-only noise, collapse whitespace."""
     text = str(text)
     text = re.sub(r"[\(\)\[\]/\\\-_,.:;]+", " ", text)
+    # Split a letter directly glued to a digit ("Temp2" -> "Temp 2"). Real
+    # plant headers are inconsistent about this ("Temp 1" vs "Temp2" for
+    # sibling probes on the same reading), and without the split the glued
+    # variant loses word-boundary alignment with the spaced training
+    # examples and can drift toward an unrelated label.
+    text = re.sub(r"(?<=[A-Za-z])(?=\d)", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 

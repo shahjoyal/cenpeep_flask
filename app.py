@@ -8,10 +8,11 @@ load_dotenv()
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 CORS(app)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB (was 50MB, then 10MB —
-                                                        # real plant sheets with many
-                                                        # tags/rows/hourly readings can
-                                                        # get large; raised again)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB (was 50MB — some real
+                                                        # plant workbooks with many
+                                                        # months of hourly tag data
+                                                        # across several sheets can
+                                                        # approach this size)
 
 # MongoDB connection
 MONGO_URI = os.getenv('MONGODB_URI', '')
@@ -61,7 +62,7 @@ def too_large(e):
 def public_files(filename):
     return send_from_directory(os.path.join(app.root_path, 'public'), filename)
 
-# SPAas fallback
+# SPA fallback
 @app.route('/')
 @app.route('/<path:path>')
 def spa(path='index.html'):
