@@ -8,9 +8,10 @@ load_dotenv()
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 CORS(app)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB (was 10MB — real plant
-                                                       # sheets with many tags/rows
-                                                       # exceeded the old limit)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB (was 50MB, then 10MB —
+                                                        # real plant sheets with many
+                                                        # tags/rows/hourly readings can
+                                                        # get large; raised again)
 
 # MongoDB connection
 MONGO_URI = os.getenv('MONGODB_URI', '')

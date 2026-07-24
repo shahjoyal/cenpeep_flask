@@ -57,6 +57,25 @@ try:
 except ImportError:
     HAS_OPENPYXL = False
 
+
+def _is_readable_worksheet(ws):
+    """
+    True if `ws` is a sheet we can actually pull rows from.
+
+    Chartsheets (and any other non-data sheet type, e.g. dialog/macro
+    sheets in some legacy workbooks) don't expose iter_rows/cells the way
+    a normal worksheet does — trying to read them the same way raises
+    "'Chartsheet' object has no attribute 'iter_rows'".
+
+    NOTE: we deliberately check by capability (hasattr) rather than
+    isinstance(ws, openpyxl.worksheet.worksheet.Worksheet) — in
+    read_only=True mode (used below for streaming), real data sheets come
+    back as openpyxl.worksheet._read_only.ReadOnlyWorksheet, which is a
+    *different* class that does NOT inherit from Worksheet, so an
+    isinstance check against Worksheet would incorrectly skip every sheet.
+    """
+    return hasattr(ws, 'iter_rows')
+
 try:
     import xlrd
     HAS_XLRD = True
@@ -113,6 +132,17 @@ LABEL_ALIASES = {
     'pa flow': 'Fpa', 'sa flow': 'Fsa',
     'unburnt bottom': 'Cba', 'unburnt fly': 'Cfa',
     'fly ash': 'Pfa', 'bottom ash': 'Pba',
+
+    # ── Aliases added for the Unit 6 operating-parameters workbook ────────
+    'total unit generation': 'L', 'unit generation': 'L', 'gross generation': 'L',
+    'main steam flow': 'Ffw', 'feed water flow': 'Ffw', 'feedwater flow': 'Ffw',
+    'total coal flow': 'Fin',
+    'gah i/l o2 left': 'O2in', 'gah i/l o2 right': 'O2in', 'gah i/l o2 average': 'O2in',
+    'gah o/l o2 left': 'O2out', 'gah o/l o2 right': 'O2out', 'gah o/l o2 average': 'O2out',
+    'gah i/l temp (left)': 'Tgi', 'gah i/l temp (right)': 'Tgi', 'gah i/l temp average': 'Tgi',
+    'gah o/l temp average': 'Tgo',
+    'ubc in bottom ash': 'Cba', 'ubc in fly ash': 'Cfa',
+    'gcv kcal/kg': 'GCV',
 }
 
 
@@ -542,6 +572,22 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         for name in wb.sheetnames:
             ws = wb[name]
+            # Chartsheets (and any other non-data sheet type, e.g. dialog
+            # sheets/macro sheets in some legacy workbooks) don't expose
+            # iter_rows/cells the way a normal Worksheet does — trying to
+            # read them the same way blows up with
+            # "'Chartsheet' object has no attribute 'iter_rows'".
+            # Skip anything that isn't a real Worksheet instead of crashing.
+            if not _is_readable_worksheet(ws):
+                sheet_results.append({
+                    'sheetName': name,
+                    'strategy': 'skipped_non_worksheet',
+                    'extracted': {},
+                    'rawRows': [],
+                    'summary': {},
+                    'columns': {},
+                })
+                continue
             est_rows = _sheet_row_estimate(ws)
             row_iter = _iter_sheet_rows_streamed(ws)
             if est_rows > LARGE_SHEET_ROW_THRESHOLD:
