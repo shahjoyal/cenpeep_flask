@@ -547,6 +547,113 @@ def _sheet_row_estimate(ws):
         return 0
 
 
+def _parse_with_calamine(file_bytes, use_ml=True):
+    """
+    calamine (Rust) reads the workbook's shared strings/values directly
+    without building openpyxl's Python style-object graph. This matters
+    a lot in practice: real plant/historian exports often carry tens of
+    thousands of near-duplicate per-cell styles, and openpyxl's style
+    resolution during load_workbook() can dominate parse time — e.g. a
+    ~5MB sheet with ~46,000 named styles took ~26s to even open with
+    openpyxl vs ~0.1s with calamine. This is what makes parsing
+    100MB-class uploads practical within a normal request timeout.
+
+    NOTE: calamine can raise pyo3_runtime.PanicException (a BaseException,
+    not an Exception) if its Rust parser trips on an unusual/malformed
+    file. Callers must be prepared to catch BaseException around this
+    call, not just Exception — see parse_workbook().
+    """
+    sheet_results = []
+    wb = python_calamine.CalamineWorkbook.from_filelike(io.BytesIO(file_bytes))
+    for meta in wb.sheets_metadata:
+        name = meta.name
+        # Skip chart sheets / dialog sheets / macro sheets — they carry
+        # no tabular cell data. Checked via explicit sheet-type metadata
+        # (robust) rather than trying to read them and catching the
+        # resulting AttributeError.
+        if meta.typ != python_calamine.SheetTypeEnum.WorkSheet:
+            sheet_results.append({
+                'sheetName': name,
+                'strategy': 'skipped_non_worksheet',
+                'extracted': {},
+                'rawRows': [],
+                'summary': {},
+                'columns': {},
+                'rowsScanned': 0,
+            })
+            continue
+        ws = wb.get_sheet_by_name(name)
+        est_rows = ws.height or 0
+        row_iter = _iter_sheet_rows_streamed(ws)
+        if est_rows > LARGE_SHEET_ROW_THRESHOLD:
+            result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
+        else:
+            rows = list(row_iter)
+            result = _parse_sheet_rows(rows, name, use_ml=use_ml)
+        sheet_results.append(result)
+    return sheet_results
+
+
+def _parse_with_xlrd(file_bytes, use_ml=True):
+    """Legacy .xls reader (calamine/openpyxl don't handle old binary .xls)."""
+    sheet_results = []
+    wb = xlrd.open_workbook(file_contents=file_bytes)
+    for name in wb.sheet_names():
+        ws = wb.sheet_by_name(name)
+        row_iter = _iter_sheet_rows_streamed(None, ext_xls=True, xlrd_sheet=ws)
+        if ws.nrows > LARGE_SHEET_ROW_THRESHOLD:
+            result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
+        else:
+            rows = list(row_iter)
+            result = _parse_sheet_rows(rows, name, use_ml=use_ml)
+        sheet_results.append(result)
+    return sheet_results
+
+
+def _parse_with_openpyxl(file_bytes, use_ml=True):
+    """
+    Pure-Python fallback reader. Slower than calamine on files with heavy
+    style bloat, but more lenient — used both when calamine isn't installed
+    and when calamine fails to read a particular file (see parse_workbook()).
+    """
+    sheet_results = []
+    # read_only=True streams the worksheet instead of materializing
+    # the whole workbook as Cell objects — this is the key change that
+    # lets large files (10MB+, wide sheets, 1000+ rows) parse without
+    # blowing up memory the way the original full-load approach did.
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    for name in wb.sheetnames:
+        ws = wb[name]
+        # Chartsheets (and other non-worksheet sheet types, e.g. dialogsheets)
+        # have no cell grid and no iter_rows() — attempting to read them the
+        # same way as a normal worksheet raises
+        # "'Chartsheet' object has no attribute 'iter_rows'". Skip them
+        # instead of crashing the whole upload. Checked by capability
+        # (has iter_rows) rather than isinstance, since read_only=True
+        # workbooks use ReadOnlyWorksheet, not the normal Worksheet class.
+        if not _is_readable_worksheet(ws):
+            sheet_results.append({
+                'sheetName': name,
+                'strategy': 'skipped_non_worksheet',
+                'extracted': {},
+                'rawRows': [],
+                'summary': {},
+                'columns': {},
+                'rowsScanned': 0,
+            })
+            continue
+        est_rows = _sheet_row_estimate(ws)
+        row_iter = _iter_sheet_rows_streamed(ws)
+        if est_rows > LARGE_SHEET_ROW_THRESHOLD:
+            result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
+        else:
+            rows = list(row_iter)
+            result = _parse_sheet_rows(rows, name, use_ml=use_ml)
+        sheet_results.append(result)
+    wb.close()
+    return sheet_results
+
+
 # ─── Main parse entry-point ───────────────────────────────────────────────────
 def parse_workbook(file_bytes, filename, use_ml=True):
     """
@@ -565,94 +672,38 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     sheet_results = []
 
-    if HAS_CALAMINE:
-        # calamine (Rust) reads the workbook's shared strings/values directly
-        # without building openpyxl's Python style-object graph. This matters
-        # a lot in practice: real plant/historian exports often carry tens of
-        # thousands of near-duplicate per-cell styles, and openpyxl's style
-        # resolution during load_workbook() can dominate parse time — e.g. a
-        # ~5MB sheet with ~46,000 named styles took ~26s to even open with
-        # openpyxl vs ~0.1s with calamine. This is what makes parsing
-        # 100MB-class uploads practical within a normal request timeout.
-        wb = python_calamine.CalamineWorkbook.from_filelike(io.BytesIO(file_bytes))
-        for meta in wb.sheets_metadata:
-            name = meta.name
-            # Skip chart sheets / dialog sheets / macro sheets — they carry
-            # no tabular cell data. Checked via explicit sheet-type metadata
-            # (robust) rather than trying to read them and catching the
-            # resulting AttributeError.
-            if meta.typ != python_calamine.SheetTypeEnum.WorkSheet:
-                sheet_results.append({
-                    'sheetName': name,
-                    'strategy': 'skipped_non_worksheet',
-                    'extracted': {},
-                    'rawRows': [],
-                    'summary': {},
-                    'columns': {},
-                    'rowsScanned': 0,
-                })
-                continue
-            ws = wb.get_sheet_by_name(name)
-            est_rows = ws.height or 0
-            row_iter = _iter_sheet_rows_streamed(ws)
-            if est_rows > LARGE_SHEET_ROW_THRESHOLD:
-                result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
-            else:
-                rows = list(row_iter)
-                result = _parse_sheet_rows(rows, name, use_ml=use_ml)
-            sheet_results.append(result)
+    use_calamine = HAS_CALAMINE
+    if use_calamine:
+        try:
+            sheet_results = _parse_with_calamine(file_bytes, use_ml=use_ml)
+        except BaseException as e:
+            # calamine is a compiled Rust extension. When its parser hits
+            # something it can't handle it doesn't raise a normal Python
+            # Exception — it raises pyo3_runtime.PanicException, which is
+            # deliberately made to inherit from BaseException (not
+            # Exception) specifically so a bare `except Exception` anywhere
+            # upstream (e.g. this route's error handler) will NOT catch it.
+            # Left alone, that blows straight through Flask's request
+            # handling and the client gets a dead connection with no
+            # response at all, instead of a normal error. Let real
+            # interpreter-shutdown signals through; treat everything else
+            # (including PanicException) as "this file broke calamine" and
+            # fall back to the openpyxl/xlrd reader instead of taking the
+            # whole upload down.
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
+            use_calamine = False
+            sheet_results = []
 
-    elif ext == 'xls':
-        if not HAS_XLRD:
-            raise RuntimeError('xlrd not installed; cannot read .xls files')
-        wb = xlrd.open_workbook(file_contents=file_bytes)
-        for name in wb.sheet_names():
-            ws = wb.sheet_by_name(name)
-            row_iter = _iter_sheet_rows_streamed(None, ext_xls=True, xlrd_sheet=ws)
-            if ws.nrows > LARGE_SHEET_ROW_THRESHOLD:
-                result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
-            else:
-                rows = list(row_iter)
-                result = _parse_sheet_rows(rows, name, use_ml=use_ml)
-            sheet_results.append(result)
-
-    else:
-        if not HAS_OPENPYXL:
-            raise RuntimeError('Neither python-calamine nor openpyxl is installed')
-        # read_only=True streams the worksheet instead of materializing
-        # the whole workbook as Cell objects — this is the key change that
-        # lets large files (10MB+, wide sheets, 1000+ rows) parse without
-        # blowing up memory the way the original full-load approach did.
-        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
-        for name in wb.sheetnames:
-            ws = wb[name]
-            # Chartsheets (and other non-worksheet sheet types, e.g. dialogsheets)
-            # have no cell grid and no iter_rows() — attempting to read them the
-            # same way as a normal worksheet raises
-            # "'Chartsheet' object has no attribute 'iter_rows'". Skip them
-            # instead of crashing the whole upload. Checked by capability
-            # (has iter_rows) rather than isinstance, since read_only=True
-            # workbooks use ReadOnlyWorksheet, not the normal Worksheet class.
-            if not _is_readable_worksheet(ws):
-                sheet_results.append({
-                    'sheetName': name,
-                    'strategy': 'skipped_non_worksheet',
-                    'extracted': {},
-                    'rawRows': [],
-                    'summary': {},
-                    'columns': {},
-                    'rowsScanned': 0,
-                })
-                continue
-            est_rows = _sheet_row_estimate(ws)
-            row_iter = _iter_sheet_rows_streamed(ws)
-            if est_rows > LARGE_SHEET_ROW_THRESHOLD:
-                result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
-            else:
-                rows = list(row_iter)
-                result = _parse_sheet_rows(rows, name, use_ml=use_ml)
-            sheet_results.append(result)
-        wb.close()
+    if not use_calamine:
+        if ext == 'xls':
+            if not HAS_XLRD:
+                raise RuntimeError('xlrd not installed; cannot read .xls files')
+            sheet_results = _parse_with_xlrd(file_bytes, use_ml=use_ml)
+        else:
+            if not HAS_OPENPYXL:
+                raise RuntimeError('Neither python-calamine nor openpyxl is installed')
+            sheet_results = _parse_with_openpyxl(file_bytes, use_ml=use_ml)
 
     # Merge: generic sheets first, CenPeep sheet last (wins conflicts)
     merged_extracted = {}
@@ -725,6 +776,15 @@ def upload_file():
         }), 413
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+    except BaseException as e:
+        # Defense-in-depth: parse_workbook() already falls back to openpyxl
+        # if calamine panics (see _parse_with_calamine), but if some other
+        # BaseException-derived error (e.g. a pyo3 PanicException from a
+        # different native call) slips through, catch it here too rather
+        # than letting it kill the request with no response at all.
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
+        return jsonify({'ok': False, 'error': f'Unexpected parser failure: {e}'}), 500
 
 
 @upload_bp.route('/retrain', methods=['POST'])
