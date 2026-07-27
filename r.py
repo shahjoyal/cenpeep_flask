@@ -349,11 +349,12 @@ def build_report(trace, output_path):
             doc.add_paragraph("No fields detected in this sheet.")
             continue
 
-        table = doc.add_table(rows=1, cols=6)
+        table = doc.add_table(rows=1, cols=7)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.style = "Light Grid Accent 1"
         hdr_cells = table.rows[0].cells
-        for i, txt in enumerate(["Column Header", "Decision", "Method", "Field", "Confidence", "Avg (readings)"]):
+        for i, txt in enumerate(["Column Header", "Decision", "Method", "Field", "Confidence",
+                                  "Matched Against", "Avg (readings)"]):
             hdr_cells[i].text = txt
             hdr_cells[i].paragraphs[0].runs[0].bold = True
 
@@ -372,10 +373,22 @@ def build_report(trace, output_path):
             row[2].text = (c.get("method") or "—").replace("_", " ")
             row[3].text = c.get("fieldId") or "—"
             row[4].text = f"{c['confidence']:.2f}" if c.get("confidence") is not None else "—"
-            if c.get("readings") is not None and c.get("average") is not None:
-                row[5].text = f"{c['average']:.3g}  (n={c['readings']})"
+            # For rule-based matches there's no "closest training phrase" —
+            # the header matched a hand-built alias/symbol exactly, so show
+            # that instead of leaving it blank. For ML matches, this is the
+            # actual training-set example whose similarity score won/lost
+            # the confidence gate — i.e. exactly what the header was
+            # compared against to reach this decision.
+            if c.get("method") == "rule_based_alias":
+                row[5].text = "exact alias/symbol lookup"
+            elif c.get("matchedPhrase"):
+                row[5].text = str(c["matchedPhrase"])[:60]
             else:
                 row[5].text = "—"
+            if c.get("readings") is not None and c.get("average") is not None:
+                row[6].text = f"{c['average']:.3g}  (n={c['readings']})"
+            else:
+                row[6].text = "—"
             fill = decision_colors.get(c["decision"], "FFFFFF")
             for cell in row:
                 shade_cell(cell, fill)
@@ -383,6 +396,17 @@ def build_report(trace, output_path):
 
     # ── 5. Legend ────────────────────────────────────────────────────────
     doc.add_heading("5. How to read the decision column", level=1)
+    p = doc.add_paragraph()
+    p.add_run("Matched Against: ").bold = True
+    p.add_run(
+        "for rule-based matches, the header hit a hand-built alias/symbol exactly, "
+        "no comparison needed. For ML matches (and out-of-scope/low-confidence "
+        "rejections), this is the specific training-set example the header was "
+        "closest to — i.e. the actual phrase whose similarity score produced the "
+        "confidence value shown. If a header should have matched but didn't, or "
+        "matched something it shouldn't have, this column tells you exactly which "
+        "training example to add, fix, or move to OUT_OF_SCOPE."
+    )
     legend = [
         ("matched", "Column was confidently mapped to a CENPEEP field and used."),
         ("matched_but_no_numeric_data", "Field was recognised, but every value in that "
