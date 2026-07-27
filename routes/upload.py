@@ -526,6 +526,19 @@ def _accumulate_row(row, col_map, field_values):
             field_values.setdefault(fid, []).append(num)
 
 
+def _is_readable_worksheet(ws):
+    """
+    True if `ws` is a normal cell-grid worksheet (openpyxl Worksheet or
+    ReadOnlyWorksheet) rather than a Chartsheet/Dialogsheet or other
+    non-worksheet type with no cell grid to read.
+
+    Checked by capability (has iter_rows) rather than isinstance, since
+    read_only=True workbooks use ReadOnlyWorksheet, not the normal
+    Worksheet class.
+    """
+    return hasattr(ws, 'iter_rows')
+
+
 def _sheet_row_estimate(ws):
     """Best-effort row count for an openpyxl worksheet (read_only safe)."""
     try:
@@ -620,7 +633,7 @@ def parse_workbook(file_bytes, filename, use_ml=True):
             # instead of crashing the whole upload. Checked by capability
             # (has iter_rows) rather than isinstance, since read_only=True
             # workbooks use ReadOnlyWorksheet, not the normal Worksheet class.
-            if not hasattr(ws, 'iter_rows'):
+            if not _is_readable_worksheet(ws):
                 sheet_results.append({
                     'sheetName': name,
                     'strategy': 'skipped_non_worksheet',
