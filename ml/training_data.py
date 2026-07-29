@@ -34,6 +34,14 @@ TRAINING_EXAMPLES = [
     ("Feeder B Coal flow rate", "Fin"), ("Feeder C Coal flow rate", "Fin"),
     ("Feeder D Coal flow rate", "Fin"), ("Feeder E Coal flow rate", "Fin"),
     ("Feeder F Coal flow rate", "Fin"), ("Feeder G Coal flow rate", "Fin"),
+    # Per-mill coal flow readings (as opposed to per-feeder) are the same
+    # physical quantity — total coal input — just measured at the mill
+    # rather than the feeder. Real plant sheets report these instead of
+    # (or alongside) feeder flows, so they must feed into Fin too, not be
+    # rejected as OUT_OF_SCOPE (was previously mislabeled — see below).
+    ("Mill A Coal Flow", "Fin"), ("Mill B Coal Flow", "Fin"), ("Mill C Coal Flow", "Fin"),
+    ("Mill D Coal Flow", "Fin"), ("Mill E Coal Flow", "Fin"), ("Mill F Coal Flow", "Fin"),
+    ("Mill G Coal Flow", "Fin"), ("Mill H Coal Flow", "Fin"), ("Mill Coal Flow", "Fin"),
 
     # ── Cba — Unburnt C Bottom Ash ────────────────────────────────────────
     ("Unburnt Carbon Bottom Ash", "Cba"), ("Bottom Ash Unburnt Carbon", "Cba"),
@@ -128,6 +136,13 @@ TRAINING_EXAMPLES = [
     ("APH I/L FG Temp 2 Left", "Tgi"), ("APH I/L FG Temp 2 Right", "Tgi"),
     ("APH Inlet FG Temperature Left side", "Tgi"), ("APH Inlet FG Temperature Right side", "Tgi"),
     ("Primary APH I/L FG Temp (L)", "Tgi"), ("Primary APH I/L FG Temp (R)", "Tgi"),
+    # Full-word "(left)"/"(Right)" parenthetical forms, mirroring the ones
+    # already present for Tgo below. Without these, a header like "Primary
+    # APH I/L FG Temp (left)" was landing on Tgo instead of Tgi: the only
+    # near-identical training example with that exact "(left)"/"(Right)"
+    # wording was the Tgo one differing by a single I/O character, so it
+    # won on char n-gram similarity over the abbreviated Tgi "(L)"/"(R)" forms.
+    ("Primary APH I/L FG Temp (left)", "Tgi"), ("Primary APH I/L FG Temp (Right)", "Tgi"),
     ("Secondry APH I/L FG Temp (Left)", "Tgi"), ("Secondry APH I/L FG Temp (Right)", "Tgi"),
     ("Secondry APH I/L FG Temp  (Left)", "Tgi"), ("Secondry APH I/L FG Temp  (Right)", "Tgi"),
     ("GAH I/L Temp (left)", "Tgi"), ("GAH I/L Temp (Right)", "Tgi"), ("GAH Inlet FG Temp", "Tgi"),
@@ -198,6 +213,13 @@ TRAINING_EXAMPLES = [
     ("AH B SA I/L TEMP", "Tsai"), ("AH A SA I/L Temp", "Tsai"), ("AH B SA I/L Temp", "Tsai"),
     # Same logic as the bare "Primary Air Temp" case above.
     ("Secondary Air Temp", "Tsai"), ("GAH I/L Sec Air Temp", "Tsai"),
+    # "Secondry" (misspelling of "Secondary") plant-tag variant. Without this,
+    # a header like "Secondry Air APH Temp I/L A" lost to the Tgi training
+    # example "Secondry APH I/L FG Temp (Left)" — both share the same
+    # "Secondry" typo, so char n-grams favored that over the correctly
+    # spelled "Secondary Air APH Temp I/L A" Tsai example — even though this
+    # column is an air temperature, not a flue-gas temperature.
+    ("Secondry Air APH Temp I/L A", "Tsai"), ("Secondry Air APH Temp I/L B", "Tsai"),
 
     # ── Tsao — SA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
     ("Secondary Air Temp Out", "Tsao"), ("SA Temp Out", "Tsao"),
@@ -210,6 +232,9 @@ TRAINING_EXAMPLES = [
     ("AH B SA O/L TEMP", "Tsao"), ("AH A SA O/L Temp", "Tsao"),
     ("AH B SA O/L Temp", "Tsao"),
     ("APH A O/L SA AIR TEMP", "Tsao"), ("APH B O/L SA AIR TEMP", "Tsao"),
+    # "Secondry" typo variant -- same reasoning as the Tsai fix above, for
+    # the outlet/hot side.
+    ("Secondry Air APH Temp O/L A", "Tsao"), ("Secondry Air APH Temp O/L B", "Tsao"),
 
     # ── Fsa — SA Flow ──────────────────────────────────────────────────────────
     ("Secondary Air Flow", "Fsa"), ("SA Flow", "Fsa"), ("SA air flow", "Fsa"),
@@ -270,7 +295,6 @@ OUT_OF_SCOPE_EXAMPLES = [
     "Enthalpy FW HPH O/L", "Enthalpy FW HPH I/L", "Extraction Enthalpy HPH",
     "Drip Enthalpy HPH", "Extraction Flow HPH", "MS Enthalpy", "HRH Enthalpy",
     "CRH Enthalpy", "FW Enthalpy", "RH Flow", "Attemperation Enthalpy", "THR",
-    "Mill Coal Flow", "Mill A Coal Flow", "Mill B Coal Flow",
     "Turbine Side Condenser Vacuum", "Generator Side Condenser Vacuum",
     "Soot Blower Steam Flow", "Soot Blower Steam Press",
     "WTR SEP MET TEMP", "SOFA SA CTL DMP POS", "SSC PWR PACK PRESS",
@@ -326,6 +350,17 @@ OUT_OF_SCOPE_EXAMPLES = [
     # 4200"), not a numeric percentage reading — shares "blend"/"ratio"
     # vocabulary with Pfa/Pba but is not interchangeable with either.
     "Coal blend ratio", "Coal Blend Grade", "GRADE 1", "GRADE 2",
+    # "Total Air Flow" is a real sensor reading, not a structural/ID column
+    # (previously it was wrongly hard-coded into NON_FIELD_HEADERS below,
+    # which silently dropped it before it was ever scored). It also isn't
+    # one of the 42 CENPEEP fields — Fpa/Fsa cover primary/secondary air
+    # flow separately, but there's no "total air flow" field id — so
+    # forcing a guess (it was landing on Fpa via "TOTAL PA FLOW") would be
+    # wrong too. OUT_OF_SCOPE correctly reports it as "recognised, but not
+    # a mappable field" rather than either silently excluding it or
+    # mismatching it. Flag to the business team: either add a field id for
+    # it, or confirm it should stay unmapped.
+    "Total Air flow", "Total Air Flow", "TOTAL AIR FLOW",
 ]
 
 def get_training_data():
@@ -353,7 +388,15 @@ NON_FIELD_HEADERS = {
     's no', 'time', 'shift', 'remarks', 'remark', 'notes', 'note',
     'id', 'unit', 'unit no', 'plant', 'particulars', 'description',
     'sample no', 'sample', 'test no', 'reading no', 'day', 'month', 'year',
-    'total air flow', 'sox fgd i/l', 'sox', 'nox', 'sox fgd inlet',
+    # NOTE: 'total air flow' was removed from this exclusion list — it is a
+    # real sensor reading (not a structural/ID column like Date or Sr No)
+    # that a plant sheet may require; it was previously force-excluded here
+    # by mistake, silently dropping it before the classifier ever saw it.
+    # No CENPEEP field id currently corresponds to it, so for now it will
+    # fall through to 'rejected_low_confidence' instead of 'excluded' —
+    # flag to the business team so a target field/aggregation rule can be
+    # defined for it.
+    'sox fgd i/l', 'sox', 'nox', 'sox fgd inlet',
     'ssc current', 'burner tilt corner 1', 'burner tilt',
 }
 
