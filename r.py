@@ -1,17 +1,13 @@
 """
-generate_model_report.py — CENPEEP field-detection model report generator
+generate_model_report.py — CENPEEP field-detection decision-trace report
 ============================================================================
 One-off script: runs the SAME parsing/detection pipeline used by
 routes/upload.py against a real Excel file, with full decision tracing
 turned on (which stage matched each column, why, with what confidence,
-against which training phrase), and writes a Word document explaining:
-
-  1. What model is actually being used (plain language + the technical name)
-  2. The decision pipeline, stage by stage
-  3. How multi-reading averaging works
-  4. A worked example against the file you point it at — a real column-by-
-     column decision trace, so a colleague can see exactly why each field
-     was (or wasn't) picked up.
+against which training phrase), and writes a Word document containing
+ONLY, for each sheet: the sheet name as a heading, followed by its
+column-by-column decision table. No title page, no methodology sections,
+no summary counts, no legend.
 
 USAGE
 -----
@@ -49,17 +45,8 @@ from routes.upload import (
     _to_num,
     _parse_cenpeep_layout,
     HEADER_SCAN_ROWS,
-    SYM_MAP,
-    LABEL_ALIASES,
 )
-from ml.training_data import (
-    get_training_data,
-    get_field_ids,
-    is_non_field_header,
-    TRAINING_EXAMPLES,
-    OUT_OF_SCOPE_EXAMPLES,
-    NON_FIELD_HEADERS,
-)
+from ml.training_data import is_non_field_header
 from ml.field_classifier import get_classifier, DEFAULT_CONFIDENCE_THRESHOLD
 
 
@@ -207,8 +194,7 @@ def trace_workbook(path):
 # ── Step 2: build the Word document ─────────────────────────────────────────
 def build_report(trace, output_path):
     from docx import Document
-    from docx.shared import Pt, Inches, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Pt
     from docx.enum.table import WD_TABLE_ALIGNMENT
     from docx.oxml.ns import qn
 
@@ -226,122 +212,16 @@ def build_report(trace, output_path):
         })
         tcPr.append(shd)
 
-    # ── Title ────────────────────────────────────────────────────────────
-    title = doc.add_heading("CENPEEP Field-Detection Model", level=0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sub = doc.add_paragraph("How automatic column-to-field detection works, and a worked example")
-    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sub.runs[0].italic = True
-    sub.runs[0].font.size = Pt(12)
-    doc.add_paragraph()
-
-    # ── 1. What model is this ───────────────────────────────────────────
-    doc.add_heading("1. What model are we using?", level=1)
-    doc.add_paragraph(
-        "This is a classic (non-deep-learning) text-classification model, not a neural "
-        "network and not an LLM. Concretely, it's a TF-IDF vectorizer over character "
-        "n-grams, paired with cosine-similarity nearest-neighbour matching — implemented "
-        "with scikit-learn's TfidfVectorizer and cosine_similarity."
-    )
-    p = doc.add_paragraph()
-    p.add_run("In plain terms: ").bold = True
-    p.add_run(
-        "the model has a library of known header phrasings for each CENPEEP field "
-        "(e.g. \"Steam Flow\", \"FW Flow\", \"MAIN STEAM Flow\" all mean the Ffw field). "
-        "When it sees a new, unfamiliar column header, it breaks the text into small "
-        "overlapping chunks of letters (3-5 characters, so it can handle abbreviations, "
-        "merged words and typos), does the same to every phrase in its library, and finds "
-        "the closest match by similarity. If nothing is close enough, it says \"I don't "
-        "know\" instead of guessing."
-    )
-    doc.add_paragraph(
-        "This approach was chosen over a deep-learning model deliberately: it trains in "
-        "well under a second, needs no GPU, and — most importantly — is easy for a human "
-        "to extend. Adding support for a new plant's header wording is a one-line addition "
-        "to a training-data file, not a retraining pipeline."
-    )
-
-    # ── 2. Decision pipeline ────────────────────────────────────────────
-    doc.add_heading("2. The decision pipeline", level=1)
-    doc.add_paragraph(
-        "Every column header goes through the same four-stage pipeline, in this order. "
-        "Each stage can either resolve the column or hand it to the next stage:"
-    )
-
-    stages = [
-        ("Stage 0 — Structural exclusion",
-         f"Headers that are clearly not data fields (Date, Sr No, Time, Remarks, Shift, "
-         f"etc. — {len(NON_FIELD_HEADERS)} known variants) are dropped immediately. "
-         "No field is ever forced onto these."),
-        ("Stage 1 — Rule-based exact match",
-         f"The header is checked against a hand-built lookup: {len(SYM_MAP)} known "
-         f"CENPEEP symbols (e.g. \"Ffw\", \"GCV\") and {len(LABEL_ALIASES)} known plain-"
-         "English label variants. If it matches exactly (case/punctuation-insensitive), "
-         "the field is assigned immediately with 100% confidence — no ML involved. This "
-         "is the fast, deterministic path."),
-        ("Stage 2 — ML fallback (TF-IDF + cosine similarity)",
-         f"Anything Stage 1 couldn't place is scored against a labelled training set of "
-         f"{len(TRAINING_EXAMPLES)} example header phrasings covering "
-         f"{len(get_field_ids())} CENPEEP fields, plus {len(OUT_OF_SCOPE_EXAMPLES)} "
-         "\"OUT_OF_SCOPE\" examples — real plant headers that look similar (share words "
-         "like \"steam\", \"temp\", \"flow\") but are NOT one of the fields the app needs. "
-         "The header is assigned the field of its closest match, with a similarity score "
-         "(confidence) attached."),
-        ("Stage 3 — Confidence gate",
-         f"A match is only accepted if its similarity score is at least "
-         f"{DEFAULT_CONFIDENCE_THRESHOLD} (on a 0–1 scale), AND the closest match isn't "
-         "itself an OUT_OF_SCOPE example. Below that, or if the nearest neighbour is "
-         "OUT_OF_SCOPE, the column is left unmapped rather than guessed."),
-    ]
-    for name, desc in stages:
-        h = doc.add_paragraph()
-        h.add_run(name).bold = True
-        doc.add_paragraph(desc)
-
-    # ── 3. Averaging ─────────────────────────────────────────────────────
-    doc.add_heading("3. Multiple readings → automatic averaging", level=1)
-    doc.add_paragraph(
-        "Once a column is mapped to a field, every numeric value in that column (across "
-        "all data rows in that sheet — e.g. hourly readings for a month) is collected. "
-        "The field's final value is the plain arithmetic mean of all collected readings. "
-        "Non-numeric or blank cells (including sensor-fault strings like "
-        "\"No Good Data For Calculation\") are ignored rather than treated as zero."
-    )
-    doc.add_paragraph(
-        "Large sheets (more than 500 rows) are streamed and processed in fixed-size "
-        "chunks rather than being loaded fully into memory, so the same averaging logic "
-        "works the same way regardless of file size."
-    )
-
-    # ── 4. Worked example ───────────────────────────────────────────────
-    doc.add_heading(f"4. Worked example: {trace['filename']}", level=1)
-    doc.add_paragraph(
-        "The table below is the actual, live decision trace produced by running this "
-        "file through the pipeline above — not a simulated example."
-    )
-
-    total_cols = matched = rejected = excluded = 0
-    for sh in trace["sheets"]:
-        for c in sh["columns"]:
-            total_cols += 1
-            if c["decision"] in ("matched", "matched_but_no_numeric_data"):
-                matched += 1
-            elif c["decision"] == "excluded":
-                excluded += 1
-            elif c["decision"].startswith("rejected"):
-                rejected += 1
-
-    summary = doc.add_paragraph()
-    summary.add_run(
-        f"Sheets scanned: {len(trace['sheets'])}   |   "
-        f"Columns considered: {total_cols}   |   "
-        f"Mapped to a field: {matched}   |   "
-        f"Structural/excluded: {excluded}   |   "
-        f"Seen but rejected (low confidence / out-of-scope): {rejected}"
-    ).italic = True
+    decision_colors = {
+        "matched": "D9EAD3",
+        "matched_but_no_numeric_data": "FFF2CC",
+        "excluded": "F3F3F3",
+        "rejected_out_of_scope": "F4CCCC",
+        "rejected_low_confidence": "FCE5CD",
+    }
 
     for sh in trace["sheets"]:
-        doc.add_heading(f"Sheet: {sh['sheetName']}", level=2)
+        doc.add_heading(sh["sheetName"], level=2)
         if sh.get("skipped"):
             doc.add_paragraph(f"Skipped — {sh['reason']}")
             continue
@@ -357,14 +237,6 @@ def build_report(trace, output_path):
                                   "Matched Against", "Avg (readings)"]):
             hdr_cells[i].text = txt
             hdr_cells[i].paragraphs[0].runs[0].bold = True
-
-        decision_colors = {
-            "matched": "D9EAD3",
-            "matched_but_no_numeric_data": "FFF2CC",
-            "excluded": "F3F3F3",
-            "rejected_out_of_scope": "F4CCCC",
-            "rejected_low_confidence": "FCE5CD",
-        }
 
         for c in sh["columns"]:
             row = table.add_row().cells
@@ -393,37 +265,6 @@ def build_report(trace, output_path):
             for cell in row:
                 shade_cell(cell, fill)
         doc.add_paragraph()
-
-    # ── 5. Legend ────────────────────────────────────────────────────────
-    doc.add_heading("5. How to read the decision column", level=1)
-    p = doc.add_paragraph()
-    p.add_run("Matched Against: ").bold = True
-    p.add_run(
-        "for rule-based matches, the header hit a hand-built alias/symbol exactly, "
-        "no comparison needed. For ML matches (and out-of-scope/low-confidence "
-        "rejections), this is the specific training-set example the header was "
-        "closest to — i.e. the actual phrase whose similarity score produced the "
-        "confidence value shown. If a header should have matched but didn't, or "
-        "matched something it shouldn't have, this column tells you exactly which "
-        "training example to add, fix, or move to OUT_OF_SCOPE."
-    )
-    legend = [
-        ("matched", "Column was confidently mapped to a CENPEEP field and used."),
-        ("matched_but_no_numeric_data", "Field was recognised, but every value in that "
-         "column was blank/non-numeric (e.g. a faulty-sensor string), so nothing could "
-         "be averaged."),
-        ("excluded", "Recognised as a structural column (Date, Time, Sr No, ...) and "
-         "intentionally skipped."),
-        ("rejected_out_of_scope", "The model recognised the vocabulary as boiler/plant "
-         "language, but matched it to a header that is explicitly NOT a CENPEEP field "
-         "(e.g. a pressure or metal-temperature tag) — so it was correctly left unmapped."),
-        ("rejected_low_confidence", "No close enough match was found in the training "
-         "data at all; the column is unrecognised."),
-    ]
-    for name, desc in legend:
-        p = doc.add_paragraph(style="List Bullet")
-        p.add_run(f"{name}: ").bold = True
-        p.add_run(desc)
 
     doc.save(output_path)
 

@@ -772,39 +772,55 @@ def parse_workbook(file_bytes, filename, use_ml=True):
                 raise RuntimeError('Neither python-calamine nor openpyxl is installed')
             sheet_results = _parse_with_openpyxl(file_bytes, use_ml=use_ml)
 
-    # Merge: among the generic (non-CenPeep) sheets, the SAME field can
-    # legitimately show up in more than one sheet — e.g. an "Hourly" log
-    # sheet and a "Day Avg" summary sheet both have a Load column. Those two
-    # sheets do NOT agree (the day-avg sheet is itself just an average of
-    # the hourly sheet, computed on however many rows Excel/PI happened to
-    # populate that day), so blindly letting whichever sheet is processed
-    # last overwrite the other silently picks the wrong one at random.
+    # Merge: pick ONE "best" sheet among the generic (non-CenPeep) sheets —
+    # whichever has the most real (non-blank) date rows — and take ALL of
+    # its extracted fields as-is. A field's average/sum must never be mixed
+    # across sheets; it always comes wholly from one sheet's rows.
     #
-    # Instead: for each field, keep the value from whichever sheet has the
-    # most real (non-blank) data rows for it — this is what actually
-    # distinguishes a genuine multi-reading log sheet from a small
-    # summary/average sheet, per the "more date rows = the real sheet" rule.
+    # Only fields the best sheet doesn't have at all are backfilled from the
+    # next-best sheet (2nd-most date rows), then the next, and so on. This
+    # is deliberately a SHEET-level choice, not a per-field one — e.g. an
+    # "Hourly" log sheet (many date rows) should be used wholesale over a
+    # "Day Avg" summary sheet (few rows, itself just an average of the
+    # hourly sheet), rather than comparing row counts field by field.
+    #
     # The CenPeep column-layout sheet, if present, still wins over both
     # (it's a distinct, authoritative single-value layout, not a log).
     merged_extracted = {}
     merged_field_source = {}   # field_id -> (sheetName, dataRowCount) chosen
     cenpeep_result = None
+    generic_sheets = []
     for sr in sheet_results:
         if 'cenpeep' in sr['sheetName'].lower():
             cenpeep_result = sr
             continue
-        sr_rows = sr.get('dataRowCount', 0)
-        for fid, val in sr['extracted'].items():
-            prev = merged_field_source.get(fid)
-            if prev is None or sr_rows > prev[1]:
-                merged_extracted[fid] = val
-                merged_field_source[fid] = (sr['sheetName'], sr_rows)
+        generic_sheets.append(sr)
 
-    # Fallback primary sheet: prefer whichever sheet actually produced the
-    # most fields, rather than unconditionally the workbook's first sheet —
-    # a chart sheet, an empty cover sheet, or a sheet openpyxl/calamine just
-    # happens to list first can otherwise "win" despite contributing nothing.
-    if sheet_results:
+    # Rank generic sheets by date-row count, most rows first.
+    ranked_sheets = sorted(generic_sheets, key=lambda sr: sr.get('dataRowCount', 0), reverse=True)
+
+    best_generic_sheet = None
+    for sr in ranked_sheets:
+        if not sr['extracted']:
+            continue
+        sr_rows = sr.get('dataRowCount', 0)
+        if best_generic_sheet is None:
+            best_generic_sheet = sr
+        # Take every field this sheet has, but only if the field hasn't
+        # already been filled by a higher-ranked (more date rows) sheet.
+        for fid, val in sr['extracted'].items():
+            if fid in merged_extracted:
+                continue
+            merged_extracted[fid] = val
+            merged_field_source[fid] = (sr['sheetName'], sr_rows)
+
+    # Fallback primary sheet: the best-ranked generic sheet if one produced
+    # fields; otherwise whichever sheet produced the most fields at all, so
+    # a chart sheet / empty cover sheet can't "win" despite contributing
+    # nothing.
+    if best_generic_sheet is not None:
+        primary_sheet = best_generic_sheet['sheetName']
+    elif sheet_results:
         primary_sheet = max(sheet_results, key=lambda sr: len(sr['extracted']))['sheetName']
     else:
         primary_sheet = ''
