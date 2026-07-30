@@ -319,14 +319,15 @@ def _parse_raw_layout(rows, use_ml=True):
     if not col_map:
         return {}, [], {}, {}
 
-    # Collect numeric values per field across all data rows
+    # Collect numeric values per field across all data rows.
+    # A blank/spacer row (or any malformed row) is skipped via
+    # _accumulate_row's own guard — it never stops the loop, so rows
+    # after it are always still collected.
     field_values = {fid: [] for fid in col_map.values()}
     for row in data_rows:
-        for col_idx, fid in col_map.items():
-            val = row[col_idx] if col_idx < len(row) else None
-            num = _to_num(val)
-            if num is not None:
-                field_values[fid].append(num)
+        if _is_blank_row(row):
+            continue
+        _accumulate_row(row, col_map, field_values)
 
     extracted, raw_rows, sheet_summary = _finalize_field_values(field_values)
     col_meta = {
@@ -444,7 +445,15 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
             cenpeep_check_rows.append(row)
 
         if headers is None:
-            # Still hunting for the header row in the first few rows
+            # Still hunting for the header row in the first few rows.
+            # Blank/spacer rows above the real header (common in plant
+            # exports with a title block or logo row) must not eat into
+            # the scan budget below — otherwise a few leading blank rows
+            # could exhaust HEADER_SCAN_ROWS*4 before the real header is
+            # ever reached, and the whole sheet would wrongly come back
+            # "unrecognized".
+            if _is_blank_row(row):
+                continue
             chunk.append(row)
             if len(chunk) >= HEADER_SCAN_ROWS:
                 idx = _find_header_row(chunk, use_ml=use_ml)
@@ -455,8 +464,12 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
                         headers, use_ml=use_ml
                     )
                     field_values = {fid: [] for fid in set(col_map.values())}
-                    # Process any data rows already buffered after the header
+                    # Process any data rows already buffered after the header.
+                    # Blank rows in here are skipped, not treated as the end
+                    # of data — everything after them still gets collected.
                     for data_row in chunk[header_row_idx + 1:]:
+                        if _is_blank_row(data_row):
+                            continue
                         _accumulate_row(data_row, col_map, field_values)
                     chunk = []
                 elif len(chunk) > HEADER_SCAN_ROWS * 4:
@@ -465,7 +478,11 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
                     break
             continue
 
-        # Header already known — accumulate this row directly, no buffering
+        # Header already known — accumulate this row directly, no buffering.
+        # A blank row here is just skipped; it never stops the stream —
+        # every row after it still gets processed.
+        if _is_blank_row(row):
+            continue
         _accumulate_row(row, col_map, field_values)
 
     # First, check whether this is actually a strict CenPeep column-layout
@@ -517,11 +534,42 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
     }
 
 
+def _is_blank_row(row):
+    """
+    True if every cell in a row is empty (None, or a whitespace-only
+    string). A row like this is a spacer/separator in the source sheet —
+    it must never stop iteration, it should just be skipped, and it
+    should never count against the header-detection scan budget either
+    (a run of blank rows above the real header could otherwise burn
+    through HEADER_SCAN_ROWS before the actual header is ever reached).
+    """
+    if row is None:
+        return True
+    return all(c is None or (isinstance(c, str) and not c.strip()) for c in row)
+
+
 def _accumulate_row(row, col_map, field_values):
-    """Pull numeric values for mapped columns out of one data row."""
+    """
+    Pull numeric values for mapped columns out of one data row.
+
+    Defensive on purpose: a blank/malformed row (None, a short row, a
+    row holding a stray sensor-fault string, or any other unexpected
+    shape) must be SKIPPED and processing must CONTINUE to the rows
+    after it — it must never silently truncate the average at that
+    point. Any per-row problem here is swallowed and treated as "no
+    numeric value for this field on this row", not as a reason to stop.
+    """
+    if row is None:
+        return
     for col_idx, fid in col_map.items():
-        val = row[col_idx] if col_idx < len(row) else None
-        num = _to_num(val)
+        try:
+            val = row[col_idx] if col_idx < len(row) else None
+            num = _to_num(val)
+        except (TypeError, IndexError):
+            # Malformed cell/row shape — treat as blank for this field
+            # and keep going, rather than letting the exception bubble
+            # up and abort the rest of the sheet.
+            num = None
         if num is not None:
             field_values.setdefault(fid, []).append(num)
 
