@@ -47,7 +47,7 @@ import os
 # 'fieldDetail' (per-field: which sheet/header/method/confidence) and
 # 'missingFields' (required fields not found anywhere) — this script just
 # renders that straight into a document.
-from routes.upload import parse_workbook, REQUIRED_FIELDS
+from routes.upload import parse_workbook
 
 
 # ── Step 1: run the real pipeline ───────────────────────────────────────────
@@ -112,10 +112,10 @@ def build_report(result, output_path):
             hdr_cells[i].text = txt
             hdr_cells[i].paragraphs[0].runs[0].bold = True
 
-        for fid in sorted(field_detail.keys()):
+        for fid in sorted(field_detail.keys(), key=lambda f: field_detail[f].get("label", f)):
             d = field_detail[fid]
             row = table.add_row().cells
-            row[0].text = fid
+            row[0].text = d.get("label") or fid
             row[1].text = d.get("header") or "—"
             method = d.get("source", "rule")
             row[2].text = method_labels.get(method, method)
@@ -134,8 +134,8 @@ def build_report(result, output_path):
             "The following required CENPEEP input fields were not found on "
             "any sheet in this workbook and must be entered manually:"
         )
-        for fid in missing_fields:
-            doc.add_paragraph(fid, style="List Bullet")
+        for m in missing_fields:
+            doc.add_paragraph(m.get("label") or m.get("id") or str(m), style="List Bullet")
     else:
         doc.add_paragraph("All required CENPEEP input fields were detected.")
 

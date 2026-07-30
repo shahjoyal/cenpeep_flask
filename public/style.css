@@ -399,6 +399,22 @@ header {
   font-weight: 600 !important;
 }
 
+/* ── Upload detection state (set by initUpload() in script.js) ─────────────
+   .field-detected — value was found on the selected sheet and applied.
+   .field-missing  — required field was NOT found anywhere in the workbook,
+                      so it still needs to be entered by hand.
+   Cleared and re-applied on every new upload; not applied at all until a
+   file has been uploaded at least once. */
+.field-input.field-detected {
+  border-color: #16a34a;
+  background: rgba(22,163,74,0.10);
+}
+
+.field-input.field-missing {
+  border-color: #dc2626;
+  background: rgba(220,38,38,0.08);
+}
+
 .formula-tag {
   font-family: 'JetBrains Mono', monospace;
   font-size: 9px;

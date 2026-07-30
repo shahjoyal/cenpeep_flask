@@ -112,6 +112,32 @@ REQUIRED_FIELDS = [
     'Cd', 'Sd', 'Hd', 'Md2', 'Nd', 'Od', 'Ad2', 'GCVd', 'Trad', 'Mwvd',
 ]
 
+# Full human-readable name for each field id, taken verbatim from the
+# "field-name" label next to each input on the calculator form (public/
+# calculator.html) — used anywhere a field is shown to a person (reports,
+# the upload summary) instead of the bare symbol/abbreviation.
+FIELD_LABELS = {
+    'L': 'Unit Load', 'Ffw': 'Steam Flow', 'Fin': 'Total Coal Flow',
+    'Cba': 'Unburnt Carbon in Bottom Ash', 'Cfa': 'Unburnt Carbon in Fly Ash',
+    'Pfa': '% of Fly Ash in Total Ash', 'Pba': '% of Bottom Ash in Total Ash',
+    'M': 'Moisture', 'A': 'Ash', 'VM': 'Volatile Matter', 'FC': 'Fixed Carbon',
+    'GCV': 'Gross Calorific Value (GCV)', 'S': 'Sulfur',
+    'O2in': 'Avg. Flue Gas O\u2082 \u2014 APH In', 'COin': 'Avg. Flue Gas CO \u2014 APH In',
+    'O2out': 'Avg. Flue Gas O\u2082 \u2014 APH Out', 'COout': 'Avg. Flue Gas CO \u2014 APH Out',
+    'Tgi': 'Avg. Flue Gas Temp \u2014 APH In', 'Tgo': 'Avg. Flue Gas Temp \u2014 APH Out',
+    'Tpai': 'Primary Air to APH Temp In', 'Tpao': 'Primary Air from APH Temp Out',
+    'Tsai': 'Secondary Air to APH Temp In', 'Tsao': 'Secondary Air from APH Temp Out',
+    'Fsa': 'Total Secondary Air Flow', 'Fpa': 'Total Primary Air Flow',
+    'Tref': 'Design Ambient / Ref Air Temp',
+    'Md': 'Moisture \u2014 Design', 'Ad': 'Ash \u2014 Design',
+    'VMd': 'Volatile Matter \u2014 Design', 'FCd': 'Fixed Carbon \u2014 Design',
+    'Cd': 'Carbon \u2014 Design', 'Sd': 'Sulfur \u2014 Design', 'Hd': 'Hydrogen \u2014 Design',
+    'Md2': 'Moisture \u2014 Design (Ultimate)', 'Nd': 'Nitrogen \u2014 Design',
+    'Od': 'Oxygen \u2014 Design', 'Ad2': 'Ash \u2014 Design (Ultimate)',
+    'GCVd': 'GCV \u2014 Design', 'Trad': 'Ref. Air Temp \u2014 Design',
+    'Mwvd': 'Moisture in Air \u2014 Design',
+}
+
 # Human-readable label guesses for unknown-layout headers
 LABEL_ALIASES = {
     'load': 'L', 'unit load': 'L', 'mw': 'L',
@@ -832,6 +858,7 @@ def parse_workbook(file_bytes, filename, use_ml=True):
             detail = field_details.get(fid, {})
             merged_field_detail[fid] = {
                 'sheet': sr['sheetName'],
+                'label': FIELD_LABELS.get(fid, fid),
                 'header': detail.get('header'),
                 'source': detail.get('source', 'rule'),
                 'confidence': detail.get('confidence', 1.0),
@@ -853,6 +880,7 @@ def parse_workbook(file_bytes, filename, use_ml=True):
             merged_field_source[fid] = (cenpeep_result['sheetName'], None)
             merged_field_detail[fid] = {
                 'sheet': cenpeep_result['sheetName'],
+                'label': FIELD_LABELS.get(fid, fid),
                 'header': None,
                 'source': 'cenpeep_column',
                 'confidence': cenpeep_details.get(fid, {}).get('confidence', 1.0),
@@ -860,7 +888,10 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         merged_extracted.update(cenpeep_result['extracted'])
         primary_sheet = cenpeep_result['sheetName']
 
-    missing_fields = [fid for fid in REQUIRED_FIELDS if fid not in merged_extracted]
+    missing_fields = [
+        {'id': fid, 'label': FIELD_LABELS.get(fid, fid)}
+        for fid in REQUIRED_FIELDS if fid not in merged_extracted
+    ]
 
     return {
         'sheetResults': sheet_results,

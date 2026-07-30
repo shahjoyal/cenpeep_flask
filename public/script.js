@@ -41,6 +41,19 @@ function showToast(msg, type = 'success') {
 // ── Excel upload → auto-populate ─────────────────────────────────────────────
 window._uploadedFilename = null;
 
+// Mirrors routes/upload.py's REQUIRED_FIELDS — every real CENPEEP input
+// field id on the calculator form. Used only to reset detected/missing
+// coloring across uploads (so a field marked red on upload #1 doesn't stay
+// red forever if upload #2 doesn't mention it at all).
+const ALL_FIELD_IDS = [
+  'L', 'Ffw', 'Fin', 'Cba', 'Cfa', 'Pfa', 'Pba',
+  'M', 'A', 'VM', 'FC', 'GCV', 'S',
+  'O2in', 'COin', 'O2out', 'COout',
+  'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa', 'Tref',
+  'Md', 'Ad', 'VMd', 'FCd',
+  'Cd', 'Sd', 'Hd', 'Md2', 'Nd', 'Od', 'Ad2', 'GCVd', 'Trad', 'Mwvd',
+];
+
 function initUpload() {
   const input = document.getElementById('upload-file-input');
   if (!input) return;
@@ -62,6 +75,12 @@ function initUpload() {
 
       if (!data.ok) throw new Error(data.error || 'Upload failed');
 
+      // ── Reset previous upload's coloring before applying the new one ─────
+      for (const fid of ALL_FIELD_IDS) {
+        const el = document.getElementById(fid);
+        if (el) el.classList.remove('field-detected', 'field-missing');
+      }
+
       // ── Populate every returned field id ────────────────────────────────
       const extracted = data.extracted || {};
       let   populated = 0;
@@ -69,11 +88,16 @@ function initUpload() {
         const el = document.getElementById(fieldId);
         if (el && !el.readOnly) {
           el.value = typeof val === 'number' ? parseFloat(val.toFixed(6)) : val;
-          el.style.transition = 'background 0.4s';
-          el.style.background = 'rgba(5,150,105,0.12)';
-          setTimeout(() => { el.style.background = ''; }, 1400);
+          el.classList.add('field-detected');
           populated++;
         }
+      }
+
+      // Mark required-but-undetected fields so they're easy to spot and fill in.
+      const missingFieldsList = data.missingFields || [];
+      for (const m of missingFieldsList) {
+        const el = document.getElementById(m.id || m);
+        if (el) el.classList.add('field-missing');
       }
 
       // Recalc CO2 auto-fields
@@ -87,7 +111,6 @@ function initUpload() {
       // data.fieldDetail (built server-side in parse_workbook()).
       const sheetResults  = data.sheetResults || [];
       const fieldDetail   = data.fieldDetail || {};
-      const missingFields = data.missingFields || [];
       const primarySheet  = data.primarySheet || '';
 
       const strategyLabel = {
@@ -101,14 +124,15 @@ function initUpload() {
       const selectedSr = sheetResults.find(sr => sr.sheetName === primarySheet);
       const strat = selectedSr ? (strategyLabel[selectedSr.strategy] || selectedSr.strategy) : '';
 
-      // One row per field that was actually populated, in a stable order.
+      // One row per field that was actually populated, in a stable order —
+      // shown by its full name (e.g. "Steam Flow"), not the bare symbol.
       const fieldRows = Object.entries(fieldDetail)
-        .sort(([a], [b]) => a.localeCompare(b))
+        .sort(([, a], [, b]) => (a.label || '').localeCompare(b.label || ''))
         .map(([fid, d]) => {
           const conf = typeof d.confidence === 'number' ? `${Math.round(d.confidence * 100)}%` : '—';
           const via  = d.source === 'ml' ? '🤖 AI-detected' : d.source === 'cenpeep_column' ? 'CenPeep layout' : 'exact match';
-          const from = d.header ? `"${d.header}"` : fid;
-          return `<tr><td>${fid}</td><td>${from}</td><td>${via}</td><td>${conf}</td></tr>`;
+          const from = d.header ? `"${d.header}"` : (d.label || fid);
+          return `<tr><td>${d.label || fid}</td><td>${from}</td><td>${via}</td><td>${conf}</td></tr>`;
         }).join('');
 
       const fieldTable = fieldRows
@@ -120,8 +144,9 @@ function initUpload() {
            </table>`
         : '';
 
-      const missingLine = missingFields.length
-        ? `<br><small style="color:#f87171">⚠ Not detected — enter manually: ${missingFields.join(', ')}</small>`
+      const missingNames = missingFieldsList.map(m => m.label || m.id || m);
+      const missingLine = missingNames.length
+        ? `<br><small style="color:#f87171">⚠ Not detected — enter manually: ${missingNames.join(', ')}</small>`
         : `<br><small style="color:#4ade80">✓ All required fields detected</small>`;
 
       const timeNote = data.parseTimeMs ? ` in ${(data.parseTimeMs/1000).toFixed(1)}s` : '';
