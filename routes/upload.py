@@ -295,6 +295,55 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
     return col_map, col_source, col_confidence
 
 
+# ─── Row-count helpers (used to pick the right sheet when a field shows up
+#     in more than one — e.g. an "Hourly" sheet AND a "Day Avg" sheet) ────────
+_DATE_COL_HINTS = {'date', 'time', 'day', 'hour', 'hrs', 'hr', 'timestamp'}
+
+
+def _find_date_col_idx(headers):
+    """
+    Locate a date/time-like column among the headers, purely to gauge how
+    many real data rows a sheet has. This is NOT used for field extraction
+    (date/time columns are never mapped to a CENPEEP field — see
+    NON_FIELD_HEADERS) — it's only a row-counting yardstick so we can tell
+    a genuine hourly log sheet (many populated date rows) apart from a
+    daily/monthly summary sheet (few rows) when both sheets happen to
+    produce a value for the same field.
+    """
+    for idx, h in enumerate(headers):
+        if h is None:
+            continue
+        norm = re.sub(r'[^a-z0-9]+', ' ', str(h).lower()).strip()
+        if set(norm.split()) & _DATE_COL_HINTS:
+            return idx
+    return None
+
+
+def _row_has_data(row, date_col_idx, col_map):
+    """
+    True if this row should count as a real reading, not a blank/spacer row.
+
+    If we found a date/time column, a row only counts if that cell is
+    actually populated — this is the direct implementation of "skip blank
+    rows, don't count them, and don't treat them as a reading of 0".
+    If no date column was found on this sheet, fall back to "does any
+    mapped field column have a real number in this row".
+    """
+    if date_col_idx is not None:
+        val = row[date_col_idx] if date_col_idx < len(row) else None
+        return val is not None and str(val).strip() != ''
+    for col_idx in col_map:
+        val = row[col_idx] if col_idx < len(row) else None
+        if _to_num(val) is not None:
+            return True
+    return False
+
+
+def _count_populated_data_rows(data_rows, date_col_idx, col_map):
+    """Counts real (non-blank) data rows in a sheet — see _row_has_data."""
+    return sum(1 for row in data_rows if _row_has_data(row, date_col_idx, col_map))
+
+
 # ─── Strategy 2: Raw tabular layout (header row + data rows), ML-augmented ───
 def _parse_raw_layout(rows, use_ml=True):
     """
@@ -309,7 +358,7 @@ def _parse_raw_layout(rows, use_ml=True):
     header_row_idx = _find_header_row(sample, use_ml=use_ml)
 
     if header_row_idx is None:
-        return {}, [], {}, {}
+        return {}, [], {}, {}, 0
 
     headers = rows[header_row_idx]
     data_rows = rows[header_row_idx + 1:]
@@ -317,17 +366,21 @@ def _parse_raw_layout(rows, use_ml=True):
     col_map, col_source, col_confidence = _map_columns_to_fields(headers, use_ml=use_ml)
 
     if not col_map:
-        return {}, [], {}, {}
+        return {}, [], {}, {}, 0
 
-    # Collect numeric values per field across all data rows.
-    # A blank/spacer row (or any malformed row) is skipped via
-    # _accumulate_row's own guard — it never stops the loop, so rows
-    # after it are always still collected.
+    date_col_idx = _find_date_col_idx(headers)
+    data_row_count = _count_populated_data_rows(data_rows, date_col_idx, col_map)
+
+    # Collect numeric values per field across all data rows. Blank / non-
+    # numeric cells (_to_num returns None for these) are skipped outright —
+    # they are never counted as 0, so they can't drag the average down.
     field_values = {fid: [] for fid in col_map.values()}
     for row in data_rows:
-        if _is_blank_row(row):
-            continue
-        _accumulate_row(row, col_map, field_values)
+        for col_idx, fid in col_map.items():
+            val = row[col_idx] if col_idx < len(row) else None
+            num = _to_num(val)
+            if num is not None:
+                field_values[fid].append(num)
 
     extracted, raw_rows, sheet_summary = _finalize_field_values(field_values)
     col_meta = {
@@ -339,7 +392,7 @@ def _parse_raw_layout(rows, use_ml=True):
         }
         for col_idx, fid in col_map.items()
     }
-    return extracted, raw_rows, sheet_summary, col_meta
+    return extracted, raw_rows, sheet_summary, col_meta, data_row_count
 
 
 def _finalize_field_values(field_values):
@@ -376,10 +429,11 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True):
             'rawRows': raw1,
             'summary': {},
             'columns': {},
+            'dataRowCount': len(rows),
         }
 
     # Strategy 2: raw tabular, with ML fallback for unrecognized headers
-    ext2, raw2, summary, col_meta = _parse_raw_layout(rows, use_ml=use_ml)
+    ext2, raw2, summary, col_meta, data_row_count = _parse_raw_layout(rows, use_ml=use_ml)
     if ext2:
         ml_used = any(c['source'] == 'ml' for c in col_meta.values())
         return {
@@ -389,6 +443,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True):
             'rawRows': raw2,
             'summary': summary,
             'columns': col_meta,
+            'dataRowCount': data_row_count,
         }
 
     return {
@@ -398,6 +453,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True):
         'rawRows': [],
         'summary': {},
         'columns': {},
+        'dataRowCount': 0,
     }
 
 
@@ -437,6 +493,8 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
     field_values = {}
     cenpeep_check_rows = []  # first rows, used to check for CenPeep column layout
     row_count = 0
+    date_col_idx = None
+    data_row_count = 0
 
     for row in row_iter:
         row_count += 1
@@ -445,15 +503,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
             cenpeep_check_rows.append(row)
 
         if headers is None:
-            # Still hunting for the header row in the first few rows.
-            # Blank/spacer rows above the real header (common in plant
-            # exports with a title block or logo row) must not eat into
-            # the scan budget below — otherwise a few leading blank rows
-            # could exhaust HEADER_SCAN_ROWS*4 before the real header is
-            # ever reached, and the whole sheet would wrongly come back
-            # "unrecognized".
-            if _is_blank_row(row):
-                continue
+            # Still hunting for the header row in the first few rows
             chunk.append(row)
             if len(chunk) >= HEADER_SCAN_ROWS:
                 idx = _find_header_row(chunk, use_ml=use_ml)
@@ -464,13 +514,12 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
                         headers, use_ml=use_ml
                     )
                     field_values = {fid: [] for fid in set(col_map.values())}
-                    # Process any data rows already buffered after the header.
-                    # Blank rows in here are skipped, not treated as the end
-                    # of data — everything after them still gets collected.
+                    date_col_idx = _find_date_col_idx(headers)
+                    # Process any data rows already buffered after the header
                     for data_row in chunk[header_row_idx + 1:]:
-                        if _is_blank_row(data_row):
-                            continue
                         _accumulate_row(data_row, col_map, field_values)
+                        if _row_has_data(data_row, date_col_idx, col_map):
+                            data_row_count += 1
                     chunk = []
                 elif len(chunk) > HEADER_SCAN_ROWS * 4:
                     # Header never found in a reasonable window — give up
@@ -478,12 +527,10 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
                     break
             continue
 
-        # Header already known — accumulate this row directly, no buffering.
-        # A blank row here is just skipped; it never stops the stream —
-        # every row after it still gets processed.
-        if _is_blank_row(row):
-            continue
+        # Header already known — accumulate this row directly, no buffering
         _accumulate_row(row, col_map, field_values)
+        if _row_has_data(row, date_col_idx, col_map):
+            data_row_count += 1
 
     # First, check whether this is actually a strict CenPeep column-layout
     # sheet (Particulars/UOM/Symbol/Formula/Value) — that strategy wins if
@@ -498,6 +545,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
             'summary': {},
             'columns': {},
             'rowsScanned': row_count,
+            'dataRowCount': row_count,
         }
 
     if not col_map:
@@ -509,6 +557,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
             'summary': {},
             'columns': {},
             'rowsScanned': row_count,
+            'dataRowCount': 0,
         }
 
     extracted, raw_rows, summary = _finalize_field_values(field_values)
@@ -531,45 +580,15 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
         'summary': summary,
         'columns': col_meta,
         'rowsScanned': row_count,
+        'dataRowCount': data_row_count,
     }
 
 
-def _is_blank_row(row):
-    """
-    True if every cell in a row is empty (None, or a whitespace-only
-    string). A row like this is a spacer/separator in the source sheet —
-    it must never stop iteration, it should just be skipped, and it
-    should never count against the header-detection scan budget either
-    (a run of blank rows above the real header could otherwise burn
-    through HEADER_SCAN_ROWS before the actual header is ever reached).
-    """
-    if row is None:
-        return True
-    return all(c is None or (isinstance(c, str) and not c.strip()) for c in row)
-
-
 def _accumulate_row(row, col_map, field_values):
-    """
-    Pull numeric values for mapped columns out of one data row.
-
-    Defensive on purpose: a blank/malformed row (None, a short row, a
-    row holding a stray sensor-fault string, or any other unexpected
-    shape) must be SKIPPED and processing must CONTINUE to the rows
-    after it — it must never silently truncate the average at that
-    point. Any per-row problem here is swallowed and treated as "no
-    numeric value for this field on this row", not as a reason to stop.
-    """
-    if row is None:
-        return
+    """Pull numeric values for mapped columns out of one data row."""
     for col_idx, fid in col_map.items():
-        try:
-            val = row[col_idx] if col_idx < len(row) else None
-            num = _to_num(val)
-        except (TypeError, IndexError):
-            # Malformed cell/row shape — treat as blank for this field
-            # and keep going, rather than letting the exception bubble
-            # up and abort the rest of the sheet.
-            num = None
+        val = row[col_idx] if col_idx < len(row) else None
+        num = _to_num(val)
         if num is not None:
             field_values.setdefault(fid, []).append(num)
 
@@ -753,14 +772,33 @@ def parse_workbook(file_bytes, filename, use_ml=True):
                 raise RuntimeError('Neither python-calamine nor openpyxl is installed')
             sheet_results = _parse_with_openpyxl(file_bytes, use_ml=use_ml)
 
-    # Merge: generic sheets first, CenPeep sheet last (wins conflicts)
+    # Merge: among the generic (non-CenPeep) sheets, the SAME field can
+    # legitimately show up in more than one sheet — e.g. an "Hourly" log
+    # sheet and a "Day Avg" summary sheet both have a Load column. Those two
+    # sheets do NOT agree (the day-avg sheet is itself just an average of
+    # the hourly sheet, computed on however many rows Excel/PI happened to
+    # populate that day), so blindly letting whichever sheet is processed
+    # last overwrite the other silently picks the wrong one at random.
+    #
+    # Instead: for each field, keep the value from whichever sheet has the
+    # most real (non-blank) data rows for it — this is what actually
+    # distinguishes a genuine multi-reading log sheet from a small
+    # summary/average sheet, per the "more date rows = the real sheet" rule.
+    # The CenPeep column-layout sheet, if present, still wins over both
+    # (it's a distinct, authoritative single-value layout, not a log).
     merged_extracted = {}
+    merged_field_source = {}   # field_id -> (sheetName, dataRowCount) chosen
     cenpeep_result = None
     for sr in sheet_results:
         if 'cenpeep' in sr['sheetName'].lower():
             cenpeep_result = sr
-        else:
-            merged_extracted.update(sr['extracted'])
+            continue
+        sr_rows = sr.get('dataRowCount', 0)
+        for fid, val in sr['extracted'].items():
+            prev = merged_field_source.get(fid)
+            if prev is None or sr_rows > prev[1]:
+                merged_extracted[fid] = val
+                merged_field_source[fid] = (sr['sheetName'], sr_rows)
 
     # Fallback primary sheet: prefer whichever sheet actually produced the
     # most fields, rather than unconditionally the workbook's first sheet —
@@ -771,12 +809,18 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     else:
         primary_sheet = ''
     if cenpeep_result:
+        for fid in cenpeep_result['extracted']:
+            merged_field_source[fid] = (cenpeep_result['sheetName'], None)
         merged_extracted.update(cenpeep_result['extracted'])
         primary_sheet = cenpeep_result['sheetName']
 
     return {
         'sheetResults': sheet_results,
         'extracted': merged_extracted,
+        # Which sheet each field's final value was actually taken from —
+        # use this to sanity-check that (e.g.) Load came from the Hourly
+        # sheet and not the Day Avg sheet.
+        'fieldSource': {fid: src[0] for fid, src in merged_field_source.items()},
         'primarySheet': primary_sheet,
         'totalFields': len(merged_extracted),
         'parseTimeMs': round((time.time() - t_start) * 1000, 1),
