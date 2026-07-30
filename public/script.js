@@ -80,44 +80,60 @@ function initUpload() {
       autoCalcCO2();
       window._uploadedFilename = data.filename;
 
-      // ── Build sheet summary panel ────────────────────────────────────────
-      const sheetResults = data.sheetResults || [];
+      // ── Build "selected sheet" AI summary panel ──────────────────────────
+      // Only the sheet that was actually chosen (data.primarySheet) is shown
+      // here — not every sheet in the workbook — since that's the one whose
+      // values were actually used. Per-field confidence comes from
+      // data.fieldDetail (built server-side in parse_workbook()).
+      const sheetResults  = data.sheetResults || [];
+      const fieldDetail   = data.fieldDetail || {};
+      const missingFields = data.missingFields || [];
+      const primarySheet  = data.primarySheet || '';
+
       const strategyLabel = {
-        cenpeep_column:          '(CenPeep layout)',
-        raw_tabular:             '(raw data, averaged)',
-        raw_tabular_ml:          '(raw data + AI field detection)',
-        raw_tabular_chunked:     '(large sheet, chunked)',
-        raw_tabular_ml_chunked:  '(large sheet, chunked + AI field detection)',
-        unrecognized:            '(no fields found)',
+        cenpeep_column:          'CenPeep layout',
+        raw_tabular:             'raw data, averaged',
+        raw_tabular_ml:          'raw data + AI field detection',
+        raw_tabular_chunked:     'large sheet, chunked',
+        raw_tabular_ml_chunked:  'large sheet, chunked + AI field detection',
+        unrecognized:            'no fields found',
       };
-      const summaryLines = sheetResults.map(sr => {
-        const n     = Object.keys(sr.extracted || {}).length;
-        const strat = strategyLabel[sr.strategy] || '';
+      const selectedSr = sheetResults.find(sr => sr.sheetName === primarySheet);
+      const strat = selectedSr ? (strategyLabel[selectedSr.strategy] || selectedSr.strategy) : '';
 
-        // Show averaging info if relevant
-        const avgInfo = Object.entries(sr.summary || {})
-          .filter(([, s]) => s.count > 1)
-          .map(([fid, s]) => `${fid}: avg of ${s.count} readings = ${s.average.toFixed(2)}`);
+      // One row per field that was actually populated, in a stable order.
+      const fieldRows = Object.entries(fieldDetail)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([fid, d]) => {
+          const conf = typeof d.confidence === 'number' ? `${Math.round(d.confidence * 100)}%` : '—';
+          const via  = d.source === 'ml' ? '🤖 AI-detected' : d.source === 'cenpeep_column' ? 'CenPeep layout' : 'exact match';
+          const from = d.header ? `"${d.header}"` : fid;
+          return `<tr><td>${fid}</td><td>${from}</td><td>${via}</td><td>${conf}</td></tr>`;
+        }).join('');
 
-        // Show which fields were found via the ML classifier (vs exact rule match)
-        const mlCols = Object.values(sr.columns || {}).filter(c => c.source === 'ml');
-        const mlInfo = mlCols.map(c => `"${c.header}" → ${c.fieldId} (${Math.round(c.confidence*100)}% confidence)`);
+      const fieldTable = fieldRows
+        ? `<table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px">
+             <thead><tr style="color:#94a3b8;text-align:left">
+               <th>Field</th><th>Detected From</th><th>Method</th><th>Confidence</th>
+             </tr></thead>
+             <tbody>${fieldRows}</tbody>
+           </table>`
+        : '';
 
-        let line = `📄 <b>${sr.sheetName}</b> — ${n} fields ${strat}`;
-        if (sr.rowsScanned) line += ` · ${sr.rowsScanned.toLocaleString()} rows scanned`;
-        if (avgInfo.length) line += `<br><small style="color:#94a3b8;padding-left:1em">↳ Averaged: ${avgInfo.join('; ')}</small>`;
-        if (mlInfo.length)  line += `<br><small style="color:#a78bfa;padding-left:1em">🤖 AI-detected: ${mlInfo.slice(0,6).join('; ')}${mlInfo.length>6 ? ` +${mlInfo.length-6} more` : ''}</small>`;
-        return line;
-      }).join('<br>');
+      const missingLine = missingFields.length
+        ? `<br><small style="color:#f87171">⚠ Not detected — enter manually: ${missingFields.join(', ')}</small>`
+        : `<br><small style="color:#4ade80">✓ All required fields detected</small>`;
 
       const timeNote = data.parseTimeMs ? ` in ${(data.parseTimeMs/1000).toFixed(1)}s` : '';
 
       // Inject summary into status element (allow HTML)
       statusEl.className   = 'upload-status success';
       statusEl.innerHTML   = `✓ <b>${populated} fields</b> auto-populated from "${data.filename}" (${data.fileSizeMB || '?'} MB)${timeNote}
-        <br><small style="color:#94a3b8">${summaryLines}</small>`;
+        <br><small style="color:#94a3b8">📄 Selected sheet: <b>${primarySheet}</b> (${strat}) — out of ${sheetResults.length} sheet(s) scanned</small>
+        ${fieldTable}
+        ${missingLine}`;
 
-      showToast(`Excel imported — ${populated} fields auto-populated from ${sheetResults.length} sheet(s)`, 'success');
+      showToast(`Excel imported — ${populated} fields auto-populated from "${primarySheet}"`, 'success');
 
     } catch (err) {
       statusEl.className   = 'upload-status error';

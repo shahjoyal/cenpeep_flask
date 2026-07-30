@@ -98,6 +98,20 @@ SYM_MAP = {
 # Also accept case-insensitive & common variants
 SYM_MAP_LOWER = {k.lower(): v for k, v in SYM_MAP.items()}
 
+# ─── Full list of CENPEEP input fields the calculator needs ──────────────────
+# This is every editable (non-auto-computed) field on the calculator form —
+# used only to report, after a file is parsed, which required fields were
+# NOT found on the selected sheet (CO2in/CO2out are excluded: those are
+# AUTO/readonly fields computed by the app, never read from an upload).
+REQUIRED_FIELDS = [
+    'L', 'Ffw', 'Fin', 'Cba', 'Cfa', 'Pfa', 'Pba',
+    'M', 'A', 'VM', 'FC', 'GCV', 'S',
+    'O2in', 'COin', 'O2out', 'COout',
+    'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa', 'Tref',
+    'Md', 'Ad', 'VMd', 'FCd',
+    'Cd', 'Sd', 'Hd', 'Md2', 'Nd', 'Od', 'Ad2', 'GCVd', 'Trad', 'Mwvd',
+]
+
 # Human-readable label guesses for unknown-layout headers
 LABEL_ALIASES = {
     'load': 'L', 'unit load': 'L', 'mw': 'L',
@@ -788,6 +802,7 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     # (it's a distinct, authoritative single-value layout, not a log).
     merged_extracted = {}
     merged_field_source = {}   # field_id -> (sheetName, dataRowCount) chosen
+    merged_field_detail = {}   # field_id -> {sheet, header, source, confidence}
     cenpeep_result = None
     generic_sheets = []
     for sr in sheet_results:
@@ -806,6 +821,7 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         sr_rows = sr.get('dataRowCount', 0)
         if best_generic_sheet is None:
             best_generic_sheet = sr
+        field_details = _sheet_field_details(sr)
         # Take every field this sheet has, but only if the field hasn't
         # already been filled by a higher-ranked (more date rows) sheet.
         for fid, val in sr['extracted'].items():
@@ -813,6 +829,13 @@ def parse_workbook(file_bytes, filename, use_ml=True):
                 continue
             merged_extracted[fid] = val
             merged_field_source[fid] = (sr['sheetName'], sr_rows)
+            detail = field_details.get(fid, {})
+            merged_field_detail[fid] = {
+                'sheet': sr['sheetName'],
+                'header': detail.get('header'),
+                'source': detail.get('source', 'rule'),
+                'confidence': detail.get('confidence', 1.0),
+            }
 
     # Fallback primary sheet: the best-ranked generic sheet if one produced
     # fields; otherwise whichever sheet produced the most fields at all, so
@@ -825,10 +848,19 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     else:
         primary_sheet = ''
     if cenpeep_result:
+        cenpeep_details = _sheet_field_details(cenpeep_result)
         for fid in cenpeep_result['extracted']:
             merged_field_source[fid] = (cenpeep_result['sheetName'], None)
+            merged_field_detail[fid] = {
+                'sheet': cenpeep_result['sheetName'],
+                'header': None,
+                'source': 'cenpeep_column',
+                'confidence': cenpeep_details.get(fid, {}).get('confidence', 1.0),
+            }
         merged_extracted.update(cenpeep_result['extracted'])
         primary_sheet = cenpeep_result['sheetName']
+
+    missing_fields = [fid for fid in REQUIRED_FIELDS if fid not in merged_extracted]
 
     return {
         'sheetResults': sheet_results,
@@ -837,10 +869,46 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         # use this to sanity-check that (e.g.) Load came from the Hourly
         # sheet and not the Day Avg sheet.
         'fieldSource': {fid: src[0] for fid, src in merged_field_source.items()},
+        # Per-field detail on the SELECTED sheet's decision: which sheet,
+        # which header text (if any), rule vs ML, and confidence — this is
+        # what the "selected field + confidence" summary is built from,
+        # instead of re-deriving it from every sheet's raw column list.
+        'fieldDetail': merged_field_detail,
         'primarySheet': primary_sheet,
         'totalFields': len(merged_extracted),
+        # Required CENPEEP input fields that were NOT found on any sheet —
+        # i.e. still need to be entered manually.
+        'missingFields': missing_fields,
         'parseTimeMs': round((time.time() - t_start) * 1000, 1),
     }
+
+
+# ─── Field-level confidence lookup (for the "selected sheet" summary) ───────
+def _sheet_field_details(sr):
+    """
+    Returns {fieldId: {'header': str|None, 'source': str, 'confidence': float}}
+    for one sheet's result — regardless of which strategy produced it.
+
+    'cenpeep_column' rows are an exact Particulars/Symbol/Value layout match,
+    so every field from it is confidence 1.0 with no header-guessing involved.
+    'raw_tabular*' sheets carry per-column metadata (rule match vs ML match,
+    with the ML confidence score) in sr['columns'], keyed by column index —
+    this re-keys that by field id instead, which is what a "what was picked,
+    and how sure were we" summary actually needs.
+    """
+    if sr['strategy'] == 'cenpeep_column':
+        return {
+            fid: {'header': None, 'source': 'cenpeep_column', 'confidence': 1.0}
+            for fid in sr['extracted']
+        }
+    details = {}
+    for meta in sr.get('columns', {}).values():
+        details[meta['fieldId']] = {
+            'header': meta['header'],
+            'source': meta['source'],
+            'confidence': meta['confidence'],
+        }
+    return details
 
 
 # ─── Route ────────────────────────────────────────────────────────────────────

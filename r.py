@@ -1,13 +1,22 @@
 """
-generate_model_report.py — CENPEEP field-detection decision-trace report
+generate_model_report.py — CENPEEP selected-sheet field report
 ============================================================================
-One-off script: runs the SAME parsing/detection pipeline used by
-routes/upload.py against a real Excel file, with full decision tracing
-turned on (which stage matched each column, why, with what confidence,
-against which training phrase), and writes a Word document containing
-ONLY, for each sheet: the sheet name as a heading, followed by its
-column-by-column decision table. No title page, no methodology sections,
-no summary counts, no legend.
+One-off script: runs the SAME parsing/selection pipeline used by
+routes/upload.py (routes.upload.parse_workbook) against a real Excel file,
+and writes a Word document scoped to ONLY the sheet that was actually
+selected for import — not a dump of every sheet/column in the workbook.
+
+The report has exactly two things:
+  1. A table of the fields that were pulled from the selected sheet —
+     field id, what header text (or layout) it came from, whether it was
+     a rule/exact match or an AI (ML) match, and the confidence.
+  2. A "Fields Not Detected" list — required CENPEEP input fields that
+     were not found anywhere in the workbook, so they still need to be
+     entered manually.
+
+No title page, no per-column reject/exclude audit trail, no methodology
+sections, no summary counts, no legend — just the selected sheet's
+decisions and what's missing.
 
 USAGE
 -----
@@ -30,169 +39,31 @@ the file around purely for reference without ever re-running it.
 
 import sys
 import os
-import io
-import statistics
 
-import openpyxl
-
-# Reuse the REAL production internals so this report reflects exactly what
-# the running app does — not a re-description of it.
-from routes.upload import (
-    _is_readable_worksheet,
-    _find_header_row,
-    _label_to_field,
-    _sym_to_field,
-    _to_num,
-    _parse_cenpeep_layout,
-    HEADER_SCAN_ROWS,
-)
-from ml.training_data import is_non_field_header
-from ml.field_classifier import get_classifier, DEFAULT_CONFIDENCE_THRESHOLD
+# Reuse the REAL production pipeline so this report reflects exactly what
+# the running app does — not a re-description of it. parse_workbook()
+# already does the sheet SELECTION (most populated date rows wins, CenPeep
+# column layout overrides), the rule/ML field mapping, and returns
+# 'fieldDetail' (per-field: which sheet/header/method/confidence) and
+# 'missingFields' (required fields not found anywhere) — this script just
+# renders that straight into a document.
+from routes.upload import parse_workbook, REQUIRED_FIELDS
 
 
-# ── Step 1: run the pipeline with full tracing ──────────────────────────────
+# ── Step 1: run the real pipeline ───────────────────────────────────────────
 def trace_workbook(path):
-    """
-    Same job as routes.upload.parse_workbook(), but every column's decision
-    is recorded (not just the final extracted values), for reporting.
-    """
+    """Runs parse_workbook() against a file on disk and returns its result
+    dict plus the filename, ready for build_report()."""
     filename = os.path.basename(path)
     with open(path, "rb") as f:
         file_bytes = f.read()
-
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
-    clf = get_classifier()
-
-    sheet_traces = []
-    for name in wb.sheetnames:
-        ws = wb[name]
-        if not _is_readable_worksheet(ws):
-            sheet_traces.append({
-                "sheetName": name,
-                "skipped": True,
-                "reason": "Not a data worksheet (e.g. a chart sheet) — no rows to read.",
-                "columns": [],
-            })
-            continue
-
-        rows = [list(r) for r in ws.iter_rows(values_only=True)]
-
-        # Strategy 1: strict CenPeep column layout — check first, same
-        # priority as production.
-        ext1, raw1 = _parse_cenpeep_layout(rows)
-        if len(ext1) >= 5:
-            sheet_traces.append({
-                "sheetName": name,
-                "skipped": False,
-                "strategy": "cenpeep_column",
-                "columns": [
-                    {
-                        "header": r["particulars"] or r["symbol"],
-                        "decision": "matched",
-                        "method": "cenpeep_column_layout",
-                        "fieldId": _sym_to_field(r["symbol"]),
-                        "confidence": 1.0,
-                        "matchedPhrase": None,
-                        "readings": 1,
-                        "average": r["value"],
-                    }
-                    for r in raw1
-                ],
-            })
-            continue
-
-        # Strategy 2: raw tabular layout — find header row, trace every column.
-        sample = rows[:HEADER_SCAN_ROWS]
-        header_row_idx = _find_header_row(sample)
-        if header_row_idx is None:
-            sheet_traces.append({
-                "sheetName": name, "skipped": True,
-                "reason": "No header row could be identified in the first "
-                          f"{HEADER_SCAN_ROWS} rows.",
-                "columns": [],
-            })
-            continue
-
-        headers = rows[header_row_idx]
-        data_rows = rows[header_row_idx + 1:]
-
-        col_traces = []
-        unmatched_idx, unmatched_text = [], []
-
-        for col_idx, hdr in enumerate(headers):
-            if hdr is None or not str(hdr).strip():
-                continue
-            if is_non_field_header(hdr):
-                col_traces.append({
-                    "header": str(hdr), "decision": "excluded",
-                    "method": "structural_header_list",
-                    "fieldId": None, "confidence": None, "matchedPhrase": None,
-                })
-                continue
-
-            fid = _label_to_field(str(hdr))
-            if fid:
-                col_traces.append({
-                    "header": str(hdr), "decision": "matched",
-                    "method": "rule_based_alias", "fieldId": fid,
-                    "confidence": 1.0, "matchedPhrase": None,
-                    "colIdx": col_idx,
-                })
-            else:
-                unmatched_idx.append(col_idx)
-                unmatched_text.append(str(hdr))
-                col_traces.append({
-                    "header": str(hdr), "decision": "pending_ml",
-                    "method": None, "fieldId": None, "confidence": None,
-                    "matchedPhrase": None, "colIdx": col_idx,
-                })
-
-        if unmatched_text:
-            preds = clf.predict_batch(unmatched_text, threshold=DEFAULT_CONFIDENCE_THRESHOLD)
-            pred_by_text = dict(zip(unmatched_text, preds))
-            for ct in col_traces:
-                if ct["decision"] != "pending_ml":
-                    continue
-                fid, score, matched_example = pred_by_text[ct["header"]]
-                if fid:
-                    ct.update(decision="matched", method="ml_tfidf_cosine",
-                              fieldId=fid, confidence=round(score, 3),
-                              matchedPhrase=matched_example)
-                elif matched_example is not None:
-                    ct.update(decision="rejected_out_of_scope", method="ml_tfidf_cosine",
-                              confidence=round(score, 3), matchedPhrase=matched_example)
-                else:
-                    ct.update(decision="rejected_low_confidence", method="ml_tfidf_cosine",
-                              confidence=round(score, 3))
-
-        # Accumulate values + averages per matched field, same as production.
-        field_values = {}
-        for ct in col_traces:
-            if ct["decision"] != "matched":
-                continue
-            fid, col_idx = ct["fieldId"], ct["colIdx"]
-            vals = []
-            for row in data_rows:
-                v = row[col_idx] if col_idx < len(row) else None
-                num = _to_num(v)
-                if num is not None:
-                    vals.append(num)
-            ct["readings"] = len(vals)
-            ct["average"] = round(statistics.mean(vals), 4) if vals else None
-            if not vals:
-                ct["decision"] = "matched_but_no_numeric_data"
-
-        sheet_traces.append({
-            "sheetName": name, "skipped": False,
-            "strategy": "raw_tabular_ml", "columns": col_traces,
-        })
-
-    wb.close()
-    return {"filename": filename, "sheets": sheet_traces}
+    result = parse_workbook(file_bytes, filename, use_ml=True)
+    result["filename"] = filename
+    return result
 
 
 # ── Step 2: build the Word document ─────────────────────────────────────────
-def build_report(trace, output_path):
+def build_report(result, output_path):
     from docx import Document
     from docx.shared import Pt
     from docx.enum.table import WD_TABLE_ALIGNMENT
@@ -212,59 +83,61 @@ def build_report(trace, output_path):
         })
         tcPr.append(shd)
 
-    decision_colors = {
-        "matched": "D9EAD3",
-        "matched_but_no_numeric_data": "FFF2CC",
-        "excluded": "F3F3F3",
-        "rejected_out_of_scope": "F4CCCC",
-        "rejected_low_confidence": "FCE5CD",
+    method_colors = {
+        "cenpeep_column": "D9EAD3",
+        "rule": "D9EAD3",
+        "ml": "D6E4F0",
+    }
+    method_labels = {
+        "cenpeep_column": "CenPeep layout (exact)",
+        "rule": "Exact alias/symbol match",
+        "ml": "AI (ML) match",
     }
 
-    for sh in trace["sheets"]:
-        doc.add_heading(sh["sheetName"], level=2)
-        if sh.get("skipped"):
-            doc.add_paragraph(f"Skipped — {sh['reason']}")
-            continue
-        if not sh["columns"]:
-            doc.add_paragraph("No fields detected in this sheet.")
-            continue
+    primary_sheet = result.get("primarySheet", "")
+    field_detail = result.get("fieldDetail", {})
+    missing_fields = result.get("missingFields", [])
+    extracted = result.get("extracted", {})
 
-        table = doc.add_table(rows=1, cols=7)
+    doc.add_heading(primary_sheet or "No sheet selected", level=2)
+
+    if not field_detail:
+        doc.add_paragraph("No fields could be detected on the selected sheet.")
+    else:
+        table = doc.add_table(rows=1, cols=5)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.style = "Light Grid Accent 1"
         hdr_cells = table.rows[0].cells
-        for i, txt in enumerate(["Column Header", "Decision", "Method", "Field", "Confidence",
-                                  "Matched Against", "Avg (readings)"]):
+        for i, txt in enumerate(["Field", "Detected From", "Method", "Confidence", "Value"]):
             hdr_cells[i].text = txt
             hdr_cells[i].paragraphs[0].runs[0].bold = True
 
-        for c in sh["columns"]:
+        for fid in sorted(field_detail.keys()):
+            d = field_detail[fid]
             row = table.add_row().cells
-            row[0].text = str(c["header"])[:60]
-            row[1].text = c["decision"].replace("_", " ")
-            row[2].text = (c.get("method") or "—").replace("_", " ")
-            row[3].text = c.get("fieldId") or "—"
-            row[4].text = f"{c['confidence']:.2f}" if c.get("confidence") is not None else "—"
-            # For rule-based matches there's no "closest training phrase" —
-            # the header matched a hand-built alias/symbol exactly, so show
-            # that instead of leaving it blank. For ML matches, this is the
-            # actual training-set example whose similarity score won/lost
-            # the confidence gate — i.e. exactly what the header was
-            # compared against to reach this decision.
-            if c.get("method") == "rule_based_alias":
-                row[5].text = "exact alias/symbol lookup"
-            elif c.get("matchedPhrase"):
-                row[5].text = str(c["matchedPhrase"])[:60]
-            else:
-                row[5].text = "—"
-            if c.get("readings") is not None and c.get("average") is not None:
-                row[6].text = f"{c['average']:.3g}  (n={c['readings']})"
-            else:
-                row[6].text = "—"
-            fill = decision_colors.get(c["decision"], "FFFFFF")
+            row[0].text = fid
+            row[1].text = d.get("header") or "—"
+            method = d.get("source", "rule")
+            row[2].text = method_labels.get(method, method)
+            conf = d.get("confidence")
+            row[3].text = f"{conf:.2f}" if conf is not None else "—"
+            val = extracted.get(fid)
+            row[4].text = f"{val:.4g}" if isinstance(val, (int, float)) else str(val or "—")
+            fill = method_colors.get(method, "FFFFFF")
             for cell in row:
                 shade_cell(cell, fill)
-        doc.add_paragraph()
+
+    doc.add_paragraph()
+    doc.add_heading("Fields Not Detected", level=2)
+    if missing_fields:
+        doc.add_paragraph(
+            "The following required CENPEEP input fields were not found on "
+            "any sheet in this workbook and must be entered manually:"
+        )
+        for fid in missing_fields:
+            doc.add_paragraph(fid, style="List Bullet")
+    else:
+        doc.add_paragraph("All required CENPEEP input fields were detected.")
 
     doc.save(output_path)
 
@@ -277,11 +150,12 @@ def main():
     excel_path = sys.argv[1]
     output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Model_Decision_Report.docx")
 
-    print(f"Tracing decisions for: {excel_path}")
-    trace = trace_workbook(excel_path)
+    print(f"Running selection pipeline for: {excel_path}")
+    result = trace_workbook(excel_path)
+    print(f"Selected sheet: {result.get('primarySheet')}")
 
     print(f"Building report: {output_path}")
-    build_report(trace, output_path)
+    build_report(result, output_path)
 
     print("Done.")
 
