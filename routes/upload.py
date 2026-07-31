@@ -162,6 +162,194 @@ LABEL_ALIASES = {
 }
 
 
+# ─── Highlighted-column detection ─────────────────────────────────────────────
+# Real plant sheets often have the engineer manually highlight (yellow-fill,
+# usually) exactly the columns that matter for the CENPEEP efficiency calc,
+# out of dozens/hundreds of DCS tag columns on the sheet. That's a strong
+# human-provided signal we were previously throwing away entirely — only
+# header TEXT was ever used to decide a column's field. Two failure modes
+# this caused in practice:
+#   1. A highlighted column with unusual/abbreviated wording scored just
+#      under the ML confidence threshold and was silently skipped, while a
+#      differently-worded but WRONG column elsewhere matched confidently.
+#   2. When two columns (one highlighted, one not) both matched the same
+#      field (e.g. "TM(ARB)" and "IM(ADB)" both loosely mean "moisture"),
+#      their readings were averaged TOGETHER — quietly blending the
+#      engineer's chosen reading with an unrelated one and corrupting the
+#      value, with no visible sign anything had gone wrong.
+# The functions below read (once per upload, cheaply — only the first few
+# header rows, not the whole sheet) which header cells carry a real fill
+# color, so that signal can be used to (a) prefer the highlighted column
+# whenever it conflicts with a non-highlighted one mapped to the same
+# field, and (b) retry unmatched highlighted columns at a lower confidence
+# threshold before giving up on them.
+HIGHLIGHT_SCAN_ROWS = HEADER_SCAN_ROWS  # only need the header-row candidates
+# A relaxed threshold used ONLY for header cells we already know were
+# deliberately highlighted by a human — still requires real similarity
+# (this is not "accept anything"), just less margin than the default.
+HIGHLIGHTED_ML_THRESHOLD = 0.30
+
+
+def _is_highlighted_fill(cell):
+    """
+    True if a cell has a real (non-white/none) solid fill color.
+    Guards every attribute access - openpyxl fill/color objects raise on
+    some malformed theme-color entries (e.g. a cell with a theme tint but
+    an unreadable rgb value, seen on real exports).
+    """
+    try:
+        fill = cell.fill
+        if fill is None or fill.patternType != 'solid':
+            return False
+        fg = fill.fgColor
+        if fg is None:
+            return False
+        if getattr(fg, 'type', None) == 'rgb':
+            rgb = fg.rgb
+            if not isinstance(rgb, str):
+                return False
+            # Treat pure white / fully transparent as "not highlighted" -
+            # a solid-white fill is usually just a formatting artifact,
+            # not an intentional highlight.
+            return rgb.upper() not in ('00000000', 'FFFFFFFF', 'FFFFFF')
+        if getattr(fg, 'type', None) == 'theme':
+            # A theme color WAS explicitly set on this cell (as opposed to
+            # no fill at all) - treat that as "highlighted" too, since some
+            # workbooks use a theme-based accent color instead of a raw RGB
+            # yellow.
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _scan_header_highlights(file_bytes):
+    """
+    Returns {sheetName: {rowIdx: {colIdx, ...}}} - for each sheet, the set
+    of column indices that carry a highlighted fill, for each of the first
+    HIGHLIGHT_SCAN_ROWS rows (0-indexed). Only openpyxl exposes cell style
+    info (calamine reads values only, for speed), so this always does a
+    second, SEPARATE, lightweight openpyxl read_only pass restricted to a
+    handful of rows - cheap even on very large workbooks, since read_only
+    iteration is lazy and we never touch a data row.
+    Returns {} (feature silently disabled) if openpyxl isn't available or
+    the file can't be opened a second time this way - highlight detection
+    is a bonus signal, never a requirement for a successful parse.
+    """
+    if not HAS_OPENPYXL:
+        return {}
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    except Exception:
+        return {}
+
+    result = {}
+    try:
+        for name in wb.sheetnames:
+            ws = wb[name]
+            if not hasattr(ws, 'iter_rows'):
+                continue
+            sheet_map = {}
+            try:
+                for r_idx, row in enumerate(
+                    ws.iter_rows(min_row=1, max_row=HIGHLIGHT_SCAN_ROWS)
+                ):
+                    cols = {c_idx for c_idx, cell in enumerate(row) if _is_highlighted_fill(cell)}
+                    if cols:
+                        sheet_map[r_idx] = cols
+            except Exception:
+                # A malformed row/style shouldn't take down highlight
+                # detection for the rest of the sheet or other sheets.
+                pass
+            if sheet_map:
+                result[name] = sheet_map
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+    return result
+
+
+def _apply_highlight_signal(col_map, col_source, col_confidence, headers,
+                             highlighted_cols, use_ml=True):
+    """
+    Adjusts a column->field mapping using the set of highlighted column
+    indices for this sheet's header row:
+
+      1. Conflict resolution - if a field id is currently backed by more
+         than one column and at least one (but not all) of them is
+         highlighted, drop the non-highlighted column(s) for that field
+         entirely. The engineer's marked column wins outright rather than
+         being averaged together with a look-alike column.
+      2. Recovery - any highlighted column that matched NO field at all
+         (rule or ML) is retried through the ML classifier at a lower,
+         highlight-only confidence threshold, since we already know a
+         human flagged this column as relevant.
+
+    Returns (col_map, col_source, col_confidence, highlighted_field_ids,
+             unmatched_highlighted_headers) - the last is a list of
+    {colIdx, header} for highlighted columns that STILL couldn't be
+    mapped to any field even after the relaxed retry, for surfacing back
+    to the user rather than silently dropping them.
+    """
+    col_map = dict(col_map)
+    col_source = dict(col_source)
+    col_confidence = dict(col_confidence)
+    highlighted_field_ids = set()
+
+    if not highlighted_cols:
+        return col_map, col_source, col_confidence, highlighted_field_ids, []
+
+    # 1. Conflict resolution
+    by_field = {}
+    for col_idx, fid in col_map.items():
+        by_field.setdefault(fid, []).append(col_idx)
+
+    for fid, cols in by_field.items():
+        hi_cols = [c for c in cols if c in highlighted_cols]
+        if hi_cols:
+            highlighted_field_ids.add(fid)
+        if hi_cols and len(hi_cols) < len(cols):
+            for c in cols:
+                if c not in hi_cols:
+                    col_map.pop(c, None)
+                    col_source.pop(c, None)
+                    col_confidence.pop(c, None)
+
+    # 2. Recovery for still-unmatched highlighted columns
+    unmatched_highlighted = []
+    retry_idx, retry_text = [], []
+    for col_idx in sorted(highlighted_cols):
+        if col_idx in col_map:
+            continue
+        hdr = headers[col_idx] if col_idx < len(headers) else None
+        if hdr is None or not str(hdr).strip():
+            continue
+        if is_non_field_header(hdr):
+            continue
+        retry_idx.append(col_idx)
+        retry_text.append(str(hdr))
+
+    if use_ml and retry_text:
+        clf = get_classifier()
+        preds = clf.predict_batch(retry_text, threshold=HIGHLIGHTED_ML_THRESHOLD)
+        for col_idx, hdr, pred in zip(retry_idx, retry_text, preds):
+            fid, score, _ = pred
+            if fid:
+                col_map[col_idx] = fid
+                col_source[col_idx] = 'ml_highlighted'
+                col_confidence[col_idx] = round(score, 3)
+                highlighted_field_ids.add(fid)
+            else:
+                unmatched_highlighted.append({'colIdx': col_idx, 'header': hdr})
+    else:
+        for col_idx, hdr in zip(retry_idx, retry_text):
+            unmatched_highlighted.append({'colIdx': col_idx, 'header': hdr})
+
+    return col_map, col_source, col_confidence, highlighted_field_ids, unmatched_highlighted
+
+
 def _to_num(val):
     """Safely convert a cell value to float, or return None."""
     if val is None:
@@ -385,28 +573,39 @@ def _count_populated_data_rows(data_rows, date_col_idx, col_map):
 
 
 # ─── Strategy 2: Raw tabular layout (header row + data rows), ML-augmented ───
-def _parse_raw_layout(rows, use_ml=True):
+def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
     """
     Handles sheets where some early row is a header row with field names /
     symbols / free-text labels, and subsequent rows are data.
 
     Multiple data rows = multiple readings → averaged automatically.
     Unmatched headers are sent through the ML classifier as a fallback.
-    Returns (extracted_dict, raw_rows_list, sheet_summary, col_meta).
+    `highlight_map`, if given, is {rowIdx: {colIdx, ...}} for this sheet's
+    highlighted header cells (see _scan_header_highlights) — used to prefer
+    highlighted columns on a field conflict and to recover highlighted
+    columns the rule/ML pass missed (see _apply_highlight_signal).
+    Returns (extracted_dict, raw_rows_list, sheet_summary, col_meta,
+             data_row_count, unmatched_highlighted).
     """
     sample = rows[:HEADER_SCAN_ROWS]
     header_row_idx = _find_header_row(sample, use_ml=use_ml)
 
     if header_row_idx is None:
-        return {}, [], {}, {}, 0
+        return {}, [], {}, {}, 0, []
 
     headers = rows[header_row_idx]
     data_rows = rows[header_row_idx + 1:]
 
     col_map, col_source, col_confidence = _map_columns_to_fields(headers, use_ml=use_ml)
 
+    highlighted_cols = (highlight_map or {}).get(header_row_idx, set())
+    col_map, col_source, col_confidence, highlighted_field_ids, unmatched_highlighted = (
+        _apply_highlight_signal(col_map, col_source, col_confidence, headers,
+                                 highlighted_cols, use_ml=use_ml)
+    )
+
     if not col_map:
-        return {}, [], {}, {}, 0
+        return {}, [], {}, {}, 0, unmatched_highlighted
 
     date_col_idx = _find_date_col_idx(headers)
     data_row_count = _count_populated_data_rows(data_rows, date_col_idx, col_map)
@@ -429,10 +628,11 @@ def _parse_raw_layout(rows, use_ml=True):
             'header': str(headers[col_idx]),
             'source': col_source[col_idx],
             'confidence': col_confidence[col_idx],
+            'highlighted': col_idx in highlighted_cols,
         }
         for col_idx, fid in col_map.items()
     }
-    return extracted, raw_rows, sheet_summary, col_meta, data_row_count
+    return extracted, raw_rows, sheet_summary, col_meta, data_row_count, unmatched_highlighted
 
 
 def _finalize_field_values(field_values):
@@ -454,7 +654,7 @@ def _finalize_field_values(field_values):
 
 
 # ─── Per-sheet parser (tries both strategies) ─────────────────────────────────
-def _parse_sheet_rows(rows, sheet_name, use_ml=True):
+def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
     """
     Tries CenPeep column layout first, then raw tabular layout (ML-augmented).
     Returns a dict with keys: extracted, rawRows, strategy, summary, columns.
@@ -470,12 +670,15 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True):
             'summary': {},
             'columns': {},
             'dataRowCount': len(rows),
+            'unmatchedHighlighted': [],
         }
 
     # Strategy 2: raw tabular, with ML fallback for unrecognized headers
-    ext2, raw2, summary, col_meta, data_row_count = _parse_raw_layout(rows, use_ml=use_ml)
+    ext2, raw2, summary, col_meta, data_row_count, unmatched_hi = _parse_raw_layout(
+        rows, use_ml=use_ml, highlight_map=highlight_map
+    )
     if ext2:
-        ml_used = any(c['source'] == 'ml' for c in col_meta.values())
+        ml_used = any(c['source'] in ('ml', 'ml_highlighted') for c in col_meta.values())
         return {
             'sheetName': sheet_name,
             'strategy': 'raw_tabular_ml' if ml_used else 'raw_tabular',
@@ -484,6 +687,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True):
             'summary': summary,
             'columns': col_meta,
             'dataRowCount': data_row_count,
+            'unmatchedHighlighted': unmatched_hi,
         }
 
     return {
@@ -494,6 +698,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True):
         'summary': {},
         'columns': {},
         'dataRowCount': 0,
+        'unmatchedHighlighted': unmatched_hi,
     }
 
 
@@ -515,13 +720,19 @@ def _iter_sheet_rows_streamed(ws, ext_xls=False, xlrd_sheet=None):
             yield list(row)
 
 
-def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
+def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
     """
     Chunked version of sheet parsing for large sheets: reads CHUNK_ROWS rows
     at a time, identifies the header row from the first chunk, maps columns
     to fields once, then streams remaining chunks through the field-value
     accumulator and discards each chunk immediately after — so memory stays
     bounded by chunk size, not total sheet size.
+
+    `highlight_map`, if given, is {rowIdx: {colIdx, ...}} for this sheet
+    (see _scan_header_highlights) — applied right after the header row is
+    identified, before any data rows are accumulated, so highlighted
+    columns get the same conflict-resolution/recovery treatment as the
+    non-chunked path (see _apply_highlight_signal).
 
     Falls back cleanly to "unrecognized" if no header / no fields found.
     Returns the same shape as _parse_sheet_rows().
@@ -535,6 +746,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
     row_count = 0
     date_col_idx = None
     data_row_count = 0
+    unmatched_hi = []
 
     for row in row_iter:
         row_count += 1
@@ -552,6 +764,11 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
                     headers = chunk[header_row_idx]
                     col_map, col_source, col_confidence = _map_columns_to_fields(
                         headers, use_ml=use_ml
+                    )
+                    highlighted_cols = (highlight_map or {}).get(header_row_idx, set())
+                    col_map, col_source, col_confidence, _, unmatched_hi = (
+                        _apply_highlight_signal(col_map, col_source, col_confidence,
+                                                 headers, highlighted_cols, use_ml=use_ml)
                     )
                     field_values = {fid: [] for fid in set(col_map.values())}
                     date_col_idx = _find_date_col_idx(headers)
@@ -586,6 +803,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
             'columns': {},
             'rowsScanned': row_count,
             'dataRowCount': row_count,
+            'unmatchedHighlighted': [],
         }
 
     if not col_map:
@@ -598,16 +816,19 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
             'columns': {},
             'rowsScanned': row_count,
             'dataRowCount': 0,
+            'unmatchedHighlighted': unmatched_hi,
         }
 
     extracted, raw_rows, summary = _finalize_field_values(field_values)
-    ml_used = any(col_source.get(i) == 'ml' for i in col_map)
+    ml_used = any(col_source.get(i) in ('ml', 'ml_highlighted') for i in col_map)
+    highlighted_cols_final = (highlight_map or {}).get(header_row_idx, set())
     col_meta = {
         col_idx: {
             'fieldId': fid,
             'header': str(headers[col_idx]),
             'source': col_source[col_idx],
             'confidence': col_confidence[col_idx],
+            'highlighted': col_idx in highlighted_cols_final,
         }
         for col_idx, fid in col_map.items()
     }
@@ -621,6 +842,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True):
         'columns': col_meta,
         'rowsScanned': row_count,
         'dataRowCount': data_row_count,
+        'unmatchedHighlighted': unmatched_hi,
     }
 
 
@@ -654,7 +876,7 @@ def _sheet_row_estimate(ws):
         return 0
 
 
-def _parse_with_calamine(file_bytes, use_ml=True):
+def _parse_with_calamine(file_bytes, use_ml=True, highlight_map=None):
     """
     calamine (Rust) reads the workbook's shared strings/values directly
     without building openpyxl's Python style-object graph. This matters
@@ -692,32 +914,34 @@ def _parse_with_calamine(file_bytes, use_ml=True):
         ws = wb.get_sheet_by_name(name)
         est_rows = ws.height or 0
         row_iter = _iter_sheet_rows_streamed(ws)
+        sheet_hi_map = (highlight_map or {}).get(name, {})
         if est_rows > LARGE_SHEET_ROW_THRESHOLD:
-            result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
+            result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml, highlight_map=sheet_hi_map)
         else:
             rows = list(row_iter)
-            result = _parse_sheet_rows(rows, name, use_ml=use_ml)
+            result = _parse_sheet_rows(rows, name, use_ml=use_ml, highlight_map=sheet_hi_map)
         sheet_results.append(result)
     return sheet_results
 
 
-def _parse_with_xlrd(file_bytes, use_ml=True):
+def _parse_with_xlrd(file_bytes, use_ml=True, highlight_map=None):
     """Legacy .xls reader (calamine/openpyxl don't handle old binary .xls)."""
     sheet_results = []
     wb = xlrd.open_workbook(file_contents=file_bytes)
     for name in wb.sheet_names():
         ws = wb.sheet_by_name(name)
         row_iter = _iter_sheet_rows_streamed(None, ext_xls=True, xlrd_sheet=ws)
+        sheet_hi_map = (highlight_map or {}).get(name, {})
         if ws.nrows > LARGE_SHEET_ROW_THRESHOLD:
-            result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
+            result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml, highlight_map=sheet_hi_map)
         else:
             rows = list(row_iter)
-            result = _parse_sheet_rows(rows, name, use_ml=use_ml)
+            result = _parse_sheet_rows(rows, name, use_ml=use_ml, highlight_map=sheet_hi_map)
         sheet_results.append(result)
     return sheet_results
 
 
-def _parse_with_openpyxl(file_bytes, use_ml=True):
+def _parse_with_openpyxl(file_bytes, use_ml=True, highlight_map=None):
     """
     Pure-Python fallback reader. Slower than calamine on files with heavy
     style bloat, but more lenient — used both when calamine isn't installed
@@ -751,11 +975,12 @@ def _parse_with_openpyxl(file_bytes, use_ml=True):
             continue
         est_rows = _sheet_row_estimate(ws)
         row_iter = _iter_sheet_rows_streamed(ws)
+        sheet_hi_map = (highlight_map or {}).get(name, {})
         if est_rows > LARGE_SHEET_ROW_THRESHOLD:
-            result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml)
+            result = _parse_sheet_chunked(row_iter, name, use_ml=use_ml, highlight_map=sheet_hi_map)
         else:
             rows = list(row_iter)
-            result = _parse_sheet_rows(rows, name, use_ml=use_ml)
+            result = _parse_sheet_rows(rows, name, use_ml=use_ml, highlight_map=sheet_hi_map)
         sheet_results.append(result)
     wb.close()
     return sheet_results
@@ -779,10 +1004,18 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     sheet_results = []
 
+    # Highlighted-column detection is a separate, lightweight pass (only
+    # openpyxl exposes cell styles; calamine/xlrd don't). Computed once up
+    # front regardless of which reader ends up doing the actual data parse,
+    # and passed down so every sheet gets the same treatment. Never fatal —
+    # falls back to {} (no highlight signal, unchanged prior behavior) if
+    # anything about the file trips up this second read.
+    highlight_map = _scan_header_highlights(file_bytes) if ext != 'xls' else {}
+
     use_calamine = HAS_CALAMINE
     if use_calamine:
         try:
-            sheet_results = _parse_with_calamine(file_bytes, use_ml=use_ml)
+            sheet_results = _parse_with_calamine(file_bytes, use_ml=use_ml, highlight_map=highlight_map)
         except BaseException as e:
             # calamine is a compiled Rust extension. When its parser hits
             # something it can't handle it doesn't raise a normal Python
@@ -806,11 +1039,11 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         if ext == 'xls':
             if not HAS_XLRD:
                 raise RuntimeError('xlrd not installed; cannot read .xls files')
-            sheet_results = _parse_with_xlrd(file_bytes, use_ml=use_ml)
+            sheet_results = _parse_with_xlrd(file_bytes, use_ml=use_ml, highlight_map=highlight_map)
         else:
             if not HAS_OPENPYXL:
                 raise RuntimeError('Neither python-calamine nor openpyxl is installed')
-            sheet_results = _parse_with_openpyxl(file_bytes, use_ml=use_ml)
+            sheet_results = _parse_with_openpyxl(file_bytes, use_ml=use_ml, highlight_map=highlight_map)
 
     # Merge: pick ONE "best" sheet among the generic (non-CenPeep) sheets —
     # whichever has the most real (non-blank) date rows — and take ALL of
@@ -893,9 +1126,24 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         for fid in REQUIRED_FIELDS if fid not in merged_extracted
     ]
 
+    # Highlighted header cells that never resolved to any CENPEEP field on
+    # their sheet, even after the relaxed highlight-only retry — these are
+    # exactly the columns a person marked as important that the parser
+    # genuinely couldn't place, so they're worth a human glance rather than
+    # being silently dropped like every other unmatched column.
+    unmatched_highlighted = [
+        {'sheet': sr['sheetName'], 'header': item['header']}
+        for sr in sheet_results
+        for item in sr.get('unmatchedHighlighted', [])
+    ]
+
     return {
         'sheetResults': sheet_results,
         'extracted': merged_extracted,
+        # Highlighted columns that still couldn't be mapped to a field —
+        # surface these explicitly instead of letting them disappear into
+        # the general "unrecognized column" pile.
+        'unmatchedHighlighted': unmatched_highlighted,
         # Which sheet each field's final value was actually taken from —
         # use this to sanity-check that (e.g.) Load came from the Hourly
         # sheet and not the Day Avg sheet.

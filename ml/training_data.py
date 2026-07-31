@@ -307,6 +307,12 @@ OUT_OF_SCOPE_EXAMPLES = [
     "FURNACE DRAFT", "ECO inlet FG pressure", "APH inlet FG pressure",
     "APH O/L FG pressure", "ECO outlet FG pressure", "Draft pressure",
     "Furnace pressure", "APH differential pressure", "Gas side draft",
+    # Abbreviated form seen on real DCS exports ("FURNACE PR") — without this,
+    # the "PR" abbreviation loses enough char-gram overlap with "pressure"
+    # that it drifted onto Fsa (Secondary Air Flow) instead, purely because
+    # both share the word "FURNACE". Windbox DP is the same kind of
+    # pressure/draft reading, also abbreviated.
+    "FURNACE PR", "Furnace Pr", "WINDBOX DP", "Windbox Differential Pressure",
     "ECO O/L FG Temp",  # ambiguous short form — direction unclear without
                         # Left/Right/In/Out qualifiers; better to skip than guess
     # Furnace-exit and economizer-outlet gas temps are real plant readings
