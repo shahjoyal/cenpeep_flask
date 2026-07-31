@@ -158,7 +158,20 @@ LABEL_ALIASES = {
     'pa temp out': 'Tpao', 'sa temp out': 'Tsao',
     'pa flow': 'Fpa', 'sa flow': 'Fsa',
     'unburnt bottom': 'Cba', 'unburnt fly': 'Cfa',
-    'fly ash': 'Pfa', 'bottom ash': 'Pba',
+    'unburnts in bottom ash': 'Cba', 'unburnts in fly ash': 'Cfa',
+    'unburnt in bottom ash': 'Cba', 'unburnt in fly ash': 'Cfa',
+    'bottom ash unburnts': 'Cba', 'fly ash unburnts': 'Cfa',
+    # NOTE: bare "Bottom Ash"/"Fly Ash" (%) used to be hard-mapped straight
+    # to Pba/Pfa ("% of ash in total ash") right here. That was wrong for
+    # real lab-report / LOI / boiler-efficiency sheets, where a bare
+    # "Bottom Ash (%)" or "Fly Ash %" column is actually the loss-on-
+    # ignition / unburnt-carbon test result (Cba/Cfa), not the ash-split
+    # percentage — and because this was an exact-string RULE match it ran
+    # before ML ever got a chance, so it silently stole the column and
+    # left Cba/Cfa undetected every single time. Disambiguation between
+    # the two now lives in _match_tag_patterns() below (keyed on whether
+    # "total" appears in the header), since both phrasings otherwise look
+    # identical.
 }
 
 
@@ -368,6 +381,67 @@ def _sym_to_field(sym):
     return SYM_MAP.get(s) or SYM_MAP_LOWER.get(s.lower())
 
 
+def _match_tag_patterns(norm):
+    """
+    Secondary rule-based matcher for common plant/DCS tag phrasings that
+    don't exactly match a LABEL_ALIASES entry verbatim but follow a
+    recognizable token pattern (APH side-A/B tags, L_SIDE/R_SIDE, IN/OUT
+    qualifiers, etc). Runs after the exact-alias lookup and before the ML
+    fallback, so these well-known tag shapes resolve deterministically
+    instead of depending on TF-IDF similarity (or a retrain) to catch them.
+
+    `norm` is already lowercased and stripped of punctuation (see
+    _label_to_field) — this only tokenizes on whitespace and checks for
+    known word combinations.
+    """
+    tokens = set(norm.split())
+    if not tokens:
+        return None
+
+    # Unburnt-carbon-in-ash fields: "bottom ash"/"fly ash" (%), optionally
+    # qualified with "unburnt(s)" — deliberately excludes phrasings that
+    # also contain "total", since those mean the % that ash type makes up
+    # of the TOTAL ash (Pba/Pfa) — a different field with near-identical
+    # wording. See the LABEL_ALIASES note above for why this can't just be
+    # a plain exact-string alias.
+    if 'total' not in tokens:
+        if {'bottom', 'ash'} <= tokens:
+            return 'Cba'
+        if {'fly', 'ash'} <= tokens:
+            return 'Cfa'
+    elif 'ash' in tokens:
+        if 'bottom' in tokens:
+            return 'Pba'
+        if 'fly' in tokens:
+            return 'Pfa'
+
+    # O2 / CO at the APH inlet or outlet, in the "<reading> ... APH ...
+    # <direction>" tag shape real DCS exports use (e.g. "O2 APH O/L",
+    # "APH A OUTL GAS O2 CT", "APH B INL GAS O2 CT").
+    if 'aph' in tokens:
+        is_out = bool(tokens & {'ol', 'out', 'outl', 'outlet'})
+        is_in = bool(tokens & {'il', 'in', 'inl', 'inlet'})
+        if 'o2' in tokens and is_out and not is_in:
+            return 'O2out'
+        if 'o2' in tokens and is_in and not is_out:
+            return 'O2in'
+        if 'co' in tokens and is_out and not is_in:
+            return 'COout'
+        if 'co' in tokens and is_in and not is_out:
+            return 'COin'
+
+    # Secondary air arriving at the furnace after the APH — real plant tags
+    # sometimes name this from the furnace's point of view ("FURNACE L_SIDE
+    # INL SA T" / "FURNACE R_SIDE INL SA T") rather than the APH's point of
+    # view, but it's the same physical reading CENPEEP calls "SA Temp Out"
+    # (Tsao) — the secondary air has already passed through the APH by the
+    # time it reaches the furnace inlet.
+    if {'furnace', 'inl', 'sa'} <= tokens and ({'t', 'temp'} & tokens):
+        return 'Tsao'
+
+    return None
+
+
 def _label_to_field(label):
     """Map a header label string to a CENPEEP field id."""
     norm = re.sub(r'[^a-z0-9 ]', '', str(label).lower().strip())
@@ -375,7 +449,10 @@ def _label_to_field(label):
     fid = _sym_to_field(label.strip())
     if fid:
         return fid
-    return LABEL_ALIASES.get(norm)
+    fid = LABEL_ALIASES.get(norm)
+    if fid:
+        return fid
+    return _match_tag_patterns(norm)
 
 
 # ─── Strategy 1: Standard CENPEEP column layout ───────────────────────────────

@@ -48,20 +48,40 @@ TRAINING_EXAMPLES = [
     ("Unburnt carbon in Bottom Ash", "Cba"), ("Bottom Ash UBC", "Cba"),
     ("Bottom Ash (%) Unburnt Carbon", "Cba"), ("LOI Bottom Ash", "Cba"),
     ("UBC IN BOTTOM ASH", "Cba"), ("UBC Bottom Ash", "Cba"),
+    # Bare "Bottom Ash (%)" / "Bottom Ash %" and "Unburnts in Bottom ash" —
+    # real header text as seen on Lab Report / Previous LOI / Boiler
+    # Efficiency sheets, where this column IS the loss-on-ignition /
+    # unburnt-carbon reading, not the ash-split percentage (see the
+    # LABEL_ALIASES note in routes/upload.py for the Cba/Pba ambiguity this
+    # was previously losing to).
+    ("Bottom Ash (%)", "Cba"), ("Bottom Ash %", "Cba"), ("Bottom Ash", "Cba"),
+    ("Unburnts in Bottom ash", "Cba"), ("Unburnts in Bottom Ash", "Cba"),
+    ("Unburnt in Bottom Ash", "Cba"),
 
     # ── Cfa — Unburnt C Fly Ash ────────────────────────────────────────────
     ("Unburnt Carbon Fly Ash", "Cfa"), ("Fly Ash Unburnt Carbon", "Cfa"),
     ("Unburnt carbon in Fly Ash ESP", "Cfa"), ("Fly Ash UBC", "Cfa"),
     ("Fly Ash - ESP (%)", "Cfa"), ("LOI Fly Ash", "Cfa"), ("Economizer Unburnt Carbon", "Cfa"),
     ("UBC IN FLY ASH", "Cfa"), ("UBC Fly Ash", "Cfa"),
+    # Bare "Fly Ash (%)" / "Fly Ash %" and "Unburnts in Fly ash" — same
+    # reasoning as the bare Bottom Ash entries above.
+    ("Fly Ash (%)", "Cfa"), ("Fly Ash %", "Cfa"), ("Fly Ash", "Cfa"),
+    ("Unburnts in Fly ash", "Cfa"), ("Unburnts in Fly Ash", "Cfa"),
+    ("Unburnt in Fly Ash", "Cfa"),
 
-    # ── Pfa — % Fly Ash ─────────────────────────────────────────────────────
+    # ── Pfa — % Fly Ash (of TOTAL ash — distinct from the Cfa unburnt-
+    #    carbon reading above; always explicitly qualified with "total"
+    #    in real sheets so it isn't confused with bare "Fly Ash %") ───────
     ("% Fly Ash", "Pfa"), ("Fly Ash Percentage", "Pfa"), ("Fly Ash Fraction", "Pfa"),
     ("Fly Ash Ratio", "Pfa"), ("Percent Fly Ash", "Pfa"),
+    ("% of Fly Ash in Total Ash", "Pfa"), ("Fly Ash in Total Ash", "Pfa"),
+    ("Fly Ash % of Total Ash", "Pfa"),
 
-    # ── Pba — % Bottom Ash ──────────────────────────────────────────────────
+    # ── Pba — % Bottom Ash (of TOTAL ash) ───────────────────────────────────
     ("% Bottom Ash", "Pba"), ("Bottom Ash Percentage", "Pba"), ("Bottom Ash Fraction", "Pba"),
     ("Bottom Ash Ratio", "Pba"), ("Percent Bottom Ash", "Pba"),
+    ("% of Bottom Ash in Total Ash", "Pba"), ("Bottom Ash in Total Ash", "Pba"),
+    ("Bottom Ash % of Total Ash", "Pba"),
 
     # ── M — Moisture (coal proximate, "as fired") ─────────────────────────
     ("Moisture", "M"), ("Moisture %", "M"), ("IM %", "M"), ("Inherent Moisture", "M"),
@@ -112,6 +132,9 @@ TRAINING_EXAMPLES = [
     ("O2 Air Preheater Outlet", "O2out"),
     ("GAH O/L O2 Left", "O2out"), ("GAH O/L O2 Right", "O2out"), ("GAH Outlet O2", "O2out"),
     ("GAH O/L O2", "O2out"),
+    # Real DCS tag phrasing seen on "dayly data" / "Hourly data" exports —
+    # aggregated column and raw per-side columns for the same reading.
+    ("O2 APH O/L", "O2out"), ("APH A OUTL GAS O2 CT", "O2out"), ("APH B OUTL GAS O2 CT", "O2out"),
 
     # ── CO2out — CO2 APH Out ─────────────────────────────────────────────────
     ("CO2 at APH Outlet", "CO2out"), ("CO2 APH Out", "CO2out"), ("CO2 Air Preheater Outlet", "CO2out"),
@@ -235,6 +258,12 @@ TRAINING_EXAMPLES = [
     # "Secondry" typo variant -- same reasoning as the Tsai fix above, for
     # the outlet/hot side.
     ("Secondry Air APH Temp O/L A", "Tsao"), ("Secondry Air APH Temp O/L B", "Tsao"),
+    # Real plant tag naming this from the FURNACE's point of view instead
+    # of the APH's — "secondary air arriving at the furnace inlet" is the
+    # same physical hot/post-APH reading, just named for where it lands
+    # rather than where it left.
+    ("FURNACE L_SIDE INL SA T", "Tsao"), ("FURNACE R_SIDE INL SA T", "Tsao"),
+    ("Furnace L Side Inlet SA Temp", "Tsao"), ("Furnace R Side Inlet SA Temp", "Tsao"),
 
     # ── Fsa — SA Flow ──────────────────────────────────────────────────────────
     ("Secondary Air Flow", "Fsa"), ("SA Flow", "Fsa"), ("SA air flow", "Fsa"),
