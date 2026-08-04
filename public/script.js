@@ -45,16 +45,19 @@ window._uploadedFilename = null;
 // field id on the calculator form. Used only to reset detected/missing
 // coloring across uploads (so a field marked red on upload #1 doesn't stay
 // red forever if upload #2 doesn't mention it at all).
-// Pfa/Pba ("% of Fly/Bottom Ash in Total Ash") are deliberately excluded —
+// Pfa/Pba ("% of Fly/Bottom Ash in Total Ash"), Sd/GCVd/Trad/Mwvd (Design
+// Conditions — Ultimate Analysis: Sulfur, GCV, Ref. Air Temp, Moisture in
+// Air), and Md/Ad/VMd/FCd (Design — Proximate) are deliberately excluded —
 // always-manual fields, never auto-detected, never colored (see
-// NEVER_AUTO_DETECT in routes/upload.py).
+// NEVER_AUTO_DETECT in routes/upload.py). Listing them here would be
+// harmless (nothing ever puts field-detected/field-missing on them), but
+// they're left out to keep this list an honest mirror of what the backend
+// actually reports.
 const ALL_FIELD_IDS = [
   'L', 'Ffw', 'Fin', 'Cba', 'Cfa',
   'M', 'A', 'VM', 'FC', 'GCV', 'S',
   'O2in', 'COin', 'O2out', 'COout',
   'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa', 'Tref',
-  'Md', 'Ad', 'VMd', 'FCd',
-  'Sd', 'GCVd', 'Trad', 'Mwvd',
 ];
 
 function initUpload() {

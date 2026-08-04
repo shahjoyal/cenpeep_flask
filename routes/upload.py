@@ -105,7 +105,22 @@ SYM_MAP_LOWER = {k.lower(): v for k, v in SYM_MAP.items()}
 # don't reliably show up as their own column on real sheets — treating them
 # as always-manual avoids both false "detected" guesses and noisy "missing"
 # flags for a field that was never expected to be found anyway.
-NEVER_AUTO_DETECT = {'Pfa', 'Pba'}
+# Sd/GCVd/Trad/Mwvd (Design Conditions — Ultimate Analysis: Sulfur, GCV,
+# Ref. Air Temp, Moisture in Air) have no proximate-side equivalent to
+# derive from — same as As-Fired Sulfur/GCV, they're always typed in by
+# hand — so they get the same always-manual treatment here.
+# Md/Ad/VMd/FCd (Design — Proximate) carry the same "MANUAL" tag on the
+# calculator form and the same "never auto-filled from an upload" intent
+# (see the comment above the Design — Proximate section in
+# public/calculator.html) — added here so that intent is actually
+# enforced, instead of only being true in the UI copy. Previously these
+# could still be picked up from the strict CenPeep column layout (a sheet
+# listing the symbol "Md"/"Ad" twice — once as-fired, once design) via the
+# duplicate-symbol handling in _parse_cenpeep_layout(); that handling still
+# runs (so the second occurrence still correctly resolves to the AUTO/
+# readonly Md2/Ad2 slot for the summary table), but the first occurrence
+# no longer auto-fills or colors the manual Md/Ad inputs.
+NEVER_AUTO_DETECT = {'Pfa', 'Pba', 'Sd', 'GCVd', 'Trad', 'Mwvd', 'Md', 'Ad', 'VMd', 'FCd'}
 
 # ─── Full list of CENPEEP input fields the calculator needs ──────────────────
 # This is every editable (non-auto-computed) field on the calculator form —
@@ -113,14 +128,15 @@ NEVER_AUTO_DETECT = {'Pfa', 'Pba'}
 # NOT found on the selected sheet (CO2in/CO2out and Cd/Hd/Md2/Nd/Od/Ad2 are
 # excluded: those are AUTO/readonly fields computed by the app — the latter
 # client-side from Md/Ad/VMd/FCd — never read from an upload).
-# Pfa/Pba are deliberately excluded — see NEVER_AUTO_DETECT above.
+# Pfa/Pba/Sd/GCVd/Trad/Mwvd/Md/Ad/VMd/FCd are deliberately excluded — see
+# NEVER_AUTO_DETECT above. Being always-manual, they should never show up
+# as either "detected" (green) or "missing" (red) — in the upload summary,
+# the field coloring on the calculator form, or the r.py Word report.
 REQUIRED_FIELDS = [
     'L', 'Ffw', 'Fin', 'Cba', 'Cfa',
     'M', 'A', 'VM', 'FC', 'GCV', 'S',
     'O2in', 'COin', 'O2out', 'COout',
     'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa', 'Tref',
-    'Md', 'Ad', 'VMd', 'FCd',
-    'Sd', 'GCVd', 'Trad', 'Mwvd',
 ]
 
 # Full human-readable name for each field id, taken verbatim from the

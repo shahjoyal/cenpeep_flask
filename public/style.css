@@ -1,15 +1,15 @@
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 .navbar {
-  background: rgba(10,15,30,0.72);
+  background: rgba(255,255,255,0.78);
   backdrop-filter: blur(20px) saturate(140%);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
-  border-bottom: 1px solid rgba(148,163,184,0.14);
+  border-bottom: 1px solid rgba(15,23,42,0.08);
   padding: 0 28px;
   position: sticky;
   top: 0;
   z-index: 100;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.28);
+  box-shadow: 0 4px 24px rgba(15,23,42,0.06);
 }
 .nav-inner {
   max-width: 1180px;
@@ -60,8 +60,8 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  background: rgba(255,255,255,0.03);
-  border: 1px solid rgba(148,163,184,0.1);
+  background: rgba(15,23,42,0.03);
+  border: 1px solid rgba(15,23,42,0.08);
   padding: 4px;
   border-radius: 12px;
 }
@@ -94,37 +94,37 @@
   transition: all 0.2s;
 }
 .nav-logout:hover {
-  background: rgba(248,113,113,0.1);
-  border-color: rgba(248,113,113,0.4);
-  color: #f87171;
+  background: rgba(220,38,38,0.08);
+  border-color: rgba(220,38,38,0.35);
+  color: var(--red);
 }
 
 :root {
-  --bg: #060a16;
-  --bg2: #0a1128;
-  --surface: rgba(23,32,58,0.6);
-  --surface2: rgba(255,255,255,0.035);
-  --border: rgba(148,163,184,0.14);
-  --border2: rgba(148,163,184,0.26);
-  --accent: #3b82f6;
-  --accent-light: rgba(59,130,246,0.14);
-  --accent2: #38bdf8;
-  --green: #34d399;
-  --green-light: rgba(16,185,129,0.14);
-  --amber: #fbbf24;
-  --amber-light: rgba(245,158,11,0.14);
-  --red: #f87171;
-  --red-light: rgba(239,68,68,0.14);
-  --blue: #60a5fa;
-  --blue-light: rgba(59,130,246,0.14);
-  --text: #f1f5f9;
-  --text-bright: #ffffff;
-  --text2: #cbd5e1;
-  --muted: #94a3b8;
-  --muted2: #64748b;
-  --shadow-sm: 0 1px 3px rgba(0,0,0,0.24), 0 1px 2px rgba(0,0,0,0.18);
-  --shadow: 0 8px 20px -4px rgba(0,0,0,0.4), 0 2px 8px -2px rgba(0,0,0,0.3);
-  --shadow-lg: 0 20px 40px -8px rgba(0,0,0,0.5), 0 8px 16px -4px rgba(0,0,0,0.35);
+  --bg: #f6f8fc;
+  --bg2: #ffffff;
+  --surface: rgba(255,255,255,0.92);
+  --surface2: rgba(15,23,42,0.035);
+  --border: rgba(15,23,42,0.10);
+  --border2: rgba(15,23,42,0.18);
+  --accent: #2563eb;
+  --accent-light: rgba(37,99,235,0.10);
+  --accent2: #0e7490;
+  --green: #16a34a;
+  --green-light: rgba(22,163,74,0.10);
+  --amber: #d97706;
+  --amber-light: rgba(217,119,6,0.10);
+  --red: #dc2626;
+  --red-light: rgba(220,38,38,0.08);
+  --blue: #2563eb;
+  --blue-light: rgba(37,99,235,0.10);
+  --text: #0f172a;
+  --text-bright: #000000;
+  --text2: #334155;
+  --muted: #64748b;
+  --muted2: #94a3b8;
+  --shadow-sm: 0 1px 3px rgba(15,23,42,0.07), 0 1px 2px rgba(15,23,42,0.05);
+  --shadow: 0 8px 20px -4px rgba(15,23,42,0.12), 0 2px 8px -2px rgba(15,23,42,0.07);
+  --shadow-lg: 0 20px 40px -8px rgba(15,23,42,0.16), 0 8px 16px -4px rgba(15,23,42,0.09);
   --radius: 16px;
   --radius-sm: 10px;
 }
@@ -146,10 +146,10 @@ body::before {
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(ellipse 70% 45% at 15% -8%, rgba(59,130,246,0.16) 0%, transparent 60%),
-    radial-gradient(ellipse 55% 40% at 88% 12%, rgba(56,189,248,0.1) 0%, transparent 60%),
-    radial-gradient(ellipse 60% 45% at 80% 105%, rgba(37,99,235,0.12) 0%, transparent 60%),
-    linear-gradient(180deg, #060a16 0%, #0a1128 55%, #060a16 100%);
+    radial-gradient(ellipse 70% 45% at 15% -8%, rgba(37,99,235,0.10) 0%, transparent 60%),
+    radial-gradient(ellipse 55% 40% at 88% 12%, rgba(8,145,178,0.07) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 45% at 80% 105%, rgba(37,99,235,0.06) 0%, transparent 60%),
+    linear-gradient(180deg, #f8fafc 0%, #eef2f9 55%, #f8fafc 100%);
   pointer-events: none;
   z-index: 0;
 }
@@ -435,8 +435,8 @@ header {
    .field-formula treatment used for AUTO/computed fields. */
 .field-manual {
   border-style: dashed !important;
-  border-color: rgba(245,158,11,0.4) !important;
-  background: rgba(245,158,11,0.03) !important;
+  border-color: rgba(217,119,6,0.4) !important;
+  background: rgba(217,119,6,0.04) !important;
 }
 
 .manual-tag {
@@ -606,8 +606,8 @@ header {
 
 .kpi-card .lrad-input:focus {
   border-color: var(--red);
-  box-shadow: 0 0 0 3px rgba(248,113,113,0.15);
-  background: rgba(248,113,113,0.06);
+  box-shadow: 0 0 0 3px rgba(220,38,38,0.15);
+  background: rgba(220,38,38,0.05);
 }
 
 .output-section {
@@ -785,9 +785,9 @@ header {
   border-radius: 20px;
   white-space: nowrap;
 }
-.upload-status.loading { background: rgba(245,158,11,0.14); color: #fbbf24; }
-.upload-status.success { background: rgba(16,185,129,0.14); color: #34d399; }
-.upload-status.error   { background: rgba(239,68,68,0.14);  color: #f87171; }
+.upload-status.loading { background: rgba(217,119,6,0.12); color: #b45309; }
+.upload-status.success { background: rgba(22,163,74,0.12); color: #15803d; }
+.upload-status.error   { background: rgba(220,38,38,0.12); color: #b91c1c; }
 
 /* ── DB status pill in navbar ───────────────────────────────────── */
 .db-pill {
@@ -799,9 +799,9 @@ header {
   border-radius: 20px;
   margin-left: 8px;
 }
-.db-pill.online  { background: rgba(16,185,129,0.14); color: #34d399; }
-.db-pill.offline { background: rgba(239,68,68,0.14);  color: #f87171; }
-.db-pill.checking{ background: rgba(245,158,11,0.14); color: #fbbf24; }
+.db-pill.online  { background: rgba(22,163,74,0.12); color: #15803d; }
+.db-pill.offline { background: rgba(220,38,38,0.12); color: #b91c1c; }
+.db-pill.checking{ background: rgba(217,119,6,0.12); color: #b45309; }
 
 /* ── Save session confirmation toast ────────────────────────────── */
 .toast {
@@ -920,7 +920,7 @@ header {
 }
 .modal-overlay.open { opacity: 1; pointer-events: all; }
 .modal {
-  background: #0d1530; backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+  background: #ffffff; backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
   border: 1px solid var(--border);
   border-radius: var(--radius); box-shadow: var(--shadow-lg);
   width: 100%; max-width: 700px; max-height: 88vh; overflow-y: auto;
