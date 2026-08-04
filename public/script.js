@@ -45,13 +45,16 @@ window._uploadedFilename = null;
 // field id on the calculator form. Used only to reset detected/missing
 // coloring across uploads (so a field marked red on upload #1 doesn't stay
 // red forever if upload #2 doesn't mention it at all).
+// Pfa/Pba ("% of Fly/Bottom Ash in Total Ash") are deliberately excluded —
+// always-manual fields, never auto-detected, never colored (see
+// NEVER_AUTO_DETECT in routes/upload.py).
 const ALL_FIELD_IDS = [
-  'L', 'Ffw', 'Fin', 'Cba', 'Cfa', 'Pfa', 'Pba',
+  'L', 'Ffw', 'Fin', 'Cba', 'Cfa',
   'M', 'A', 'VM', 'FC', 'GCV', 'S',
   'O2in', 'COin', 'O2out', 'COout',
   'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa', 'Tref',
   'Md', 'Ad', 'VMd', 'FCd',
-  'Cd', 'Sd', 'Hd', 'Md2', 'Nd', 'Od', 'Ad2', 'GCVd', 'Trad', 'Mwvd',
+  'Sd', 'GCVd', 'Trad', 'Mwvd',
 ];
 
 function initUpload() {
@@ -100,8 +103,9 @@ function initUpload() {
         if (el) el.classList.add('field-missing');
       }
 
-      // Recalc CO2 auto-fields
+      // Recalc CO2 + Design Ultimate Analysis auto-fields
       autoCalcCO2();
+      autoCalcDesignUltimate();
       window._uploadedFilename = data.filename;
 
       // ── Build "selected sheet" AI summary panel ──────────────────────────
@@ -434,7 +438,7 @@ function resetInputs() {
     Tgi:350,Tgo:135,Tpai:40,Tpao:325,Tsai:34,Tsao:325,
     Fsa:450,Fpa:250,Tref:30,
     Md:13,Ad:40,VMd:24,FCd:23,
-    Cd:37,Sd:0.3,Hd:2.3,Md2:12,Nd:0.8,Od:7.6,Ad2:40,
+    Sd:0.3,
     GCVd:3300,Trad:38,Mwvd:0.013};
   Object.entries(d).forEach(([id,val]) => {
     const el = document.getElementById(id);
@@ -444,6 +448,7 @@ function resetInputs() {
   const st = document.getElementById('upload-status');
   if (st) { st.style.display='none'; st.textContent=''; }
   autoCalcCO2();
+  autoCalcDesignUltimate();
 }
 
 // ── CO₂ auto-calc ─────────────────────────────────────────────────────────────
@@ -453,6 +458,38 @@ function autoCalcCO2() {
   const co2out= document.getElementById('CO2out');
   if (co2in)  co2in.value  = (19.3 - O2in).toFixed(2);
   if (co2out) co2out.value = (19.3 - O2out).toFixed(2);
+}
+
+// ── Design — Ultimate Analysis auto-calc ────────────────────────────────────
+// Derives Carbon/Hydrogen/Nitrogen/Oxygen/Moisture/Ash (Design) from the
+// Design — Proximate inputs (Md/Ad/VMd/FCd), mirroring the exact formula
+// chain used for Ultimate Analysis — As Fired in the CenPeep sheet:
+//   FcDc = FC / (1 - 1.1*A/100 - M/100)      VmDf = 100 - FcDc
+//   Cdf  = FcDc + 0.9*(VmDf - 14)            Hdf  = VmDf*(7.35/(VmDf+10) - 0.013)
+//   Ndf  = 2.1 - 0.012*VmDf                  k    = (VM+FC) / (VmDf+FcDc)
+//   C = Cdf*k   H = Hdf*k   N = Ndf*k   O = 100 - C - S - H - M - N - A
+// Sulfur (Sd) and GCV (GCVd) have no Proximate-side equivalent to derive
+// from, so — same as As-Fired S/GCV — they stay manual inputs, not computed.
+function autoCalcDesignUltimate() {
+  const Md = v('Md'), Ad = v('Ad'), VMd = v('VMd'), FCd = v('FCd'), Sd = v('Sd');
+
+  const FcDc = FCd / (1 - (1.1 * Ad / 100) - (Md / 100));
+  const VmDf = 100 - FcDc;
+  const Cdf  = FcDc + 0.9 * (VmDf - 14);
+  const Hdf  = VmDf * ((7.35 / (VmDf + 10)) - 0.013);
+  const Ndf  = 2.1 - (0.012 * VmDf);
+  const k    = (VMd + FCd) / (VmDf + FcDc);
+
+  const Cd  = Cdf * k;
+  const Hd  = Hdf * k;
+  const Nd  = Ndf * k;
+  const Md2 = Md;
+  const Ad2 = Ad;
+  const Od  = 100 - Cd - Sd - Hd - Md2 - Nd - Ad2;
+
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = fmt2(val); };
+  set('Cd', Cd); set('Hd', Hd); set('Nd', Nd); set('Od', Od);
+  set('Md2', Md2); set('Ad2', Ad2);
 }
 
 function recalculate() {
@@ -531,6 +568,12 @@ document.addEventListener('DOMContentLoaded', () => {
   if (o2in)  o2in.addEventListener('input',  autoCalcCO2);
   if (o2out) o2out.addEventListener('input', autoCalcCO2);
   autoCalcCO2();
+
+  ['Md', 'Ad', 'VMd', 'FCd', 'Sd'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', autoCalcDesignUltimate);
+  });
+  autoCalcDesignUltimate();
   initUpload();
   checkDB();
 });

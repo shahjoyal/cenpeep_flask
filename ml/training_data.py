@@ -170,6 +170,25 @@ TRAINING_EXAMPLES = [
     ("Secondry APH I/L FG Temp  (Left)", "Tgi"), ("Secondry APH I/L FG Temp  (Right)", "Tgi"),
     ("GAH I/L Temp (left)", "Tgi"), ("GAH I/L Temp (Right)", "Tgi"), ("GAH Inlet FG Temp", "Tgi"),
     ("GAH I/L Temp", "Tgi"), ("GAH I/L Temp average", "Tgi"),
+    # "FG temp after economiser/ECO" — on this plant's gas path the economizer
+    # is immediately upstream of the APH (nothing else in between), so this
+    # reading IS the APH-inlet flue-gas temp, just named for where the gas is
+    # coming FROM instead of where it's arriving TO. Confirmed against a real
+    # plant report that labels this exact header pair "Flue gas temperature
+    # at APH I/L". Includes the merged-word DCS-export form ("TEMPAFTERECO")
+    # seen on real sheets, with and without a space before "AFTERECO".
+    ("FG Temp After Eco", "Tgi"), ("FG Temp After Eco Left", "Tgi"),
+    ("FG Temp After Eco Right", "Tgi"), ("FG TEMPAFTERECO- L", "Tgi"),
+    ("FG TEMP AFTERECO- R", "Tgi"), ("FG TEMPAFTERECO L", "Tgi"),
+    ("FG TEMPAFTERECO R", "Tgi"), ("FG Temp After Economiser", "Tgi"),
+    ("FG Temp After Economiser Left", "Tgi"), ("FG Temp After Economiser Right", "Tgi"),
+    ("Flue Gas Temp After Economiser", "Tgi"), ("Flue Gas Temperature After Economiser", "Tgi"),
+    ("ECO Outlet FG Temp", "Tgi"), ("ECO O/L FG Temp", "Tgi"),
+    ("ECO O/L FG Temp Left", "Tgi"), ("ECO O/L FG Temp Right", "Tgi"),
+    ("Economizer Outlet Gas Temp", "Tgi"), ("Economizer Outlet Flue Gas Temperature", "Tgi"),
+    ("Economizer exit temperature", "Tgi"),
+    ("GAS ECO O/L Temp average", "Tgi"), ("GAS ECO O/L Temp (Left)", "Tgi"),
+    ("GAS ECO O/L Temp (Right)", "Tgi"),
 
     # ── Tgo — FG Temp APH Out ────────────────────────────────────────────────
     ("Flue Gas Temp APH Outlet", "Tgo"), ("FG Temp APH Out", "Tgo"),
@@ -190,6 +209,15 @@ TRAINING_EXAMPLES = [
     ("GAH O/L Temp 1 (Left)", "Tgo"), ("GAH O/L Temp 2 (Left)", "Tgo"), ("GAH O/L Temp 3 (Left)", "Tgo"),
     ("GAH O/L Temp 1 (Right)", "Tgo"), ("GAH O/L Temp 2 (Right)", "Tgo"), ("GAH O/L Temp 3 (Right)", "Tgo"),
     ("GAH O/L Temp average", "Tgo"), ("GAH Outlet FG Temp", "Tgo"), ("GAH O/L Temp", "Tgo"),
+    # "FG temp after APH" — the merged-word DCS-export counterpart to the
+    # "FG temp after ECO" Tgi examples above. Needed as an explicit anchor:
+    # "AFTERECO" and "AFTERAPH" differ by only a few characters, so without
+    # a close Tgo match of its own, this header drifts onto Tgi purely on
+    # char n-gram overlap with the "after ECO" wording.
+    ("FG Temp After APH", "Tgo"), ("FG Temp After APH Left", "Tgo"),
+    ("FG Temp After APH Right", "Tgo"), ("FG TEMP AFTERAPH - L", "Tgo"),
+    ("FG TEMP AFTERAPH - R", "Tgo"), ("FG TEMPAFTERAPH- L", "Tgo"),
+    ("FG TEMPAFTERAPH- R", "Tgo"),
 
     # ── Boiler outlet main steam temp has no dedicated CENPEEP symbol in
     #    this field set — it stays unmatched by design (see OUT_OF_SCOPE
@@ -319,6 +347,12 @@ OUT_OF_SCOPE_EXAMPLES = [
     "HRH Steam Temp", "HRH Steam Press", "HRH Temp", "HRH Pressure",
     "SH Spray Flow", "RH Spray Flow", "RH Spray Temp", "Total SH Spray", "Total RH Spray",
     "Feedwater HP HTR inlet temp", "Feed water Eco inlet temp", "Feed water Eco outlet Temp",
+    # Real DCS-export wording for the same feedwater-side readings — these
+    # are WATER temperatures, not flue-gas temperatures, and must not be
+    # pulled into Tgi just because they also say "after economiser".
+    "FW TEMPERATURE BEFORE ECONOMISER", "FW TEMPERATURE AFTER ECONOMISER",
+    "FW Temp Before Economiser", "FW Temp After Economiser",
+    "Feed Water Temperature Before Economiser", "Feed Water Temperature After Economiser",
     "HPH Ext STM pressure", "HPH Ext STM temp", "HPH Drain Temp",
     "HPH I/L Feedwater Temp", "HPH O/L Feedwater Temp",
     "Enthalpy FW HPH O/L", "Enthalpy FW HPH I/L", "Extraction Enthalpy HPH",
@@ -342,16 +376,11 @@ OUT_OF_SCOPE_EXAMPLES = [
     # both share the word "FURNACE". Windbox DP is the same kind of
     # pressure/draft reading, also abbreviated.
     "FURNACE PR", "Furnace Pr", "WINDBOX DP", "Windbox Differential Pressure",
-    "ECO O/L FG Temp",  # ambiguous short form — direction unclear without
-                        # Left/Right/In/Out qualifiers; better to skip than guess
-    # Furnace-exit and economizer-outlet gas temps are real plant readings
-    # but are a DIFFERENT, upstream point in the flue-gas path than the
-    # APH inlet/outlet that Tgi/Tgo represent — do not substitute.
+    # Furnace-exit gas temp is a real plant reading but a DIFFERENT, further
+    # upstream point in the flue-gas path (before the economizer) than the
+    # APH inlet reading Tgi represents — do not substitute.
     "Furnace exit FG temp", "Furnace exit gas temperature",
-    "ECO Outlet FG Temp", "Economizer Outlet Gas Temp",
-    "Economizer Outlet Flue Gas Temperature", "ECO O/L FG Temp Left",
-    "ECO O/L FG Temp Right", "Economizer exit temperature", "MAIN STEAM Pressure",
-    "GAS ECO O/L Temp average", "GAS ECO O/L Temp (Left)", "GAS ECO O/L Temp (Right)",
+    "MAIN STEAM Pressure",
     "MAIN STEAM Temp", "CRH STEAM", "HRH STEAM TEMP", "CONDENSOR VACCUM",
     "SH SPARY FLOW(L)", "SH SPARY FLOW(R)", "RH SPARY FLOW(L)", "RH SPARY FLOW(R)",
     "HPH-5A EXTRACTION STEAM PRESSURE", "HPH -5A EXTRACTION STEAM TEMPERATURE",

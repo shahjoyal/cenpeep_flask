@@ -98,18 +98,29 @@ SYM_MAP = {
 # Also accept case-insensitive & common variants
 SYM_MAP_LOWER = {k.lower(): v for k, v in SYM_MAP.items()}
 
+# Fields that are ALWAYS manual entry — never auto-detected from an upload,
+# by any strategy (CenPeep-layout symbol match, rule-based header alias, or
+# ML fallback), and never flagged as "missing" or colored red/green. Pfa/Pba
+# ("% of Fly/Bottom Ash in Total Ash") are plant-specific split ratios that
+# don't reliably show up as their own column on real sheets — treating them
+# as always-manual avoids both false "detected" guesses and noisy "missing"
+# flags for a field that was never expected to be found anyway.
+NEVER_AUTO_DETECT = {'Pfa', 'Pba'}
+
 # ─── Full list of CENPEEP input fields the calculator needs ──────────────────
 # This is every editable (non-auto-computed) field on the calculator form —
 # used only to report, after a file is parsed, which required fields were
-# NOT found on the selected sheet (CO2in/CO2out are excluded: those are
-# AUTO/readonly fields computed by the app, never read from an upload).
+# NOT found on the selected sheet (CO2in/CO2out and Cd/Hd/Md2/Nd/Od/Ad2 are
+# excluded: those are AUTO/readonly fields computed by the app — the latter
+# client-side from Md/Ad/VMd/FCd — never read from an upload).
+# Pfa/Pba are deliberately excluded — see NEVER_AUTO_DETECT above.
 REQUIRED_FIELDS = [
-    'L', 'Ffw', 'Fin', 'Cba', 'Cfa', 'Pfa', 'Pba',
+    'L', 'Ffw', 'Fin', 'Cba', 'Cfa',
     'M', 'A', 'VM', 'FC', 'GCV', 'S',
     'O2in', 'COin', 'O2out', 'COout',
     'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa', 'Tref',
     'Md', 'Ad', 'VMd', 'FCd',
-    'Cd', 'Sd', 'Hd', 'Md2', 'Nd', 'Od', 'Ad2', 'GCVd', 'Trad', 'Mwvd',
+    'Sd', 'GCVd', 'Trad', 'Mwvd',
 ]
 
 # Full human-readable name for each field id, taken verbatim from the
@@ -349,7 +360,7 @@ def _apply_highlight_signal(col_map, col_source, col_confidence, headers,
         preds = clf.predict_batch(retry_text, threshold=HIGHLIGHTED_ML_THRESHOLD)
         for col_idx, hdr, pred in zip(retry_idx, retry_text, preds):
             fid, score, _ = pred
-            if fid:
+            if fid and fid not in NEVER_AUTO_DETECT:
                 col_map[col_idx] = fid
                 col_source[col_idx] = 'ml_highlighted'
                 col_confidence[col_idx] = round(score, 3)
@@ -499,7 +510,7 @@ def _parse_cenpeep_layout(rows):
             field_id = 'Ad2' if design_ad_seen else 'Ad'
             design_ad_seen = True
 
-        if not field_id:
+        if not field_id or field_id in NEVER_AUTO_DETECT:
             continue
 
         extracted[field_id] = num
@@ -580,6 +591,12 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
         if is_non_field_header(hdr):
             continue
         fid = _label_to_field(str(hdr))
+        if fid and fid in NEVER_AUTO_DETECT:
+            # Always-manual field (see NEVER_AUTO_DETECT) — treat the column
+            # as unrecognized rather than auto-mapping it, and don't hand it
+            # to the ML fallback either (a rule already matched it, just not
+            # one we act on).
+            continue
         if fid:
             col_map[col_idx] = fid
             col_source[col_idx] = 'rule'
@@ -592,7 +609,7 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
         clf = get_classifier()
         preds = clf.predict_batch(unmatched_text, threshold=ml_threshold)
         for col_idx, (fid, score, matched_example) in zip(unmatched_idx, preds):
-            if fid:
+            if fid and fid not in NEVER_AUTO_DETECT:
                 col_map[col_idx] = fid
                 col_source[col_idx] = 'ml'
                 col_confidence[col_idx] = round(score, 3)
