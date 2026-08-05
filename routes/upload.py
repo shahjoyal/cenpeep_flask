@@ -630,7 +630,58 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
                 col_source[col_idx] = 'ml'
                 col_confidence[col_idx] = round(score, 3)
 
+    col_map, col_source, col_confidence = _dedupe_columns_per_field(
+        col_map, col_source, col_confidence
+    )
+
     return col_map, col_source, col_confidence
+
+
+def _dedupe_columns_per_field(col_map, col_source, col_confidence):
+    """
+    Keeps only the SINGLE best column for each field id, instead of letting
+    every column that happens to map to the same field survive together.
+
+    Real DCS/plant sheets routinely have one column with the exact/strict
+    header (e.g. "MAIN STM FLOW COMP") AND one or more other columns whose
+    wording is loosely/fuzzily similar (e.g. "T-FEED-FLOW", which just
+    shares the words "feed"/"flow" with training phrasings like "Feed
+    Water Flow"). Previously ALL such columns were kept, which corrupted
+    results two ways: their values got averaged together in
+    _finalize_field_values (blending a correct reading with an unrelated
+    one), and whichever column happened to come LAST in column order won
+    the "detected from" display — regardless of which one was actually the
+    strict/confident match.
+
+    Selection rule per field id, in order:
+      1. An exact rule match always beats an ML (fuzzy) match.
+      2. Among same-source matches, higher confidence wins.
+      3. Ties broken by earliest column index, for determinism.
+
+    Highlight-based conflict resolution (_apply_highlight_signal) still
+    runs after this and can still override toward a human-highlighted
+    column even if it isn't the strict winner here — that's a stronger,
+    human-provided signal than header-text matching alone.
+    """
+    by_field = {}
+    for col_idx, fid in col_map.items():
+        by_field.setdefault(fid, []).append(col_idx)
+
+    def rank(col_idx):
+        # Lower is better: rule (0) beats ml (1); within a tier, higher
+        # confidence is better (negated so sort ascending = best first);
+        # earliest column index is the final tiebreaker.
+        source_rank = 0 if col_source[col_idx] == 'rule' else 1
+        return (source_rank, -col_confidence[col_idx], col_idx)
+
+    new_map, new_source, new_confidence = {}, {}, {}
+    for fid, cols in by_field.items():
+        best = min(cols, key=rank)
+        new_map[best] = fid
+        new_source[best] = col_source[best]
+        new_confidence[best] = col_confidence[best]
+
+    return new_map, new_source, new_confidence
 
 
 # ─── Row-count helpers (used to pick the right sheet when a field shows up

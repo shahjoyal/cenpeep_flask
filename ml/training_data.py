@@ -19,12 +19,31 @@ TRAINING_EXAMPLES = [
     ("MW Load", "L"), ("Gross Load", "L"), ("Unit Load MW", "L"), ("Generation", "L"),
     ("Power Generation", "L"), ("Load (MW)", "L"), ("GENERATION", "L"), ("Net Generation", "L"),
     ("Total Unit Generation", "L"), ("Unit Generation", "L"), ("Total Generation", "L"),
+    # "Generator" (the equipment) is real plant-tag shorthand for the same
+    # MW reading as "Generation" — e.g. "GENERATOR MW" on DCS-style hourly
+    # exports. Without an explicit anchor, this drifted onto the unrelated
+    # OUT_OF_SCOPE example "Generator Side Condenser Vacuum" purely on
+    # "Generator" word/char overlap, since no L example previously used
+    # that spelling (only "Generation").
+    ("Generator MW", "L"), ("GENERATOR MW", "L"), ("Generator Load", "L"),
+    ("Gen MW", "L"), ("GEN MW", "L"), ("Gen-MW", "L"), ("Generator Output", "L"),
+    ("Generator Output MW", "L"),
 
     # ── Ffw — Steam Flow / Feed water flow ────────────────────────────────
     ("Steam Flow", "Ffw"), ("Main Steam Flow", "Ffw"), ("Feed water Flow", "Ffw"),
     ("Feedwater Flow", "Ffw"), ("FW Flow", "Ffw"), ("MS Flow", "Ffw"),
     ("Feed Water Flow TPH", "Ffw"), ("Boiler Feed Water Flow", "Ffw"), ("MAIN STEAM Flow", "Ffw"),
     ("FW FLOW", "Ffw"), ("FEED WATER FLOW", "Ffw"),
+    # "STM"/"FLW" abbreviated DCS-tag spelling of "Steam"/"Flow" — e.g.
+    # "MAIN STM FLOW COMP" (main steam flow, compensated) on real hourly
+    # exports. Without a Ffw example using "STM", this drifted onto the
+    # OUT_OF_SCOPE "MAIN STM TEMP-L/-R" examples instead, since those were
+    # the closest char n-gram match on the abbreviated spelling — even
+    # though this column is a FLOW reading, not a temperature. Keep this
+    # narrowly scoped to "STM ... FLOW/FLW" so it doesn't start pulling in
+    # the (deliberately unmapped) "MAIN STM TEMP" family.
+    ("MAIN STM FLOW COMP", "Ffw"), ("MAIN STM FLOW", "Ffw"), ("MAIN STM FLW COMP", "Ffw"),
+    ("MN STM FLOW", "Ffw"), ("STM FLOW", "Ffw"), ("STM FLW", "Ffw"), ("Total STM Flow", "Ffw"),
 
     # ── Fin — Total Coal Flow ──────────────────────────────────────────────
     ("Total Coal consumption", "Fin"), ("Coal Flow", "Fin"), ("Total Coal Flow", "Fin"),
@@ -189,6 +208,19 @@ TRAINING_EXAMPLES = [
     ("Economizer exit temperature", "Tgi"),
     ("GAS ECO O/L Temp average", "Tgi"), ("GAS ECO O/L Temp (Left)", "Tgi"),
     ("GAS ECO O/L Temp (Right)", "Tgi"),
+    # "FG GAS TEMP AH I/L" -- real DCS-tag form using bare "AH" (Air Heater)
+    # instead of "APH"/"GAH", plus the redundant "FG GAS" wording seen on
+    # real hourly exports. Without an explicit anchor here, this drifted
+    # onto Tsai (Secondary Air Temp In) instead: the existing Tsai examples
+    # "AH A SA I/L TEMP" etc. share the same "AH I/L TEMP" tail, and with
+    # no Tgi example using bare "AH", those won on char n-gram overlap --
+    # even though this is a FLUE GAS reading, not an air reading. Keep the
+    # "FG"/"GAS" word present so it doesn't start competing with the real
+    # (air-side) "AH I/L TEMP" columns.
+    ("FG GAS TEMP AH I/L", "Tgi"), ("FG GAS TEMP AH I/L (L)", "Tgi"),
+    ("FG GAS TEMP AH I/L (R)", "Tgi"), ("FG GAS TEMP AH I/L Left", "Tgi"),
+    ("FG GAS TEMP AH I/L Right", "Tgi"), ("FG TEMP AH I/L", "Tgi"),
+    ("FG TEMP AH INLET", "Tgi"), ("FG GAS TEMP AH Inlet", "Tgi"),
 
     # ── Tgo — FG Temp APH Out ────────────────────────────────────────────────
     ("Flue Gas Temp APH Outlet", "Tgo"), ("FG Temp APH Out", "Tgo"),
@@ -218,6 +250,16 @@ TRAINING_EXAMPLES = [
     ("FG Temp After APH Right", "Tgo"), ("FG TEMP AFTERAPH - L", "Tgo"),
     ("FG TEMP AFTERAPH - R", "Tgo"), ("FG TEMPAFTERAPH- L", "Tgo"),
     ("FG TEMPAFTERAPH- R", "Tgo"),
+    # "FG GAS TEMP AH O/L" -- bare-"AH" DCS-tag counterpart to the Tgi "AH
+    # I/L" fix above, for the outlet side. Was drifting onto Tsao
+    # (Secondary Air Temp Out) via the near-identical "AH O/L TEMP" tail
+    # shared with Tsao's "AH A SA O/L TEMP" examples -- same root cause,
+    # mirrored for the hot/outlet side.
+    ("FG GAS TEMP AH O/L", "Tgo"), ("FG GAS TEMP AH O/L (L)", "Tgo"),
+    ("FG GAS TEMP AH O/L (R)", "Tgo"), ("FG GAS TEMP AH O/L Left", "Tgo"),
+    ("FG GAS TEMP AH O/L Right", "Tgo"), ("FG TEMP AH O/L", "Tgo"),
+    ("FG TEMP AH O/L (R)", "Tgo"), ("FG TEMP AH O/L (L)", "Tgo"),
+    ("FG TEMP AH OUTLET", "Tgo"), ("FG GAS TEMP AH Outlet", "Tgo"),
 
     # ── Boiler outlet main steam temp has no dedicated CENPEEP symbol in
     #    this field set — it stays unmatched by design (see OUT_OF_SCOPE
@@ -271,6 +313,12 @@ TRAINING_EXAMPLES = [
     # spelled "Secondary Air APH Temp I/L A" Tsai example — even though this
     # column is an air temperature, not a flue-gas temperature.
     ("Secondry Air APH Temp I/L A", "Tsai"), ("Secondry Air APH Temp I/L B", "Tsai"),
+    # Bare "AIR TEMP AH I/L" (no PA/SA qualifier, bare "AH" abbreviation) --
+    # real plant tag naming with the qualifier dropped. Explicit anchor so
+    # this doesn't get pulled toward the new Tgi "FG TEMP AH I/L" examples
+    # above (which share the same "TEMP AH I/L" tail, differing only in
+    # "AIR" vs "FG"/"GAS") -- this is still an AIR reading, not flue gas.
+    ("AIR TEMP AH I/L", "Tsai"), ("AIR TEMP AH I/L (L)", "Tsai"), ("AIR TEMP AH I/L (R)", "Tsai"),
 
     # ── Tsao — SA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
     ("Secondary Air Temp Out", "Tsao"), ("SA Temp Out", "Tsao"),
@@ -292,18 +340,34 @@ TRAINING_EXAMPLES = [
     # rather than where it left.
     ("FURNACE L_SIDE INL SA T", "Tsao"), ("FURNACE R_SIDE INL SA T", "Tsao"),
     ("Furnace L Side Inlet SA Temp", "Tsao"), ("Furnace R Side Inlet SA Temp", "Tsao"),
+    # "APH O/L SEC AIR TEMPERATURE" -- explicit "O/L" (outlet) direction
+    # with the fuller "SEC AIR"/"TEMPERATURE" spelling. Was previously
+    # drifting onto Tsai (the INLET/cold-side field) purely because "SEC
+    # AIR TEMPERATURE" as a phrase is more common among Tsai's training
+    # examples than Tsao's -- the "O/L" direction marker was losing that
+    # tug-of-war. Anchoring it here fixes the direction.
+    ("APH O/L SEC AIR TEMPERATURE", "Tsao"), ("APH O/L SEC AIR TEMPERATURE RHS", "Tsao"),
+    ("APH O/L SEC AIR TEMPERATURE LHS", "Tsao"),
 
     # ── Fsa — SA Flow ──────────────────────────────────────────────────────────
     ("Secondary Air Flow", "Fsa"), ("SA Flow", "Fsa"), ("SA air flow", "Fsa"),
     ("Boiler side A SA flow", "Fsa"), ("Boiler side B SA flow", "Fsa"),
     ("Total Secondary Air Flow", "Fsa"), ("SA FLOW TO FURNACE - L", "Fsa"),
     ("SA FLOW TO FURNACE - R", "Fsa"), ("SA FLOW TO FURNACE", "Fsa"),
+    # "SA ... FLOW COMP" (compensated flow reading) -- real DCS-tag form.
+    # Explicit anchor needed: after adding the new Ffw "MAIN STM FLOW COMP"
+    # examples (for the "STM"-abbreviation fix), this started drifting onto
+    # Ffw purely via the shared "FLOW COMP" tail -- even though it's a
+    # Secondary Air flow reading, not steam/feedwater flow.
+    ("SA (L) FLOW COMP", "Fsa"), ("SA (R) FLOW COMP", "Fsa"), ("SA FLOW COMP", "Fsa"),
 
     # ── Fpa — PA Flow ──────────────────────────────────────────────────────────
     ("Primary Air Flow", "Fpa"), ("PA Flow", "Fpa"), ("PA air flow", "Fpa"),
     ("Coal Mill A PA Flow", "Fpa"), ("Coal Mill PA Flow", "Fpa"),
     ("Total Primary Air Flow", "Fpa"), ("TOTAL PA FLOW", "Fpa"),
     ("Total PA Flow", "Fpa"),
+    # Same "... FLOW COMP" fix as SA above, for Primary Air.
+    ("PA-A FLOW COMP", "Fpa"), ("PA-B FLOW COMP", "Fpa"), ("PA FLOW COMP", "Fpa"),
 
     # ── Tref — Ambient / Reference Temp ─────────────────────────────────────
     ("Ambient Temperature", "Tref"), ("Reference Temperature", "Tref"),
@@ -425,6 +489,79 @@ OUT_OF_SCOPE_EXAMPLES = [
     # mismatching it. Flag to the business team: either add a field id for
     # it, or confirm it should stay unmapped.
     "Total Air flow", "Total Air Flow", "TOTAL AIR FLOW",
+    # ── Abbreviated real DCS/hourly-export headers that were being pulled
+    #    into a real field by leftover char n-gram overlap. Each is a real
+    #    plant reading, just not one of the 42 CENPEEP fields (or not the
+    #    field it was landing on) -- see the inline reasons.
+    # Hot Reheat steam pressure before the Intercept Valve -- a pressure
+    # reading, not O2; was drifting onto O2in via "before"/"IL"-style
+    # abbreviation overlap with the O2-at-APH-inlet examples.
+    "HR STM PR. BEFORE IV(L)", "HR STM PR. BEFORE IV(R)", "HR STM PR BEFORE IV",
+    "HR STM PR. BEFORE IV",
+    # Main steam temp before the Emergency Stop Valve (ESV) -- same family
+    # as the existing "MS TEMP (Left/Right) boiler outlet" OUT_OF_SCOPE
+    # entries, just a different abbreviated wording ("TEM 42/43 ... BEF/
+    # BEFORE ESV") that wasn't covered and was drifting onto O2in.
+    "TEM 42 MS TEMP BEFORE ESV RHS", "TEM 43 MS TEMP BEF ESV (LHS)",
+    "MS TEMP BEFORE ESV", "MS TEMP BEF ESV",
+    # Feedwater temperature before/after the economiser -- abbreviated
+    # ("FW ECO I/L TEMP") counterpart to the full-word "Feed water Eco
+    # inlet/outlet temp" entries already above; the abbreviated form was
+    # slipping past those and drifting onto Tgi (flue-gas temp) since it
+    # also says "ECO"/"TEMP".
+    "FW ECO I/L TEMP", "FW ECO O/L TEMP", "FW ECO IL TEMP", "FW ECO OL TEMP",
+    # Superheater/reheater attemperator (spray) water flow -- same physical
+    # quantity as the existing "SH Spray Flow"/"RH Spray Flow"/"Total SH
+    # Spray"/"Total RH Spray" entries, just using the "ATT."/"ATTAMP"
+    # plant-tag abbreviation for "attemperator", which wasn't covered and
+    # was drifting onto Ffw (steam/feedwater flow) via the word "FLOW".
+    "SH ATT. WATER FLOW (LHS)", "SH ATT. WATER FLOW (RHS)", "SH ATT WATER FLOW",
+    "RH ATT. WATER FLOW (LHS)", "RH ATT. WATER FLOW (RHS)", "RH ATT WATER FLOW",
+    "SH 2ND STG ATTAMP FLOW LHS", "SH 2ND STG ATTAMP FLOW RHS", "SH ATTAMP FLOW",
+    "RH ATTEM FLOW", "RH ATTEM TEMP", "SH ATTEM FLOW",
+    # Boiler Feed Pump suction/discharge pressure -- a pump-side pressure
+    # reading, not a temperature; "BFP-A SUC PR AFTER BSTR PMP 2X OUT" was
+    # drifting onto Tgo via shared "2X OUT" wording with real Tgo examples.
+    "BFP-A SUC PR AFTER BSTR PMP 2X OUT", "BFP-B SUC PR AFTER BSTR PMP 2X OUT",
+    "BFP-C SUC PR AFT BSTR PMP 2X OUT", "BFP SUC PR AFTER BSTR PMP",
+    "BFP DISC. HDR PR 1O2", "BFP DISCHARGE TEMP",
+    # Boiler Feed Pump suction/discharge TEMPERATURE -- same BFP family as
+    # the pressure entries above, but the temperature side. This is the
+    # feedwater temperature at the pump, not an air/gas temperature -- it
+    # was previously drifting onto Tsao (Secondary Air Temp Out) via
+    # incidental "...2X OUT"/"TEMP" overlap with real Tsao examples.
+    # Explicit anchor makes the rejection deliberate rather than a side
+    # effect of the pressure fix above.
+    "BFP-A SUC TEMP 2X OUT", "BFP-B SUC TEMP 2X OUT", "BFP-C SUC TEMP 2X OUT",
+    "BFP-A DIS TEMP 2X OUT", "BFP-B DIS TEMP 2X SEL", "BFP-C DIS TEMP 2X SEL",
+    # Flue gas PRESSURE (draft) at the air heater, abbreviated "AH" form --
+    # a pressure/draft reading, not O2 or temperature; the existing
+    # "APH inlet FG pressure"/"APH O/L FG pressure" OUT_OF_SCOPE entries
+    # used the full "APH" spelling, so the bare-"AH" plant-tag form wasn't
+    # covered and was drifting onto O2in / Tgo respectively.
+    "FG PR. AT AH-A INLET", "FG PR. AT AH-B INLET", "FG PR AT AH INLET",
+    "FG PR. AFTER AH-A", "FG PR. AFTER AH-B", "FG PR AFTER AH",
+    "DP ACROSS AH-A 1O2", "DP ACROSS AH-B 1O2",
+    # Induced Draft (ID) fan inlet draught -- same draft/pressure family as
+    # the existing "Draft pressure"/"Furnace pressure" entries; was
+    # drifting onto O2in via the word "inlet".
+    "ID A INLET DRAUGHT", "ID B INLET DRAUGHT", "ID INLET DRAUGHT",
+    # Coal feeder motor current (amps) -- an electrical reading, not coal
+    # flow; shares the word "FEEDER" with the real Fin feeder-flow
+    # examples, which was enough to pull it onto Fin.
+    "FEEDER A AMPS", "FEEDER B AMPS", "FEEDER C AMPS", "FEEDER D AMPS",
+    "FEEDER E AMPS", "FEEDER F AMPS", "FEEDER AMPS",
+    # Truncated/ambiguous PA fan reading -- not enough context to be any
+    # specific field; siblings "PA FAN C/D/E/F COMP 2XSEL" already reject
+    # correctly, this one (missing the word "FAN") was borderline-matching
+    # Tpao instead.
+    "PA B COMP 2X SEL", "PA FAN B COMP 2X SEL", "PA A COMP 2X SEL",
+    # Text-valued "which mills are in service" columns (e.g. cell values
+    # like "ABDEF") -- not a numeric reading at all, but the word "Mill"
+    # was pulling these toward Fin's "Mill X Coal Flow" examples (or, before
+    # that fix, toward Tpai). Neither is right: this column doesn't carry a
+    # coal-flow or temperature number.
+    "Mill Running", "Mill Service", "Mill Combination", "Mill in Service",
 ]
 
 def get_training_data():
