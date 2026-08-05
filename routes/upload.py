@@ -120,7 +120,18 @@ SYM_MAP_LOWER = {k.lower(): v for k, v in SYM_MAP.items()}
 # runs (so the second occurrence still correctly resolves to the AUTO/
 # readonly Md2/Ad2 slot for the summary table), but the first occurrence
 # no longer auto-fills or colors the manual Md/Ad inputs.
-NEVER_AUTO_DETECT = {'Pfa', 'Pba', 'Sd', 'GCVd', 'Trad', 'Mwvd', 'Md', 'Ad', 'VMd', 'FCd'}
+# S (As-Fired Sulfur), COin (Avg. Flue Gas CO — APH In), and Tref (Design
+# Ambient / Ref Air Temp) are also now always-manual — same reasoning as
+# Sd/GCVd/Trad/Mwvd above: these are typed in by hand from a lab report or
+# a fixed plant design value rather than reliably reported as their own
+# DCS/log column, so they get the same "never auto-detected, never
+# colored detected/missing" treatment. Mirrored on the calculator form with
+# the "MANUAL" tag (see public/calculator.html) and removed from
+# REQUIRED_FIELDS below, same as every other NEVER_AUTO_DETECT field.
+NEVER_AUTO_DETECT = {
+    'Pfa', 'Pba', 'Sd', 'GCVd', 'Trad', 'Mwvd', 'Md', 'Ad', 'VMd', 'FCd',
+    'S', 'COin', 'Tref',
+}
 
 # ─── Full list of CENPEEP input fields the calculator needs ──────────────────
 # This is every editable (non-auto-computed) field on the calculator form —
@@ -134,9 +145,9 @@ NEVER_AUTO_DETECT = {'Pfa', 'Pba', 'Sd', 'GCVd', 'Trad', 'Mwvd', 'Md', 'Ad', 'VM
 # the field coloring on the calculator form, or the r.py Word report.
 REQUIRED_FIELDS = [
     'L', 'Ffw', 'Fin', 'Cba', 'Cfa',
-    'M', 'A', 'VM', 'FC', 'GCV', 'S',
-    'O2in', 'COin', 'O2out', 'COout',
-    'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa', 'Tref',
+    'M', 'A', 'VM', 'FC', 'GCV',
+    'O2in', 'O2out', 'COout',
+    'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa',
 ]
 
 # Full human-readable name for each field id, taken verbatim from the
@@ -184,6 +195,28 @@ LABEL_ALIASES = {
     'pa temp in': 'Tpai', 'sa temp in': 'Tsai',
     'pa temp out': 'Tpao', 'sa temp out': 'Tsao',
     'pa flow': 'Fpa', 'sa flow': 'Fsa',
+    # Exact real-sheet DCS tag: "TEMP AT APH O/L MEDIAN" — on its own this
+    # phrasing is ambiguous with Tgo (Flue Gas Temp APH Out also gets
+    # called "APH O/L ... Temp"), so it's handled as a hard-coded exact
+    # alias rather than left to the ML classifier's fuzzy similarity,
+    # which was pulling it toward Tgo. Confirmed against the actual
+    # workbook this represents Primary Air from APH Temp Out (Tpao).
+    'temp at aph ol median': 'Tpao',
+    # Exact real-sheet DCS tags: "OXYGEN IN FLUE GAS(L)-AH O/L" and
+    # "OXYGEN IN FLUE GAS(R)-AH O/L" — Left/Right duct O2 sensors at the
+    # APH OUTLET (the trailing "AH O/L" = "Air Heater Outlet"). The ML
+    # classifier was matching these to O2in instead (score ~0.63, above
+    # threshold) because the word "IN" in "OXYGEN IN FLUE GAS" reads as
+    # "inlet" out of context, when it's actually just "oxygen [found] in
+    # [the] flue gas" — the real inlet/outlet qualifier is the "AH O/L"
+    # suffix, which means outlet. Hard-coded here as exact aliases (rather
+    # than left to the fuzzy ML match) so both L/R columns resolve to
+    # O2out deterministically and both get picked up by
+    # MULTI_COLUMN_AVERAGE_FIELDS / _dedupe_columns_per_field, which
+    # averages the two sensor readings together instead of keeping only
+    # one.
+    'oxygen in flue gaslah ol': 'O2out',
+    'oxygen in flue gasrah ol': 'O2out',
     'unburnt bottom': 'Cba', 'unburnt fly': 'Cfa',
     'unburnts in bottom ash': 'Cba', 'unburnts in fly ash': 'Cfa',
     'unburnt in bottom ash': 'Cba', 'unburnt in fly ash': 'Cfa',
@@ -347,6 +380,17 @@ def _apply_highlight_signal(col_map, col_source, col_confidence, headers,
         by_field.setdefault(fid, []).append(col_idx)
 
     for fid, cols in by_field.items():
+        if fid in MULTI_COLUMN_AVERAGE_FIELDS:
+            # These fields (e.g. O2out's Left/Right APH columns) are meant
+            # to be averaged together deliberately (see
+            # MULTI_COLUMN_AVERAGE_FIELDS / _dedupe_columns_per_field) —
+            # don't drop one side just because the engineer only
+            # highlighted the other. Still count the field as
+            # "highlighted" if either column was, for the
+            # highlighted-field bookkeeping below.
+            if any(c in highlighted_cols for c in cols):
+                highlighted_field_ids.add(fid)
+            continue
         hi_cols = [c for c in cols if c in highlighted_cols]
         if hi_cols:
             highlighted_field_ids.add(fid)
@@ -637,10 +681,26 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
     return col_map, col_source, col_confidence
 
 
+# Fields where two columns legitimately both belong to the same field id
+# and should be AVERAGED together, rather than deduped down to one. This is
+# the real-world "Left duct / Right duct" instrumentation pattern many
+# plants use for APH readings — e.g. a sheet with BOTH
+# "OXYGEN IN FLUE GAS(L)-AH O/L" and "OXYGEN IN FLUE GAS(R)-AH O/L" columns
+# for Avg. Flue Gas O2 — APH Out (O2out): these are two separate physical
+# sensors (left/right side of the air preheater), not a strict-vs-fuzzy
+# duplicate match on the same reading, so both readings should be blended
+# into the field's value instead of one being silently discarded by
+# _dedupe_columns_per_field below.
+MULTI_COLUMN_AVERAGE_FIELDS = {'O2out'}
+
+
 def _dedupe_columns_per_field(col_map, col_source, col_confidence):
     """
     Keeps only the SINGLE best column for each field id, instead of letting
-    every column that happens to map to the same field survive together.
+    every column that happens to map to the same field survive together —
+    EXCEPT for fields listed in MULTI_COLUMN_AVERAGE_FIELDS (see above),
+    where every matched column is deliberately kept so its readings get
+    averaged together in _finalize_field_values.
 
     Real DCS/plant sheets routinely have one column with the exact/strict
     header (e.g. "MAIN STM FLOW COMP") AND one or more other columns whose
@@ -653,7 +713,8 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence):
     the "detected from" display — regardless of which one was actually the
     strict/confident match.
 
-    Selection rule per field id, in order:
+    Selection rule per field id, in order (fields in
+    MULTI_COLUMN_AVERAGE_FIELDS skip this and keep every matched column):
       1. An exact rule match always beats an ML (fuzzy) match.
       2. Among same-source matches, higher confidence wins.
       3. Ties broken by earliest column index, for determinism.
@@ -676,6 +737,12 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence):
 
     new_map, new_source, new_confidence = {}, {}, {}
     for fid, cols in by_field.items():
+        if fid in MULTI_COLUMN_AVERAGE_FIELDS and len(cols) > 1:
+            for col_idx in cols:
+                new_map[col_idx] = fid
+                new_source[col_idx] = col_source[col_idx]
+                new_confidence[col_idx] = col_confidence[col_idx]
+            continue
         best = min(cols, key=rank)
         new_map[best] = fid
         new_source[best] = col_source[best]
@@ -1282,6 +1349,28 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         merged_extracted.update(cenpeep_result['extracted'])
         primary_sheet = cenpeep_result['sheetName']
 
+    # Fallback: Primary Air to APH Temp In (Tpai) very often has no column
+    # of its own on real plant sheets — only the Secondary Air In (Tsai)
+    # reading is logged. Physically, ambient air entering the APH is drawn
+    # from the same source for both the primary- and secondary-air ducts,
+    # so when Tpai genuinely wasn't found anywhere but Tsai WAS, default
+    # Tpai to the same value as Tsai instead of leaving it blank/missing.
+    # This only fires when Tpai is absent from every sheet — it never
+    # overrides an actually-detected Tpai value.
+    if 'Tpai' not in merged_extracted and 'Tsai' in merged_extracted:
+        merged_extracted['Tpai'] = merged_extracted['Tsai']
+        tsai_source = merged_field_source.get('Tsai')
+        if tsai_source:
+            merged_field_source['Tpai'] = tsai_source
+        tsai_detail = merged_field_detail.get('Tsai', {})
+        merged_field_detail['Tpai'] = {
+            'sheet': tsai_detail.get('sheet'),
+            'label': FIELD_LABELS.get('Tpai', 'Tpai'),
+            'header': f"defaulted = Secondary Air In ({tsai_detail.get('header') or 'Tsai'})",
+            'source': 'derived_fallback',
+            'confidence': tsai_detail.get('confidence', 1.0),
+        }
+
     missing_fields = [
         {'id': fid, 'label': FIELD_LABELS.get(fid, fid)}
         for fid in REQUIRED_FIELDS if fid not in merged_extracted
@@ -1343,11 +1432,26 @@ def _sheet_field_details(sr):
         }
     details = {}
     for meta in sr.get('columns', {}).values():
-        details[meta['fieldId']] = {
-            'header': meta['header'],
-            'source': meta['source'],
-            'confidence': meta['confidence'],
-        }
+        fid = meta['fieldId']
+        if fid in details:
+            # Multiple columns mapped to the same field id — this only
+            # happens for MULTI_COLUMN_AVERAGE_FIELDS (e.g. O2out's
+            # Left/Right APH columns, see _dedupe_columns_per_field), so
+            # combine both headers into one "Detected From" string instead
+            # of letting whichever column came last silently overwrite the
+            # other in this fid-keyed summary.
+            existing = details[fid]
+            details[fid] = {
+                'header': f"{existing['header']} + {meta['header']}" if existing['header'] else meta['header'],
+                'source': meta['source'],
+                'confidence': max(existing['confidence'] or 0, meta['confidence'] or 0),
+            }
+        else:
+            details[fid] = {
+                'header': meta['header'],
+                'source': meta['source'],
+                'confidence': meta['confidence'],
+            }
     return details
 
 

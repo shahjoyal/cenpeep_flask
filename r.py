@@ -87,11 +87,13 @@ def build_report(result, output_path):
         "cenpeep_column": "D9EAD3",
         "rule": "D9EAD3",
         "ml": "D6E4F0",
+        "derived_fallback": "FCE5CD",
     }
     method_labels = {
         "cenpeep_column": "CenPeep layout (exact)",
         "rule": "Exact alias/symbol match",
         "ml": "AI (ML) match",
+        "derived_fallback": "Defaulted from another field",
     }
 
     primary_sheet = result.get("primarySheet", "")

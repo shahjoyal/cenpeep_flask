@@ -47,17 +47,18 @@ window._uploadedFilename = null;
 // red forever if upload #2 doesn't mention it at all).
 // Pfa/Pba ("% of Fly/Bottom Ash in Total Ash"), Sd/GCVd/Trad/Mwvd (Design
 // Conditions — Ultimate Analysis: Sulfur, GCV, Ref. Air Temp, Moisture in
-// Air), and Md/Ad/VMd/FCd (Design — Proximate) are deliberately excluded —
-// always-manual fields, never auto-detected, never colored (see
-// NEVER_AUTO_DETECT in routes/upload.py). Listing them here would be
-// harmless (nothing ever puts field-detected/field-missing on them), but
-// they're left out to keep this list an honest mirror of what the backend
-// actually reports.
+// Air), Md/Ad/VMd/FCd (Design — Proximate), and S/COin/Tref (As-Fired
+// Sulfur, Avg. Flue Gas CO — APH In, Design Ambient / Ref Air Temp) are
+// deliberately excluded — always-manual fields, never auto-detected,
+// never colored (see NEVER_AUTO_DETECT in routes/upload.py). Listing them
+// here would be harmless (nothing ever puts field-detected/field-missing
+// on them), but they're left out to keep this list an honest mirror of
+// what the backend actually reports.
 const ALL_FIELD_IDS = [
   'L', 'Ffw', 'Fin', 'Cba', 'Cfa',
-  'M', 'A', 'VM', 'FC', 'GCV', 'S',
-  'O2in', 'COin', 'O2out', 'COout',
-  'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa', 'Tref',
+  'M', 'A', 'VM', 'FC', 'GCV',
+  'O2in', 'O2out', 'COout',
+  'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa',
 ];
 
 function initUpload() {
@@ -137,7 +138,7 @@ function initUpload() {
         .sort(([, a], [, b]) => (a.label || '').localeCompare(b.label || ''))
         .map(([fid, d]) => {
           const conf = typeof d.confidence === 'number' ? `${Math.round(d.confidence * 100)}%` : '—';
-          const via  = d.source === 'ml' ? '🤖 AI-detected' : d.source === 'cenpeep_column' ? 'CenPeep layout' : 'exact match';
+          const via  = d.source === 'ml' ? '🤖 AI-detected' : d.source === 'cenpeep_column' ? 'CenPeep layout' : d.source === 'derived_fallback' ? '↳ defaulted from Secondary Air' : 'exact match';
           const from = d.header ? `"${d.header}"` : (d.label || fid);
           return `<tr><td>${d.label || fid}</td><td>${from}</td><td>${via}</td><td>${conf}</td></tr>`;
         }).join('');
