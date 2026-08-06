@@ -1306,7 +1306,7 @@ def parse_workbook(file_bytes, filename, use_ml=True):
                 raise RuntimeError('Neither python-calamine nor openpyxl is installed')
             sheet_results = _parse_with_openpyxl(file_bytes, use_ml=use_ml, highlight_map=highlight_map)
 
-    # Merge: pick ONE "best" sheet among the generic (non-CenPeep) sheets —
+    # Merge:: pick ONE "best" sheet among the generic (non-CenPeep) sheets —
     # whichever has the most real (non-blank) date rows — and take ALL of
     # its extracted fields as-is. A field's average/sum must never be mixed
     # across sheets; it always comes wholly from one sheet's rows.
