@@ -904,10 +904,160 @@ def _finalize_field_values(field_values):
     return extracted, raw_rows, sheet_summary
 
 
-# ─── Per-sheet parser (tries both strategies) ─────────────────────────────────
+# ─── Strategy 3: Generic labeled-row layout ───────────────────────────────────
+# A looser variant of the strict CENPEEP column layout (Strategy 1) for
+# sheets that are still fundamentally "one row per parameter, with a Symbol
+# column" but don't match Strategy 1's fixed col0..col4 positions, and/or
+# report several reading columns side-by-side (e.g. one per week/period)
+# instead of a single Value column. Seen on real non-CENPEEP-authored
+# efficiency sheets (e.g. plants following a different national methodology)
+# that are otherwise structurally identical in spirit.
+#
+# IMPORTANT: this only ever runs when Strategies 1 and 2 BOTH find nothing
+# (see _parse_sheet_rows / _parse_sheet_chunked below) — so it can never
+# steal or change how a sheet that already parses correctly today is
+# handled. Its symbol aliases are also kept in a table separate from
+# SYM_MAP/LABEL_ALIASES for the same reason: they only ever apply inside
+# this fallback, never inside Strategy 1 or Strategy 2's matching.
+GENERIC_ROW_LAYOUT_SYMBOL_HEADERS = {'symbol', 'ky hieu'}
+GENERIC_ROW_LAYOUT_UNIT_HEADERS = {'unit', 'uom', 'don vi'}
+GENERIC_ROW_LAYOUT_PARTICULARS_HEADERS = {
+    'particulars', 'parameter', 'description', 'thong so',
+}
+GENERIC_ROW_LAYOUT_SKIP_HEADERS = {
+    'data collection method', 'method', 'stt', 'no', 'no.', 'sr no', 'sr no.',
+    'phuong phap thu thap so lieu',
+}
+GENERIC_ROW_LAYOUT_HEADER_SCAN_ROWS = HEADER_SCAN_ROWS * 3
+
+# Extra symbol aliases seen on non-CENPEEP-standard sheets that otherwise
+# follow this same "row per parameter" shape (e.g. an EVN/Vietnamese
+# boiler-efficiency methodology sheet using Ne/Qfw/tpa/tsa/... instead of
+# CENPEEP's L/Ffw/Tpai/Tsai/...). Deliberately NOT merged into SYM_MAP.
+GENERIC_ROW_LAYOUT_SYMBOL_ALIASES = {
+    'ne': 'L',                  # Unit Load
+    'qfw': 'Ffw', 'qsh': 'Ffw',  # Feed Water / Main Steam Flow Rate
+    'tpa': 'Tpai',               # Primary Air Temp - AH inlet
+    'tsa': 'Tsai',               # Secondary Air Temp - AH inlet
+    'qpa': 'Fpa',                # Primary Air Flow Rate to AH
+    'qsa': 'Fsa',                # Secondary Air Flow Rate to AH
+    'tg14': 'Tgi',               # Flue Gas Temp - AH inlet
+    'tg15': 'Tgo',               # Flue Gas Temp - AH outlet
+    'o2ou': 'O2out', 'o2out': 'O2out',   # Flue Gas O2 - AH outlet
+    'wc': 'M',                   # Moisture content of test coal
+    'vc': 'VM',                  # Volatile matter of test coal
+    'ac': 'A',                   # Ash content of test coal
+    'qc': 'GCV',                 # Gross calorific value of test coal
+}
+
+
+def _generic_sym_to_field(sym):
+    """Like _sym_to_field, plus the Strategy-3-only alias table above."""
+    fid = _sym_to_field(sym)
+    if fid:
+        return fid
+    norm = re.sub(r'[^a-z0-9]', '', str(sym).lower().strip())
+    return GENERIC_ROW_LAYOUT_SYMBOL_ALIASES.get(norm)
+
+
+def _find_generic_header_row(sample_rows):
+    """
+    Finds a row containing a cell that reads exactly 'Symbol' (or a
+    localized equivalent) - the one reliable, position-independent anchor
+    for this layout. Returns (rowIdx, symbolColIdx) or (None, None).
+    """
+    for i, row in enumerate(sample_rows):
+        for c_idx, cell in enumerate(row):
+            if cell is None:
+                continue
+            norm = re.sub(r'[^a-z ]', '', str(cell).lower().strip())
+            if norm in GENERIC_ROW_LAYOUT_SYMBOL_HEADERS:
+                return i, c_idx
+    return None, None
+
+
+def _parse_generic_row_layout(rows):
+    """
+    Strategy 3 - see module comment above. Every row below the detected
+    header is one parameter: its symbol lives in the Symbol column, and any
+    other column on that row (except ones whose OWN header marks them as
+    Unit/Method/serial-number/particulars text) is treated as a reading for
+    that parameter. Multiple reading columns on the same row (e.g. one per
+    week) are averaged together, same spirit as Strategy 2 averaging
+    multiple DATA ROWS for one column.
+    Returns (extracted_dict, raw_rows_list, sheet_summary, col_meta,
+             data_row_count).
+    """
+    sample = rows[:GENERIC_ROW_LAYOUT_HEADER_SCAN_ROWS]
+    header_row_idx, symbol_col = _find_generic_header_row(sample)
+    if header_row_idx is None:
+        return {}, [], {}, {}, 0
+
+    header_row = rows[header_row_idx]
+    value_cols = []
+    for c_idx, cell in enumerate(header_row):
+        if c_idx == symbol_col:
+            continue
+        text = '' if cell is None else str(cell).strip()
+        norm = re.sub(r'[^a-z ]', '', text.lower())
+        if text and (
+            norm in GENERIC_ROW_LAYOUT_UNIT_HEADERS
+            or norm in GENERIC_ROW_LAYOUT_SKIP_HEADERS
+            or norm in GENERIC_ROW_LAYOUT_PARTICULARS_HEADERS
+        ):
+            continue
+        # A blank header (common above weekly value columns whose real
+        # label is a merged cell one row up, e.g. "Week 1") is still a
+        # candidate value column - decided row-by-row on numeric-ness.
+        value_cols.append(c_idx)
+
+    if not value_cols:
+        return {}, [], {}, {}, 0
+
+    field_values = {}
+    field_particulars = {}
+    max_readings = 0
+    for row in rows[header_row_idx + 1:]:
+        if symbol_col >= len(row):
+            continue
+        sym = row[symbol_col]
+        if sym is None or not str(sym).strip():
+            continue
+        field_id = _generic_sym_to_field(sym)
+        if not field_id or field_id in NEVER_AUTO_DETECT:
+            continue
+        row_readings = 0
+        for c_idx in value_cols:
+            if c_idx >= len(row):
+                continue
+            num = _to_num(row[c_idx])
+            if num is not None:
+                field_values.setdefault(field_id, []).append(num)
+                row_readings += 1
+        if row_readings:
+            max_readings = max(max_readings, row_readings)
+            field_particulars.setdefault(field_id, str(sym))
+
+    extracted, raw_rows, summary = _finalize_field_values(field_values)
+    col_meta = {
+        fid: {
+            'fieldId': fid,
+            'header': field_particulars.get(fid, fid),
+            'source': 'rule',
+            'confidence': 1.0,
+        }
+        for fid in extracted
+    }
+    return extracted, raw_rows, summary, col_meta, max_readings
+
+
+# ─── Per-sheet parser (tries all strategies) ───────────────────────────────────
 def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
     """
-    Tries CenPeep column layout first, then raw tabular layout (ML-augmented).
+    Tries CenPeep column layout first, then raw tabular layout (ML-augmented),
+    then the generic labeled-row layout (Strategy 3 - only reached if both
+    of the above find nothing, so it can never change how an already-working
+    sheet is parsed).
     Returns a dict with keys: extracted, rawRows, strategy, summary, columns.
     """
     # Strategy 1: standard CENPEEP layout
@@ -921,6 +1071,32 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
             'summary': {},
             'columns': {},
             'dataRowCount': len(rows),
+            'unmatchedHighlighted': [],
+        }
+
+    # Strategy 3: generic labeled-row layout (position-independent Symbol
+    # column, possibly several reading columns per row). Tried BEFORE
+    # Strategy 2 deliberately: this layout still has a header row inside
+    # Strategy 2's own header-scan window, and that header row's cell text
+    # ("Parameter", "Symbol", "Unit", "Data Collection Method", a repeated
+    # period label like "Boiler 1") can look just similarity-enough to real
+    # CENPEEP field phrasing that Strategy 2's ML fallback grabs a few of
+    # those columns with low confidence and "succeeds" with wrong values —
+    # which would stop Strategy 3 from ever being tried. Strategy 3 only
+    # activates at all when it finds a literal "Symbol" header cell, which
+    # a genuine Strategy-2 (date/tag log) sheet essentially never has, so
+    # this reordering doesn't change anything for sheets that were already
+    # being parsed correctly by Strategy 2.
+    ext3, raw3, summary3, col_meta3, data_row_count3 = _parse_generic_row_layout(rows)
+    if ext3:
+        return {
+            'sheetName': sheet_name,
+            'strategy': 'generic_row_layout',
+            'extracted': ext3,
+            'rawRows': raw3,
+            'summary': summary3,
+            'columns': col_meta3,
+            'dataRowCount': data_row_count3,
             'unmatchedHighlighted': [],
         }
 
@@ -1054,6 +1230,36 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
             'columns': {},
             'rowsScanned': row_count,
             'dataRowCount': row_count,
+            'unmatchedHighlighted': [],
+        }
+
+    # Strategy 3 fallback: generic labeled-row layout, checked against the
+    # same buffered leading rows used for the CenPeep-layout check above.
+    # Tried before falling back on whatever the inline Strategy-2 header
+    # hunt above produced, for the same reason as in _parse_sheet_rows:
+    # this layout's header row (with cell text like "Parameter", "Symbol",
+    # "Data Collection Method") sits inside Strategy 2's own header-scan
+    # window and can fool its ML fallback into a low-confidence, wrong
+    # match before Strategy 3 ever gets a look. Strategy 3 only activates
+    # when it finds a literal "Symbol" header cell, so this can't change
+    # the outcome for a sheet that doesn't have this row-per-parameter
+    # shape. This layout is also always a small parameter table in
+    # practice (never the giant hourly-log sheets chunking exists for), so
+    # checking it against cenpeep_check_rows (capped at 200 rows) rather
+    # than the full streamed sheet is safe.
+    ext3, raw3, summary3, col_meta3, data_row_count3 = _parse_generic_row_layout(
+        cenpeep_check_rows
+    )
+    if ext3:
+        return {
+            'sheetName': sheet_name,
+            'strategy': 'generic_row_layout',
+            'extracted': ext3,
+            'rawRows': raw3,
+            'summary': summary3,
+            'columns': col_meta3,
+            'rowsScanned': row_count,
+            'dataRowCount': data_row_count3,
             'unmatchedHighlighted': [],
         }
 
@@ -1306,7 +1512,7 @@ def parse_workbook(file_bytes, filename, use_ml=True):
                 raise RuntimeError('Neither python-calamine nor openpyxl is installed')
             sheet_results = _parse_with_openpyxl(file_bytes, use_ml=use_ml, highlight_map=highlight_map)
 
-    # Merge:: pick ONE "best" sheet among the generic (non-CenPeep) sheets —
+    # Merge: pick ONE "best" sheet among the generic (non-CenPeep) sheets —
     # whichever has the most real (non-blank) date rows — and take ALL of
     # its extracted fields as-is. A field's average/sum must never be mixed
     # across sheets; it always comes wholly from one sheet's rows.
@@ -1324,15 +1530,36 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     merged_field_source = {}   # field_id -> (sheetName, dataRowCount) chosen
     merged_field_detail = {}   # field_id -> {sheet, header, source, confidence}
     cenpeep_result = None
+    generic_row_layout_sheets = []
     generic_sheets = []
     for sr in sheet_results:
         if 'cenpeep' in sr['sheetName'].lower():
             cenpeep_result = sr
             continue
+        if sr.get('strategy') == 'generic_row_layout':
+            # Same reasoning as the cenpeep_result carve-out above: a sheet
+            # that matched Strategy 3 was identified via a strong,
+            # unambiguous signal (a literal "Symbol" column header on a
+            # dedicated row-per-parameter table) rather than fuzzy
+            # header-text similarity, so it's a deliberate efficiency-input
+            # sheet, not a raw log/design dump. It should outrank ordinary
+            # raw_tabular sheets the same way the named CenPeep sheet does
+            # - otherwise a bigger but noisier log sheet (more date rows,
+            # but ML-matched with lower confidence) can win the ranking
+            # below and silently override a correct, high-confidence value
+            # with a wrong one.
+            generic_row_layout_sheets.append(sr)
+            continue
         generic_sheets.append(sr)
 
     # Rank generic sheets by date-row count, most rows first.
     ranked_sheets = sorted(generic_sheets, key=lambda sr: sr.get('dataRowCount', 0), reverse=True)
+    # generic_row_layout sheets are tried first (see comment above), each
+    # one ranked by how many fields it found, before falling back to the
+    # ordinary date-row-count ranked sheets for anything still missing.
+    ranked_sheets = sorted(
+        generic_row_layout_sheets, key=lambda sr: len(sr.get('extracted', {})), reverse=True
+    ) + ranked_sheets
 
     best_generic_sheet = None
     for sr in ranked_sheets:
