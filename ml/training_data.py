@@ -103,7 +103,18 @@ TRAINING_EXAMPLES = [
     ("Bottom Ash % of Total Ash", "Pba"),
 
     # ── M — Moisture (coal proximate, "as fired") ─────────────────────────
-    ("Moisture", "M"), ("Moisture %", "M"), ("IM %", "M"), ("Inherent Moisture", "M"),
+    # CENPEEP's "M" field is specifically TOTAL Moisture (TM) — the figure
+    # the boiler-efficiency formula actually uses. Inherent Moisture (IM)
+    # is a DIFFERENT lab quantity (moisture retained inside the coal
+    # matrix itself, always smaller than TM) reported alongside TM on the
+    # same Coal Analysis sheet — not interchangeable with it. "IM %" /
+    # "Inherent Moisture" used to be listed here as if they were the same
+    # field, so a sheet with BOTH columns matched "IM %" as well as
+    # "T.M. %" for M, and both survived into the result (their headers
+    # got joined together in the "detected from" display, e.g.
+    # "IM % + T.M. %") instead of TM alone. See the explicit IM rejection
+    # in OUT_OF_SCOPE_EXAMPLES below.
+    ("Moisture", "M"), ("Moisture %", "M"),
     ("Total Moisture", "M"), ("TM %", "M"), ("Moisture As Received", "M"),
     ("Coal Moisture", "M"), ("M %", "M"), ("T.M. %", "M"), ("TM%", "M"),
     ("% Moist ( TM)", "M"), ("% Moist (TM)", "M"), ("Percent Moisture TM", "M"),
@@ -138,6 +149,16 @@ TRAINING_EXAMPLES = [
     # the air preheater (APH) — same physical equipment, different acronym.
     ("GAH I/L O2 Left", "O2in"), ("GAH I/L O2 Right", "O2in"), ("GAH Inlet O2", "O2in"),
     ("GAH I/L O2", "O2in"), ("GAH I/L O2 average", "O2in"),
+    # Real DCS-tag ordering puts "GAS" between the APH side and "O2%"
+    # ("APH-A I/L GAS O2%") rather than "O2 ... APH Inlet". Without an
+    # example in this exact word order, this was losing on char n-gram
+    # overlap to the Tgi ("...GAS TEMP AH I/L...") examples below, which
+    # share "GAS"/"APH"/"I/L" with this header but are a totally different
+    # reading (temperature, not O2) — it was being detected as flue gas
+    # temperature instead of O2.
+    ("APH-A I/L GAS O2%", "O2in"), ("APH-B I/L GAS O2%", "O2in"),
+    ("APH I/L GAS O2%", "O2in"), ("APH-A INLET GAS O2", "O2in"),
+    ("APH-B INLET GAS O2", "O2in"), ("APH INLET GAS O2 PERCENT", "O2in"),
 
     # ── CO2in — CO2 APH In ──────────────────────────────────────────────────
     ("CO2 at APH Inlet", "CO2in"), ("CO2 APH In", "CO2in"), ("CO2 Air Preheater Inlet", "CO2in"),
@@ -221,6 +242,18 @@ TRAINING_EXAMPLES = [
     ("FG GAS TEMP AH I/L (R)", "Tgi"), ("FG GAS TEMP AH I/L Left", "Tgi"),
     ("FG GAS TEMP AH I/L Right", "Tgi"), ("FG TEMP AH I/L", "Tgi"),
     ("FG TEMP AH INLET", "Tgi"), ("FG GAS TEMP AH Inlet", "Tgi"),
+    # A dedicated "APH-<side> I/L GAS TEMP" sensor tag (side spelled out as
+    # A/B rather than Left/Right, "GAS TEMP" instead of "FG Temp") is a
+    # DIRECT APH-inlet reading — the most on-the-nose Tgi wording there is,
+    # and should win over the (intentionally looser) economiser-outlet
+    # proxy examples above whenever a real plant has both. Previously the
+    # closest match here was the generic "FG GAS TEMP AH I/L" example,
+    # scoring lower than "ECO O/L FG Temp" on a real plant sheet that had
+    # both an economiser-outlet AND a dedicated APH-inlet column — so the
+    # proxy reading was selected over the direct one.
+    ("APH-A I/L GAS TEMP", "Tgi"), ("APH-B I/L GAS TEMP", "Tgi"),
+    ("APH I/L GAS TEMP", "Tgi"), ("APH-A INLET GAS TEMP", "Tgi"),
+    ("APH-B INLET GAS TEMP", "Tgi"), ("APH INLET GAS TEMPERATURE", "Tgi"),
 
     # ── Tgo — FG Temp APH Out ────────────────────────────────────────────────
     ("Flue Gas Temp APH Outlet", "Tgo"), ("FG Temp APH Out", "Tgo"),
@@ -282,6 +315,14 @@ TRAINING_EXAMPLES = [
     # the bare column is the cold, pre-APH reading — confirmed against real
     # plant data (~30-40°C vs ~350-500°C for the APH-outlet columns).
     ("Primary Air Temp", "Tpai"), ("GAH I/L Prim Air Temp", "Tpai"),
+    # "APH. <side> INLET PA. TMP" — this plant's own DCS-tag wording
+    # ("PA." abbreviated with a trailing period, "TMP" instead of "Temp").
+    # Without a direct match here, this drifted onto O2in: the abbreviated
+    # "INLET"/"APH" overlap with "O2 APH Inlet %" scored higher than any
+    # existing Tpai example, even though this is a TEMPERATURE reading.
+    ("APH. A INLET PA. TMP", "Tpai"), ("APH. B INLET PA. TMP", "Tpai"),
+    ("APH A INLET PA TMP", "Tpai"), ("APH B INLET PA TMP", "Tpai"),
+    ("APH INLET PA TMP", "Tpai"),
 
     # ── Tpao — PA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
     ("Primary Air Temp Out", "Tpao"), ("PA Temp Out", "Tpao"),
@@ -294,6 +335,14 @@ TRAINING_EXAMPLES = [
     ("AH B PA O/L TEMP", "Tpao"), ("AH A PA O/L Temp", "Tpao"),
     ("AH B PA O/L Temp", "Tpao"),
     ("APH A O/L PA AIR TEMP", "Tpao"), ("APH B O/L PA AIR TEMP", "Tpao"),
+    # This plant calls the hot, post-APH primary air reading "<side> SIDE
+    # HOT PA. TMP." — no explicit "APH"/"O/L" wording at all, just "HOT PA
+    # TMP", which previously had no anchor and fell through to Tgi (flue
+    # gas temp) at just-above-threshold confidence purely via generic
+    # "side"/"temp" overlap.
+    ("LEFT SIDE HOT PA. TMP.", "Tpao"), ("RIGHT SIDE HOT PA. TMP.", "Tpao"),
+    ("LEFT SIDE HOT PA TMP", "Tpao"), ("RIGHT SIDE HOT PA TMP", "Tpao"),
+    ("HOT PA TMP", "Tpao"), ("HOT PRIMARY AIR TEMP", "Tpao"),
 
     # ── Tsai — SA Temp In (APH inlet / fan-outlet side, COLD) ────────────────
     ("Secondary Air Temp In", "Tsai"), ("SA Temp In", "Tsai"),
@@ -319,6 +368,18 @@ TRAINING_EXAMPLES = [
     # above (which share the same "TEMP AH I/L" tail, differing only in
     # "AIR" vs "FG"/"GAS") -- this is still an AIR reading, not flue gas.
     ("AIR TEMP AH I/L", "Tsai"), ("AIR TEMP AH I/L (L)", "Tsai"), ("AIR TEMP AH I/L (R)", "Tsai"),
+    # This plant's own DCS-tag wording: "APH. <side> INLET SEC AIR TMP. <n>"
+    # (numbered probes 1/3 at the same reading point) and a windbox-level
+    # alias "BLR <side> SEC AR BX ILT 2 AR TEMP <n>" ("secondary air box
+    # inlet, level 2, air temp"). Without a direct match, the first form
+    # was drifting onto O2in (shared abbreviated "APH ... INLET" wording),
+    # and the windbox alias was only weakly anchored via the generic
+    # "GAH I/L Sec Air Temp" example.
+    ("APH. A INLET SEC AIR TMP.", "Tsai"), ("APH. B INLET SEC AIR TMP.", "Tsai"),
+    ("APH A INLET SEC AIR TMP", "Tsai"), ("APH B INLET SEC AIR TMP", "Tsai"),
+    ("APH INLET SEC AIR TMP", "Tsai"),
+    ("BLR LS SEC AR BX ILT 2 AR TEMP", "Tsai"), ("BLR RS SEC AR BX ILT 2 AR TEMP", "Tsai"),
+    ("SEC AIR BOX INLET TEMP", "Tsai"), ("SECONDARY AIR BOX INLET TEMP", "Tsai"),
 
     # ── Tsao — SA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
     ("Secondary Air Temp Out", "Tsao"), ("SA Temp Out", "Tsao"),
@@ -562,6 +623,46 @@ OUT_OF_SCOPE_EXAMPLES = [
     # that fix, toward Tpai). Neither is right: this column doesn't carry a
     # coal-flow or temperature number.
     "Mill Running", "Mill Service", "Mill Combination", "Mill in Service",
+    # ── Primary/Secondary air PRESSURE readings at the APH inlet/outlet ──
+    # These share almost all of their wording with the real Tpai/Tpao/
+    # Tsai/Tsao TEMPERATURE examples ("APH-<side> I/L/O/L ... AIR", "HOT
+    # ... AIR") differing only in the trailing "PR" vs "TMP"/"TEMP" — on a
+    # real plant sheet with both a pressure and a temperature column at
+    # the same duct location, the pressure column was winning the
+    # temperature field (e.g. "APH-B I/L PRIMARY AIR PR" scored higher for
+    # Tpai than the actual temperature column) purely on that bulk overlap.
+    # Same reasoning as the existing "FG PR. AT AH-<side> INLET" / "APH
+    # inlet FG pressure" rejections above, just for the air (not flue-gas)
+    # side of the APH.
+    "APH-A I/L PRIMARY AIR PR", "APH-B I/L PRIMARY AIR PR",
+    "APH-A O/L HOT PRIMARY AIR PR", "APH-B O/L HOT PRIMARY AIR PR",
+    "APH-A I/L SEC AIR PR", "APH-B I/L SEC AIR PR",
+    "APH-A O/L HOT SEC AIR PR", "APH-B O/L HOT SEC AIR PR",
+    "BLR RHS HOT SEC AIR PR-1", "BLR RHS HOT SEC AIR PR-2",
+    "BLR LHS HOT SEC AIR PR-1", "BLR LHS HOT SEC AIR PR-2",
+    "PA-A O/L PR", "PA-B O/L PR", "FD-A O/L PR", "FD-B O/L PR",
+    "HOT PA HDR PRESSURE",
+    # Gas temperature measured behind the furnace rear-wall gas damper --
+    # a real flue-gas reading, but at a DIFFERENT point in the gas path
+    # than any Tgi/Tgo/Tsao duct, and it shares "FURNACE"/"REAR"/"SIDE"
+    # wording with the real Tsao "Furnace <side> Side Inlet SA Temp"
+    # examples even though it is a GAS temperature, not an AIR temperature.
+    "GAS TEMP BEHIND FURNACE REAR SIDE GAS DAMPER (R.W)",
+    "GAS TEMP BEHIND FURNACE REAR SIDE GAS DAMPER (F.W)",
+    "GAS TEMP BEHIND FURNACE FRONT SIDE GAS DAMPER (R.W)",
+    "GAS TEMP BEHIND FURNACE FRONT SIDE GAS DAMPER (F.W)",
+    # Boiler drum metal/steam temperature and pressure -- shares the word
+    # "BOTTOM"/"TOP" with the Cba/Pba "Bottom Ash" examples purely by
+    # coincidence (drum bottom/top vs ash bottom/top are unrelated
+    # physical locations), was drifting a drum temperature reading onto
+    # Cba (Unburnt Carbon in Bottom Ash) on a real plant sheet.
+    "DRUM RHS BOTTOM TEMP", "DRUM LHS BOTTOM TEMP",
+    "DRUM RHS TOP TEMP", "DRUM LHS TOP TEMP", "DRUM PRESSURE",
+    # Inherent Moisture (IM) -- a real lab reading, reported alongside
+    # Total Moisture (TM) on the same Coal Analysis sheet, but a smaller,
+    # different quantity that CENPEEP's "M" field must not be filled from
+    # (see the M/Moisture training-data note above).
+    "IM %", "IM%", "Inherent Moisture", "Inherent Moisture %",
 ]
 
 def get_training_data():

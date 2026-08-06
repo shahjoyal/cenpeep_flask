@@ -683,15 +683,28 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
 
 # Fields where two columns legitimately both belong to the same field id
 # and should be AVERAGED together, rather than deduped down to one. This is
-# the real-world "Left duct / Right duct" instrumentation pattern many
-# plants use for APH readings — e.g. a sheet with BOTH
-# "OXYGEN IN FLUE GAS(L)-AH O/L" and "OXYGEN IN FLUE GAS(R)-AH O/L" columns
-# for Avg. Flue Gas O2 — APH Out (O2out): these are two separate physical
-# sensors (left/right side of the air preheater), not a strict-vs-fuzzy
-# duplicate match on the same reading, so both readings should be blended
-# into the field's value instead of one being silently discarded by
-# _dedupe_columns_per_field below.
-MULTI_COLUMN_AVERAGE_FIELDS = {'O2out'}
+# the real-world "Left duct / Right duct" (or "A side / B side") dual-duct
+# instrumentation pattern many plants use for APH readings — e.g. a sheet
+# with BOTH "OXYGEN IN FLUE GAS(L)-AH O/L" and "OXYGEN IN FLUE GAS(R)-AH
+# O/L" columns for Avg. Flue Gas O2 — APH Out (O2out): these are two
+# separate physical sensors (left/right side of the air preheater), not a
+# strict-vs-fuzzy duplicate match on the same reading, so both readings
+# should be blended into the field's value instead of one being silently
+# discarded by _dedupe_columns_per_field below.
+#
+# Every "Avg. Flue Gas ..." field (O2in/O2out/Tgi/Tgo) and every APH-duct
+# air temperature field (Tpai/Tpao/Tsai/Tsao) is physically the same kind
+# of dual-duct reading as O2out — a real plant sheet with, say,
+# "APH-A I/L GAS TEMP" AND "APH-B I/L GAS TEMP" columns for Tgi should
+# average both A/B-side sensors, not keep only whichever one happens to
+# score marginally higher. Previously only O2out was listed here, so a
+# sheet with two genuine Tgo columns (APH-A O/L FG TEMP + APH-B O/L FG
+# TEMP) had one side silently dropped by the dedupe step below instead of
+# being averaged in — the field label itself ("Avg. Flue Gas Temp — APH
+# Out") already promises an average of both sides.
+MULTI_COLUMN_AVERAGE_FIELDS = {
+    'O2in', 'O2out', 'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao',
+}
 
 
 def _dedupe_columns_per_field(col_map, col_source, col_confidence):
@@ -738,7 +751,17 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence):
     new_map, new_source, new_confidence = {}, {}, {}
     for fid, cols in by_field.items():
         if fid in MULTI_COLUMN_AVERAGE_FIELDS and len(cols) > 1:
-            for col_idx in cols:
+            # Keep only the best TWO columns (the genuine A/B or Left/Right
+            # duct pair), not every column that happened to clear the
+            # confidence threshold. A wide plant sheet routinely has other,
+            # more loosely-related columns that also score above threshold
+            # for the same field (e.g. per-mill inlet temps for Tpai, or
+            # economiser-proxy temps for Tgi alongside a dedicated APH
+            # sensor) — keeping all of them would blend real A/B duct
+            # readings together with unrelated/weaker ones and skew the
+            # average, not just fill in the missing second side.
+            top_two = sorted(cols, key=rank)[:2]
+            for col_idx in top_two:
                 new_map[col_idx] = fid
                 new_source[col_idx] = col_source[col_idx]
                 new_confidence[col_idx] = col_confidence[col_idx]
@@ -1232,13 +1255,23 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     sheet_results = []
 
-    # Highlighted-column detection is a separate, lightweight pass (only
-    # openpyxl exposes cell styles; calamine/xlrd don't). Computed once up
-    # front regardless of which reader ends up doing the actual data parse,
-    # and passed down so every sheet gets the same treatment. Never fatal —
-    # falls back to {} (no highlight signal, unchanged prior behavior) if
-    # anything about the file trips up this second read.
-    highlight_map = _scan_header_highlights(file_bytes) if ext != 'xls' else {}
+    # Highlight-based detection is intentionally DISABLED — field detection
+    # must come from header-text matching (rule + ML) alone, never from a
+    # cell's fill color. Real-world workbooks routinely apply a themed
+    # header-row style (banded/table header formatting) across an ENTIRE
+    # header row for purely cosmetic reasons; _is_highlighted_fill() can't
+    # tell that apart from an engineer deliberately marking one column, so
+    # every column on such a sheet was being treated as "human-flagged" —
+    # e.g. this caused a sheet with both an "IM %" and a "T.M. %" column to
+    # have BOTH pulled into the Moisture field (their headers joined as
+    # "IM % + T.M. %") instead of just the correct T.M. one, purely because
+    # the sheet's header row happened to use a themed cell style.
+    # _scan_header_highlights / _apply_highlight_signal are left in place
+    # below (harmless, unused) rather than deleted, in case this needs a
+    # narrower, more reliable re-enable later — but they are never invoked
+    # from here, so highlight_map is always empty and every "highlighted"
+    # code path downstream is a permanent no-op.
+    highlight_map = {}
 
     use_calamine = HAS_CALAMINE
     if use_calamine:
