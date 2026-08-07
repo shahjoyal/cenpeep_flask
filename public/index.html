@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CENPEEP — Login</title>
+<title>Boiler Efficiency — Login</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -19,7 +19,7 @@
 
 body {
   font-family: 'Outfit', sans-serif;
-  background: #060a16;
+  background: #0A132B;
   color: var(--text);
   min-height: 100vh;
   overflow-x: hidden;
@@ -30,12 +30,23 @@ body::before {
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(ellipse 70% 45% at 12% -8%, rgba(59,130,246,0.18) 0%, transparent 60%),
-    radial-gradient(ellipse 55% 40% at 92% 15%, rgba(56,189,248,0.12) 0%, transparent 60%),
-    radial-gradient(ellipse 60% 45% at 75% 105%, rgba(37,99,235,0.14) 0%, transparent 60%),
-    linear-gradient(180deg, #060a16 0%, #0a1128 55%, #060a16 100%);
+    radial-gradient(ellipse 70% 45% at 12% -8%, rgba(255,255,255,0.07) 0%, transparent 60%),
+    radial-gradient(ellipse 55% 40% at 92% 15%, rgba(96,165,250,0.14) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 45% at 75% 105%, rgba(37,99,235,0.16) 0%, transparent 60%),
+    linear-gradient(180deg, #0A132B 0%, #101d42 55%, #0A132B 100%);
   pointer-events: none;
   z-index: 0;
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,0.05) 48%, rgba(255,255,255,0.09) 50%, rgba(255,255,255,0.05) 52%, transparent 70%);
+  background-size: 220% 220%;
+  pointer-events: none;
+  z-index: 0;
+  mix-blend-mode: screen;
 }
 
 #bg-particles { opacity: 0.85; }
@@ -265,9 +276,9 @@ body::before {
 <div class="screen">
   <div class="brand-panel">
     <div class="brand-logo-ring"><div class="inner"><img src="images/abhitech-logo.png" alt="ABHITECH"></div></div>
-    <div class="brand-title">CENPEEP <span class="accent">Efficiency</span></div>
+    <div class="brand-title">Boiler <span class="accent">Efficiency</span></div>
     <div class="brand-rule"></div>
-    <div class="brand-sub">Advanced boiler combustion analysis and heat-loss optimization, built on the CENPEEP standard.</div>
+    <div class="brand-sub">Advanced boiler combustion analysis and heat-loss optimization — starting with the CENPEEP standard, with more calculation methods on the way.</div>
     <div class="stat-row">
       <div class="stat-chip"><div class="n">99.9%</div><div class="l">Boiler Eff.</div></div>
       <div class="stat-chip"><div class="n">5.8%</div><div class="l">Dry Gas Loss</div></div>

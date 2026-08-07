@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Boiler Efficiency Calculator — CENPEEP</title>
+<title>Boiler Efficiency Calculator — BS-2885</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -18,8 +18,8 @@
       <!-- <span class="db-pill checking" id="db-pill">DB…</span> -->
     </div>
     <div class="nav-links">
-      <a href="calculator.html" class="nav-link active">CENPEEP</a>
-      <a href="tab1.html"       class="nav-link">BS-2885</a>
+      <a href="calculator.html" class="nav-link">CENPEEP</a>
+      <a href="tab1.html"       class="nav-link active">BS-2885</a>
       <a href="tab2.html"       class="nav-link">ASME-PTC 4.1</a>
       <a href="tab3.html"       class="nav-link">BEE</a>
       <a href="sessions.html"   class="nav-link">Sessions</a>
@@ -32,13 +32,9 @@
 <div class="toast" id="toast"></div>
 
 <div class="container">
-  <div class="section-header" style="margin-top:0"><div class="section-label">CENPEEP Formula</div><div class="section-line"></div></div>
-  <div class="tab-nav">
-    <button class="tab-btn active" onclick="showTab('input')"><span class="tab-num">01 /</span> Input Parameters</button>
-    <button class="tab-btn"        onclick="showTab('output')"><span class="tab-num">02 /</span> Results &amp; Losses</button>
-  </div>
+  <div class="section-header" style="margin-top:0"><div class="section-label">BS-2885</div><div class="section-line"></div></div>
 
-  <!-- ══ INPUT PAGE ══════════════════════════════════════════════════════ -->
+  <!-- ══ INPUT PAGE ═══════════════════════════════════════════════════ -->
   <div class="page active" id="page-input">
 
     <!-- Excel upload banner -->
@@ -46,7 +42,7 @@
       <div class="upload-banner-icon">📊</div>
       <div class="upload-banner-text">
         <strong>Import from Excel</strong>
-        <span>Upload your CENPEEP standard sheet — all input fields will be auto-populated.</span>
+        <span>Upload your data sheet — matching input fields will be auto-populated, same detection as CENPEEP.</span>
       </div>
       <div class="upload-banner-actions">
         <input type="file" id="upload-file-input" accept=".xlsx,.xls,.xlsm">
@@ -130,27 +126,16 @@
       <div class="field field-manual"><div class="field-top"><span class="field-name">Moisture in Air — Design <span class="manual-tag">MANUAL</span></span><span class="field-sym">Mwvd</span></div><div class="field-bottom"><input class="field-input" id="Mwvd" type="number" value="0.013"><span class="field-uom">kg/kg</span></div></div>
     </div>
 
-    <div class="action-bar">
-      <button class="btn btn-primary" onclick="calculate()">▶ Calculate Efficiency</button>
-      <button class="btn btn-ghost"   onclick="resetInputs()">↺ Reset to Defaults</button>
-    </div>
-  </div>
 
-  <!-- ══ OUTPUT PAGE ═════════════════════════════════════════════════════ -->
-  <div class="page" id="page-output">
-    <div class="output-summary" id="kpi-area"></div>
-    <div id="output-tables"></div>
-    <div class="download-bar">
-      <button class="btn btn-primary"   onclick="saveSession()">💾 Save to Database</button>
-      <button class="btn btn-secondary" onclick="downloadCSV()">⬇ Download CSV</button>
-      <button class="btn btn-secondary" onclick="downloadPDF()">⬇ Download PDF</button>
-      <button class="btn btn-ghost"     onclick="showTab('input')">← Back to Inputs</button>
+    <div class="action-bar">
+      <button class="btn btn-ghost" onclick="resetInputs()">↺ Reset to Defaults</button>
+      <button class="btn btn-primary" disabled title="BS-2885 calculation" style="opacity:0.45; cursor:not-allowed;">▶ Calculate Efficiency</button>
     </div>
   </div>
 </div>
 
 <script src="particles.js"></script>
-<script src="script.js"></script>
+<script src="script1.js"></script>
 <script>
 if (!sessionStorage.getItem('loggedIn')) {
   window.location.href = 'index.html';
