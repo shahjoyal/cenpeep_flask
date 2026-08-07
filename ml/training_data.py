@@ -369,16 +369,12 @@ TRAINING_EXAMPLES = [
     # "AIR" vs "FG"/"GAS") -- this is still an AIR reading, not flue gas.
     ("AIR TEMP AH I/L", "Tsai"), ("AIR TEMP AH I/L (L)", "Tsai"), ("AIR TEMP AH I/L (R)", "Tsai"),
     # This plant's own DCS-tag wording: "APH. <side> INLET SEC AIR TMP. <n>"
-    # (numbered probes 1/3 at the same reading point) and a windbox-level
-    # alias "BLR <side> SEC AR BX ILT 2 AR TEMP <n>" ("secondary air box
-    # inlet, level 2, air temp"). Without a direct match, the first form
-    # was drifting onto O2in (shared abbreviated "APH ... INLET" wording),
-    # and the windbox alias was only weakly anchored via the generic
-    # "GAH I/L Sec Air Temp" example.
+    # (numbered probes 1/3 at the same reading point). Without a direct
+    # match, this form was drifting onto O2in (shared abbreviated
+    # "APH ... INLET" wording).
     ("APH. A INLET SEC AIR TMP.", "Tsai"), ("APH. B INLET SEC AIR TMP.", "Tsai"),
     ("APH A INLET SEC AIR TMP", "Tsai"), ("APH B INLET SEC AIR TMP", "Tsai"),
     ("APH INLET SEC AIR TMP", "Tsai"),
-    ("BLR LS SEC AR BX ILT 2 AR TEMP", "Tsai"), ("BLR RS SEC AR BX ILT 2 AR TEMP", "Tsai"),
     ("SEC AIR BOX INLET TEMP", "Tsai"), ("SECONDARY AIR BOX INLET TEMP", "Tsai"),
 
     # ── Tsao — SA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
@@ -401,6 +397,17 @@ TRAINING_EXAMPLES = [
     # rather than where it left.
     ("FURNACE L_SIDE INL SA T", "Tsao"), ("FURNACE R_SIDE INL SA T", "Tsao"),
     ("Furnace L Side Inlet SA Temp", "Tsao"), ("Furnace R Side Inlet SA Temp", "Tsao"),
+    # This plant's own DCS-tag wording for the same "air arriving at the
+    # furnace/boiler after the APH" reading as the FURNACE examples just
+    # above: "BLR <side> SEC AR BX ILT 2 AR TEMP <n>" ("boiler <side>
+    # secondary air box inlet, level 2, air temp" -- numbered probes 1/2 at
+    # the same reading point). This was previously mislabeled as Tsai
+    # (cold/pre-APH side) purely because it shares "SEC AIR"/"INLET"
+    # wording with the Tsai APH-inlet tags -- but "SEC AR BX ILT" is the
+    # boiler's windbox inlet, i.e. hot secondary air that has ALREADY
+    # passed through the APH on its way to the furnace, same as
+    # "FURNACE L_SIDE INL SA T" above. Confirmed against real plant data.
+    ("BLR LS SEC AR BX ILT 2 AR TEMP", "Tsao"), ("BLR RS SEC AR BX ILT 2 AR TEMP", "Tsao"),
     # "APH O/L SEC AIR TEMPERATURE" -- explicit "O/L" (outlet) direction
     # with the fuller "SEC AIR"/"TEMPERATURE" spelling. Was previously
     # drifting onto Tsai (the INLET/cold-side field) purely because "SEC

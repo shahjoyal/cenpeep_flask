@@ -675,7 +675,7 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
                 col_confidence[col_idx] = round(score, 3)
 
     col_map, col_source, col_confidence = _dedupe_columns_per_field(
-        col_map, col_source, col_confidence
+        col_map, col_source, col_confidence, headers
     )
 
     return col_map, col_source, col_confidence
@@ -707,13 +707,39 @@ MULTI_COLUMN_AVERAGE_FIELDS = {
 }
 
 
-def _dedupe_columns_per_field(col_map, col_source, col_confidence):
+# Matches a single trailing sensor-number token at the very end of an
+# already-whitespace-normalized, lowercased header (e.g. "...temp 2" ->
+# strips " 2"). Deliberately anchored to the END ONLY, so a number that's
+# part of the tag's middle (e.g. the "2" in "sec ar bx ilt 2 ar temp 1",
+# short for "inlet-2 air") is left alone and doesn't get eaten — it's what
+# keeps that tag distinct from an "ilt 1" / "inlet-1" tag on the other side.
+_TRAILING_SENSOR_NUM_RE = re.compile(r'\s+\d+$')
+
+
+def _base_tag_key(header):
+    """
+    Reduces a header down to its "base tag" by stripping ONE trailing
+    sensor-number suffix, so sibling sensors on the same physical duct
+    (e.g. "APH-A I/L GAS TEMP-1" and "APH-A I/L GAS TEMP-2", or
+    "APH-A O/L FG TEMP-1/-2/-3") normalize to the same key and are
+    recognized as belonging together — while a genuinely different tag
+    (e.g. the B-side duct, or an unrelated economiser/per-mill probe) keeps
+    its own distinct key.
+    """
+    norm = re.sub(r'[^a-z0-9]+', ' ', str(header).lower()).strip()
+    norm = re.sub(r'\s+', ' ', norm)
+    stripped = _TRAILING_SENSOR_NUM_RE.sub('', norm).strip()
+    return stripped or norm
+
+
+def _dedupe_columns_per_field(col_map, col_source, col_confidence, headers=None):
     """
     Keeps only the SINGLE best column for each field id, instead of letting
     every column that happens to map to the same field survive together —
     EXCEPT for fields listed in MULTI_COLUMN_AVERAGE_FIELDS (see above),
-    where every matched column is deliberately kept so its readings get
-    averaged together in _finalize_field_values.
+    where matched columns belonging to a genuine duct-side sensor group are
+    deliberately kept so their readings get averaged together in
+    _finalize_field_values.
 
     Real DCS/plant sheets routinely have one column with the exact/strict
     header (e.g. "MAIN STM FLOW COMP") AND one or more other columns whose
@@ -727,10 +753,24 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence):
     strict/confident match.
 
     Selection rule per field id, in order (fields in
-    MULTI_COLUMN_AVERAGE_FIELDS skip this and keep every matched column):
+    MULTI_COLUMN_AVERAGE_FIELDS skip this and instead run the grouped
+    selection below):
       1. An exact rule match always beats an ML (fuzzy) match.
       2. Among same-source matches, higher confidence wins.
       3. Ties broken by earliest column index, for determinism.
+
+    For MULTI_COLUMN_AVERAGE_FIELDS, columns are first grouped by
+    _base_tag_key (which strips a trailing sensor-number suffix, e.g.
+    "-1"/"-2"/"-3"), so that a duct side wired to 2 or 3 individual sensors
+    (a very common real-plant setup — not just one reading per side) has
+    ALL of its sensors kept and averaged in, not silently capped at one
+    per side. The best TWO groups (by their best member's rank) are kept
+    in full — this still protects against a wide sheet's other,
+    loosely-related columns for the same field id (e.g. per-mill inlet
+    temps for Tpai, or economiser-proxy temps for Tgi alongside a
+    dedicated APH sensor), since those form their own separate group(s)
+    and fall outside the top two. If headers aren't available, this falls
+    back to the old best-two-columns behavior.
 
     Highlight-based conflict resolution (_apply_highlight_signal) still
     runs after this and can still override toward a human-highlighted
@@ -751,17 +791,36 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence):
     new_map, new_source, new_confidence = {}, {}, {}
     for fid, cols in by_field.items():
         if fid in MULTI_COLUMN_AVERAGE_FIELDS and len(cols) > 1:
-            # Keep only the best TWO columns (the genuine A/B or Left/Right
-            # duct pair), not every column that happened to clear the
-            # confidence threshold. A wide plant sheet routinely has other,
-            # more loosely-related columns that also score above threshold
-            # for the same field (e.g. per-mill inlet temps for Tpai, or
-            # economiser-proxy temps for Tgi alongside a dedicated APH
-            # sensor) — keeping all of them would blend real A/B duct
-            # readings together with unrelated/weaker ones and skew the
-            # average, not just fill in the missing second side.
-            top_two = sorted(cols, key=rank)[:2]
-            for col_idx in top_two:
+            if headers is not None:
+                groups = {}
+                for col_idx in cols:
+                    hdr = headers[col_idx] if col_idx < len(headers) else ''
+                    key = _base_tag_key(hdr)
+                    groups.setdefault(key, []).append(col_idx)
+
+                def group_rank(group):
+                    # Lower is better. Same source/confidence/index tiering
+                    # as rank() above for the group's best member, but with
+                    # group SIZE as the second criterion (before raw
+                    # confidence): a 2- or 3-sensor group sharing a base tag
+                    # (e.g. "...TEMP-1"/"-2"/"-3") is stronger evidence of a
+                    # genuine duct-side sensor bank than a single column
+                    # that happens to score a hair higher on its own — e.g.
+                    # an exact-string training-data match at confidence 1.0
+                    # for an unrelated single proxy column shouldn't be able
+                    # to outrank and bump a real 2-sensor A-side/B-side pair
+                    # out of the top two.
+                    best = min(group, key=rank)
+                    source_rank, neg_conf, idx = rank(best)
+                    return (source_rank, -len(group), neg_conf, idx)
+
+                ranked_groups = sorted(groups.values(), key=group_rank)
+                keep_cols = [c for g in ranked_groups[:2] for c in g]
+            else:
+                # No header text to group by — fall back to the old
+                # best-two-individual-columns behavior.
+                keep_cols = sorted(cols, key=rank)[:2]
+            for col_idx in keep_cols:
                 new_map[col_idx] = fid
                 new_source[col_idx] = col_source[col_idx]
                 new_confidence[col_idx] = col_confidence[col_idx]
