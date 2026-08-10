@@ -44,6 +44,13 @@ TRAINING_EXAMPLES = [
     # the (deliberately unmapped) "MAIN STM TEMP" family.
     ("MAIN STM FLOW COMP", "Ffw"), ("MAIN STM FLOW", "Ffw"), ("MAIN STM FLW COMP", "Ffw"),
     ("MN STM FLOW", "Ffw"), ("STM FLOW", "Ffw"), ("STM FLW", "Ffw"), ("Total STM Flow", "Ffw"),
+    # "M S FLOW" -- the exact real CSTPS header for Main Steam Flow, with a
+    # space between "M" and "S" instead of "MS". Without this, it was
+    # losing to the (wrong) Fpa/Fsa "PA Flow"/"SA Flow" training examples
+    # on char n-gram overlap -- "M S FLOW" and "PA Flow"/"SA Flow" happen
+    # to share more substring structure once there's a space in the middle
+    # than "M S FLOW" does with the correctly-spelled "MS Flow" example.
+    ("M S FLOW", "Ffw"),
 
     # ── Fin — Total Coal Flow ──────────────────────────────────────────────
     ("Total Coal consumption", "Fin"), ("Coal Flow", "Fin"), ("Total Coal Flow", "Fin"),
@@ -159,6 +166,21 @@ TRAINING_EXAMPLES = [
     ("APH-A I/L GAS O2%", "O2in"), ("APH-B I/L GAS O2%", "O2in"),
     ("APH I/L GAS O2%", "O2in"), ("APH-A INLET GAS O2", "O2in"),
     ("APH-B INLET GAS O2", "O2in"), ("APH INLET GAS O2 PERCENT", "O2in"),
+    # "O2 AT ECO OUTLET" / "O2 AT OUTLET" (LHS/RHS split) -- real CSTPS
+    # hourly-log headers. Same reasoning as the "FG Temp After Eco" -> Tgi
+    # entries above: on this plant's gas path the economizer sits directly
+    # upstream of the APH with nothing in between, so the O2 reading at the
+    # ECO OUTLET is physically the same point as the APH-inlet O2 reading
+    # CENPEEP wants -- it's just named for where the gas is leaving (the
+    # economizer) rather than where it's arriving (the APH). "O2 AT OUTLET"
+    # (no "ECO") is the same tag with the middle word dropped, seen on a
+    # sibling unit's sheet from the same plant. Previously this drifted
+    # onto O2out instead (via "O2 at APH Outlet", sharing the word
+    # "OUTLET"), which is backwards: an ECO-outlet reading is UPSTREAM of
+    # the APH, i.e. the inlet side, not the outlet side.
+    ("O2 AT ECO OUTLET", "O2in"), ("O2 AT ECO OUTLET LHS", "O2in"),
+    ("O2 AT ECO OUTLET RHS", "O2in"), ("O2 AT OUTLET", "O2in"),
+    ("O2 AT OUTLET LHS", "O2in"), ("O2 AT OUTLET RHS", "O2in"),
 
     # ── CO2in — CO2 APH In ──────────────────────────────────────────────────
     ("CO2 at APH Inlet", "CO2in"), ("CO2 APH In", "CO2in"), ("CO2 Air Preheater Inlet", "CO2in"),
@@ -254,6 +276,18 @@ TRAINING_EXAMPLES = [
     ("APH-A I/L GAS TEMP", "Tgi"), ("APH-B I/L GAS TEMP", "Tgi"),
     ("APH I/L GAS TEMP", "Tgi"), ("APH-A INLET GAS TEMP", "Tgi"),
     ("APH-B INLET GAS TEMP", "Tgi"), ("APH INLET GAS TEMPERATURE", "Tgi"),
+    # Bare "FLUE GAS TEMP BEFORE APH" (LHS/RHS split, real CSTPS hourly-log
+    # header) -- plain-English "before APH" wording with no APH-I/L/AH-tag
+    # abbreviation at all. Without a direct anchor, this drifted hard onto
+    # O2in via the "O2 BEFORE APH" example (cosine ~0.65): both share the
+    # long literal substring " BEFORE APH", and since the model scores
+    # char n-grams only, that shared tail dominated over the fact that
+    # "FLUE GAS TEMP" vs "O2" are completely different physical quantities.
+    # Anchoring the exact real phrasing here (rather than relying on the
+    # existing "APH I/L"-style examples) is what actually wins the match.
+    ("FLUE GAS TEMP BEFORE APH", "Tgi"), ("FLUE GAS TEMP BEFORE APH LHS", "Tgi"),
+    ("FLUE GAS TEMP BEFORE APH RHS", "Tgi"), ("FLUE GAS TEMP BEFORE APH LEFT", "Tgi"),
+    ("FLUE GAS TEMP BEFORE APH RIGHT", "Tgi"),
 
     # ── Tgo — FG Temp APH Out ────────────────────────────────────────────────
     ("Flue Gas Temp APH Outlet", "Tgo"), ("FG Temp APH Out", "Tgo"),
@@ -293,6 +327,15 @@ TRAINING_EXAMPLES = [
     ("FG GAS TEMP AH O/L Right", "Tgo"), ("FG TEMP AH O/L", "Tgo"),
     ("FG TEMP AH O/L (R)", "Tgo"), ("FG TEMP AH O/L (L)", "Tgo"),
     ("FG TEMP AH OUTLET", "Tgo"), ("FG GAS TEMP AH Outlet", "Tgo"),
+    # Bare "FLUE GAS TEMP AFTER APH" (LHS/RHS split) -- same real CSTPS
+    # header pattern as the Tgi "BEFORE APH" fix above, mirrored for the
+    # outlet/hot side. Was previously landing on Tgi itself (via "Flue Gas
+    # Temp APH Inlet") or on Tpao (via "FG Temp After APH", which shares
+    # "TEMP AFTER APH" with this but is a Primary-Air example) -- direct
+    # anchor removes the ambiguity.
+    ("FLUE GAS TEMP AFTER APH", "Tgo"), ("FLUE GAS TEMP AFTER APH LHS", "Tgo"),
+    ("FLUE GAS TEMP AFTER APH RHS", "Tgo"), ("FLUE GAS TEMP AFTER APH LEFT", "Tgo"),
+    ("FLUE GAS TEMP AFTER APH RIGHT", "Tgo"),
 
     # ── Boiler outlet main steam temp has no dedicated CENPEEP symbol in
     #    this field set — it stays unmatched by design (see OUT_OF_SCOPE
@@ -323,6 +366,15 @@ TRAINING_EXAMPLES = [
     ("APH. A INLET PA. TMP", "Tpai"), ("APH. B INLET PA. TMP", "Tpai"),
     ("APH A INLET PA TMP", "Tpai"), ("APH B INLET PA TMP", "Tpai"),
     ("APH INLET PA TMP", "Tpai"),
+    # Bare "PA TEMP BEFORE APH" (no L/R split -- a single shared cold-side
+    # PA temp reading, as seen on real CSTPS hourly-log sheets). This was
+    # previously the single worst mismatch found in practice: it matched
+    # O2in via "O2 BEFORE APH" at cosine ~0.89 (higher than almost any
+    # correct match anywhere else in the model), purely because "TEMP
+    # BEFORE APH" and "BEFORE APH" share such a long character run that it
+    # swamped the completely different leading quantity words ("PA" vs
+    # "O2"). A temperature column was silently feeding a flue-gas-O2 input.
+    ("PA TEMP BEFORE APH", "Tpai"),
 
     # ── Tpao — PA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
     ("Primary Air Temp Out", "Tpao"), ("PA Temp Out", "Tpao"),
@@ -343,6 +395,14 @@ TRAINING_EXAMPLES = [
     ("LEFT SIDE HOT PA. TMP.", "Tpao"), ("RIGHT SIDE HOT PA. TMP.", "Tpao"),
     ("LEFT SIDE HOT PA TMP", "Tpao"), ("RIGHT SIDE HOT PA TMP", "Tpao"),
     ("HOT PA TMP", "Tpao"), ("HOT PRIMARY AIR TEMP", "Tpao"),
+    # Bare "PA TEMP AFTER APH" (LHS/RHS split) -- real CSTPS header,
+    # mirrors the "PA TEMP BEFORE APH" -> Tpai fix above for the hot/
+    # outlet side. Was previously landing on Tgo via "FG Temp After APH"
+    # (shared "TEMP AFTER APH" tail) -- a Primary Air temperature reading
+    # was being used as the flue-gas-outlet temperature.
+    ("PA TEMP AFTER APH", "Tpao"), ("PA TEMP AFTER APH LHS", "Tpao"),
+    ("PA TEMP AFTER APH RHS", "Tpao"), ("PA TEMP AFTER APH LEFT", "Tpao"),
+    ("PA TEMP AFTER APH RIGHT", "Tpao"),
 
     # ── Tsai — SA Temp In (APH inlet / fan-outlet side, COLD) ────────────────
     ("Secondary Air Temp In", "Tsai"), ("SA Temp In", "Tsai"),
@@ -376,6 +436,10 @@ TRAINING_EXAMPLES = [
     ("APH A INLET SEC AIR TMP", "Tsai"), ("APH B INLET SEC AIR TMP", "Tsai"),
     ("APH INLET SEC AIR TMP", "Tsai"),
     ("SEC AIR BOX INLET TEMP", "Tsai"), ("SECONDARY AIR BOX INLET TEMP", "Tsai"),
+    # Bare "SA TEMP BEFORE APH" -- same real CSTPS header pattern as "PA
+    # TEMP BEFORE APH" above, for Secondary Air. Same failure mode: was
+    # matching O2in via "O2 BEFORE APH" at cosine ~0.88.
+    ("SA TEMP BEFORE APH", "Tsai"),
 
     # ── Tsao — SA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
     ("Secondary Air Temp Out", "Tsao"), ("SA Temp Out", "Tsao"),
@@ -416,6 +480,12 @@ TRAINING_EXAMPLES = [
     # tug-of-war. Anchoring it here fixes the direction.
     ("APH O/L SEC AIR TEMPERATURE", "Tsao"), ("APH O/L SEC AIR TEMPERATURE RHS", "Tsao"),
     ("APH O/L SEC AIR TEMPERATURE LHS", "Tsao"),
+    # Bare "SA TEMP AFTER APH" (LHS/RHS split) -- real CSTPS header,
+    # mirrors the "PA TEMP AFTER APH" -> Tpao fix above for Secondary Air.
+    # Was previously landing on Tgo via "FG Temp After APH".
+    ("SA TEMP AFTER APH", "Tsao"), ("SA TEMP AFTER APH LHS", "Tsao"),
+    ("SA TEMP AFTER APH RHS", "Tsao"), ("SA TEMP AFTER APH LEFT", "Tsao"),
+    ("SA TEMP AFTER APH RIGHT", "Tsao"),
 
     # ── Fsa — SA Flow ──────────────────────────────────────────────────────────
     ("Secondary Air Flow", "Fsa"), ("SA Flow", "Fsa"), ("SA air flow", "Fsa"),
@@ -476,6 +546,13 @@ OUT_OF_SCOPE_EXAMPLES = [
     "MS Press-L", "MS Press-R",
     "Primary SH O/L Steam Temp", "Divi SH O/L Steam Temp", "PLN SH O/L Steam Temp",
     "CRH Steam Press", "CRH Steam Temp", "CRH Temp", "CRH Pressure",
+    # "HPT EXHAUST STEAM TEMP" -- turbine HP-exhaust steam temperature,
+    # real CSTPS header. Same family as the HRH/CRH Steam Temp entries
+    # just above (a steam TEMPERATURE reading with no dedicated CENPEEP
+    # field), but without its own anchor it was drifting onto Ffw (Steam
+    # Flow) purely via the shared word "STEAM" -- a temperature column
+    # would otherwise get used as the flow input.
+    "HPT Exhaust Steam Temp", "HPT EXHAUST STEAM TEMP",
     "HRH Steam Temp", "HRH Steam Press", "HRH Temp", "HRH Pressure",
     "SH Spray Flow", "RH Spray Flow", "RH Spray Temp", "Total SH Spray", "Total RH Spray",
     "Feedwater HP HTR inlet temp", "Feed water Eco inlet temp", "Feed water Eco outlet Temp",
@@ -523,6 +600,24 @@ OUT_OF_SCOPE_EXAMPLES = [
     # pressure, not a flow, so it must not be pulled into Ffw just because
     # the location wording overlaps.
     "Feedwater Eco inlet Press", "Feed water Eco inlet Press", "ECON FD WTR INLT PRESS",
+    # "O2 AT ECO INLET" (LHS/RHS split) -- real CSTPS header. This is a
+    # DIFFERENT, further-upstream reading than "O2 AT ECO OUTLET"/"O2 AT
+    # OUTLET" (mapped to O2in above): the ECO inlet is right at the
+    # furnace/superheater exit, well before the economizer, not the
+    # APH-inlet point CENPEEP's O2in wants. Explicitly rejecting it here
+    # (rather than leaving it to fall through) stops it from being pulled
+    # into O2in and averaged together with the correct ECO-outlet reading
+    # -- which would silently blend two different physical locations into
+    # one "average" instead of keeping the correct one.
+    "O2 AT ECO INLET", "O2 AT ECO INLET LHS", "O2 AT ECO INLET RHS",
+    # "FLUE GAS TEMP BEFORE ECO" (LHS/RHS split) -- real CSTPS header, a
+    # further-upstream reading (furnace/superheater exit) than "FLUE GAS
+    # TEMP BEFORE APH", which is the real, dedicated APH-inlet column
+    # already present on the same sheet (see the bare-phrasing Tgi anchor
+    # above). Rejecting this explicitly stops the two from being averaged
+    # together as if they were the same reading -- same reasoning as the
+    # "O2 AT ECO INLET" rejection just above.
+    "FLUE GAS TEMP BEFORE ECO", "FLUE GAS TEMP BEFORE ECO LHS", "FLUE GAS TEMP BEFORE ECO RHS",
     "MS pressure boiler outlet(Left)", "MS pressure boiler outlet(Right)",
     "MS TEMP (left) boiler outlet", "MS TEMP (Right) boiler outlet",
     "HRH temp left boiler outlet", "HRH temp right boiler outlet",
