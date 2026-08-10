@@ -420,7 +420,7 @@ def _apply_highlight_signal(col_map, col_source, col_confidence, headers,
         preds = clf.predict_batch(retry_text, threshold=HIGHLIGHTED_ML_THRESHOLD)
         for col_idx, hdr, pred in zip(retry_idx, retry_text, preds):
             fid, score, _ = pred
-            if fid and fid not in NEVER_AUTO_DETECT:
+            if fid and fid not in NEVER_AUTO_DETECT and not _unit_conflicts_with_field(hdr, fid):
                 col_map[col_idx] = fid
                 col_source[col_idx] = 'ml_highlighted'
                 col_confidence[col_idx] = round(score, 3)
@@ -469,6 +469,18 @@ def _match_tag_patterns(norm):
     if not tokens:
         return None
 
+    # "APH-A" / "APH-B" (side-A/side-B duct qualifiers) collapse into a
+    # single "apha"/"aphb" token once punctuation is stripped during
+    # normalization -- the hyphen disappears entirely rather than becoming
+    # a space -- which silently defeated every 'aph' in tokens check below
+    # for side-qualified real-plant headers like "FLUE GAS TEMP APH-A O/L,
+    # DEG C" or "O2 APH-B O/L". Those never matched the APH in/out
+    # patterns here and fell straight through to the ML fallback instead,
+    # which then had no side-agnostic training example to latch onto.
+    # Normalizing them back to a plain "aph" token makes side-qualified
+    # and side-agnostic tag wording behave identically below.
+    tokens = {('aph' if t in ('apha', 'aphb') else t) for t in tokens}
+
     # Unburnt-carbon-in-ash fields: "bottom ash"/"fly ash" (%), optionally
     # qualified with "unburnt(s)" — deliberately excludes phrasings that
     # also contain "total", since those mean the % that ash type makes up
@@ -501,6 +513,30 @@ def _match_tag_patterns(norm):
         if 'co' in tokens and is_in and not is_out:
             return 'COin'
 
+        # Flue Gas / Primary Air / Secondary Air TEMPERATURE at the APH,
+        # same tag shape (e.g. "FLUE GAS TEMP APH-A O/L, DEG C"). Only
+        # fires when the header names which gas/air it is -- if none of
+        # flue-gas/PA/SA is identifiable, this is ambiguous and falls
+        # through to ML rather than guessing.
+        if {'temp', 't'} & tokens:
+            is_flue = bool({'flue', 'gas', 'fg'} & tokens)
+            is_pa = bool({'pa', 'primary'} & tokens)
+            is_sa = bool({'sa', 'secondary'} & tokens)
+            if is_out and not is_in:
+                if is_flue:
+                    return 'Tgo'
+                if is_pa:
+                    return 'Tpao'
+                if is_sa:
+                    return 'Tsao'
+            if is_in and not is_out:
+                if is_flue:
+                    return 'Tgi'
+                if is_pa:
+                    return 'Tpai'
+                if is_sa:
+                    return 'Tsai'
+
     # Secondary air arriving at the furnace after the APH — real plant tags
     # sometimes name this from the furnace's point of view ("FURNACE L_SIDE
     # INL SA T" / "FURNACE R_SIDE INL SA T") rather than the APH's point of
@@ -510,7 +546,51 @@ def _match_tag_patterns(norm):
     if {'furnace', 'inl', 'sa'} <= tokens and ({'t', 'temp'} & tokens):
         return 'Tsao'
 
+    # Main Steam (MS) Flow -- the primary CENPEEP steam-flow reading, and
+    # the exact real-plant header wording on sheets like CSTPS's ("MS
+    # FLOW, TPH"). This must be a deterministic RULE match, not left to
+    # the ML fallback: rule matches always beat ML matches in
+    # _dedupe_columns_per_field regardless of confidence score, but "MS
+    # FLOW, TPH" only scored ~0.65 confidence against the Ffw training
+    # examples (the ", TPH" unit suffix dilutes the char-ngram match),
+    # while an unrelated "FEED FLOW" column on the same sheet scored
+    # ~0.75 -- so FEED FLOW was winning the same-field tie-break and
+    # silently overriding the real Main Steam Flow reading. Also covers
+    # "M S FLOW" (space-separated) for the same reason, even though that
+    # exact phrasing already has a dedicated training example -- pinning
+    # it down as a rule too makes the outcome deterministic instead of
+    # depending on a TF-IDF score staying above whatever else it's
+    # competing against.
+    if {'ms', 'flow'} <= tokens or {'m', 's', 'flow'} <= tokens:
+        return 'Ffw'
+
     return None
+
+
+# Field ids that are always a TEMPERATURE reading -- never legitimately a
+# pressure/draft reading, no matter how a header's wording happens to
+# score against the ML training set.
+TEMPERATURE_ONLY_FIELDS = {'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao'}
+
+# Unit tokens that mark a header as a PRESSURE/DRAFT reading (mmWC =
+# millimeters water column, KSC/KG per CM2 = kg per sq cm) -- real plant
+# sheets label draft-pressure tags this way right next to genuine
+# temperature tags with very similar wording (e.g. "FG AH 9A OUT, MMWC"
+# sitting next to "FLUE GAS TEMP APH-A O/L, DEG C"), and their shared
+# words ("FG", "AH", "OUT") can fool the ML fallback into scoring the
+# pressure column as a temperature field. This is a hard physical guard,
+# not a fuzzy one: any header carrying one of these unit tokens can never
+# resolve to a temperature-only field id, regardless of ML confidence.
+PRESSURE_UNIT_TOKENS = {'mmwc', 'mmwcl', 'mmwg', 'ksc', 'kgcm2'}
+
+
+def _unit_conflicts_with_field(header, fid):
+    """True if header's own unit wording physically rules out fid."""
+    if fid not in TEMPERATURE_ONLY_FIELDS:
+        return False
+    norm = re.sub(r'[^a-z0-9 ]', '', str(header).lower())
+    tokens = set(norm.split())
+    return bool(tokens & PRESSURE_UNIT_TOKENS)
 
 
 def _label_to_field(label):
@@ -625,6 +705,23 @@ def _find_header_row(sample_rows, use_ml=True):
         ):
             best_idx, best_field_count, best_score = i, field_count, score
 
+    # A field-count "winner" that only matched a couple of fields is weak
+    # evidence -- genuine header rows on real CENPEEP/DCS exports typically
+    # match many more fields than that (that's what makes the field-count
+    # heuristic reliable enough to disambiguate stacked header rows in the
+    # first place; see the docstring above). A row that only coincidentally
+    # matches 1-2 fields is much more likely to be an ordinary DATA row
+    # than a real header -- e.g. a totally unrelated cost-analysis table
+    # whose "Formula" column happens to contain the bare letter "A" on one
+    # row, which collides with the CENPEEP Ash symbol and got that row
+    # picked as the "header", pulling a garbage average from an unrelated
+    # column into the Ash field. Below this threshold, fall back to the
+    # plain text-density heuristic (most text cells, fewest numeric cells)
+    # among the same candidates instead of trusting the coincidence.
+    MIN_HEADER_FIELD_COUNT = 3
+    if best_field_count < MIN_HEADER_FIELD_COUNT:
+        best_idx = max(candidates, key=lambda c: c[1])[0]
+
     return best_idx
 
 
@@ -669,7 +766,9 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
         clf = get_classifier()
         preds = clf.predict_batch(unmatched_text, threshold=ml_threshold)
         for col_idx, (fid, score, matched_example) in zip(unmatched_idx, preds):
-            if fid and fid not in NEVER_AUTO_DETECT:
+            if fid and fid not in NEVER_AUTO_DETECT and not _unit_conflicts_with_field(
+                headers[col_idx], fid
+            ):
                 col_map[col_idx] = fid
                 col_source[col_idx] = 'ml'
                 col_confidence[col_idx] = round(score, 3)
@@ -714,6 +813,18 @@ MULTI_COLUMN_AVERAGE_FIELDS = {
 # short for "inlet-2 air") is left alone and doesn't get eaten — it's what
 # keeps that tag distinct from an "ilt 1" / "inlet-1" tag on the other side.
 _TRAILING_SENSOR_NUM_RE = re.compile(r'\s+\d+$')
+
+
+def _is_opn_para_sheet(sheet_name):
+    """
+    True if `sheet_name` matches the real-plant "OPN PARA" (Operation
+    Parameters) naming convention for the full-period master raw-data log
+    -- e.g. "OPN PARA", "OPN_PARA", "OPN-PARA", "Operation Parameters".
+    Used as a preference tiebreak when ranking raw tabular sheets; see the
+    comment in the merge logic above.
+    """
+    norm = re.sub(r'[^a-z]', '', str(sheet_name).lower())
+    return 'opnpara' in norm or 'operationparam' in norm or 'operatingparam' in norm
 
 
 def _base_tag_key(header):
@@ -1009,6 +1120,25 @@ GENERIC_ROW_LAYOUT_SYMBOL_ALIASES = {
     'qc': 'GCV',                 # Gross calorific value of test coal
 }
 
+# Symbols that ONLY ever appear as CALCULATED OUTPUTS of the boiler-
+# efficiency computation itself (the individual loss-category breakdown),
+# never as a raw plant/lab INPUT reading. A Strategy-3 ("Symbol" column)
+# sheet whose Symbol column contains several of these is a derived/
+# computed results sheet -- e.g. a "BOILER EFFICIENCY CALCULATION" /
+# reference sheet the user built to cross-check the calculator's own
+# output against -- even though it ALSO happens to re-list the input
+# parameters that fed that calculation (O2in, O2out, Tgi, Tgo, GCV, Cba,
+# Cfa, ... which legitimately match SYM_MAP). Genuine raw DCS/lab export
+# files don't carry these loss-breakdown rows, so their presence is a
+# reliable signal that this sheet is a calculated/reference sheet, not a
+# raw input source -- see _parse_generic_row_layout / the merge logic in
+# _extract_from_workbook, which rank such sheets LAST (after every other
+# sheet, including big raw log sheets) instead of letting them win first
+# just because they happen to have a literal "Symbol" column.
+CALCULATED_OUTPUT_ONLY_SYMBOLS = {
+    'ldg', 'luc', 'lmf', 'lhf', 'lco', 'lma', 'lrad',
+}
+
 
 def _generic_sym_to_field(sym):
     """Like _sym_to_field, plus the Strategy-3-only alias table above."""
@@ -1045,12 +1175,16 @@ def _parse_generic_row_layout(rows):
     week) are averaged together, same spirit as Strategy 2 averaging
     multiple DATA ROWS for one column.
     Returns (extracted_dict, raw_rows_list, sheet_summary, col_meta,
-             data_row_count).
+             data_row_count, is_calculated_only).
+    is_calculated_only is True when the Symbol column contains
+    CALCULATED_OUTPUT_ONLY_SYMBOLS (see constant above) -- i.e. this looks
+    like a derived boiler-efficiency results/reference sheet rather than a
+    genuine raw-input sheet. Callers should rank such a sheet last.
     """
     sample = rows[:GENERIC_ROW_LAYOUT_HEADER_SCAN_ROWS]
     header_row_idx, symbol_col = _find_generic_header_row(sample)
     if header_row_idx is None:
-        return {}, [], {}, {}, 0
+        return {}, [], {}, {}, 0, False
 
     header_row = rows[header_row_idx]
     value_cols = []
@@ -1071,17 +1205,21 @@ def _parse_generic_row_layout(rows):
         value_cols.append(c_idx)
 
     if not value_cols:
-        return {}, [], {}, {}, 0
+        return {}, [], {}, {}, 0, False
 
     field_values = {}
     field_particulars = {}
     max_readings = 0
+    is_calculated_only = False
     for row in rows[header_row_idx + 1:]:
         if symbol_col >= len(row):
             continue
         sym = row[symbol_col]
         if sym is None or not str(sym).strip():
             continue
+        sym_norm = re.sub(r'[^a-z0-9]', '', str(sym).lower().strip())
+        if sym_norm in CALCULATED_OUTPUT_ONLY_SYMBOLS:
+            is_calculated_only = True
         field_id = _generic_sym_to_field(sym)
         if not field_id or field_id in NEVER_AUTO_DETECT:
             continue
@@ -1107,7 +1245,7 @@ def _parse_generic_row_layout(rows):
         }
         for fid in extracted
     }
-    return extracted, raw_rows, summary, col_meta, max_readings
+    return extracted, raw_rows, summary, col_meta, max_readings, is_calculated_only
 
 
 # ─── Per-sheet parser (tries all strategies) ───────────────────────────────────
@@ -1146,11 +1284,15 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
     # a genuine Strategy-2 (date/tag log) sheet essentially never has, so
     # this reordering doesn't change anything for sheets that were already
     # being parsed correctly by Strategy 2.
-    ext3, raw3, summary3, col_meta3, data_row_count3 = _parse_generic_row_layout(rows)
+    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3 = _parse_generic_row_layout(rows)
     if ext3:
         return {
             'sheetName': sheet_name,
-            'strategy': 'generic_row_layout',
+            # A calculated/reference sheet (see CALCULATED_OUTPUT_ONLY_SYMBOLS)
+            # gets its own strategy tag so the merge logic in
+            # _extract_from_workbook can rank it LAST instead of grouping it
+            # with genuine Strategy-3 input sheets.
+            'strategy': 'generic_row_layout_calculated' if calc_only3 else 'generic_row_layout',
             'extracted': ext3,
             'rawRows': raw3,
             'summary': summary3,
@@ -1306,13 +1448,13 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
     # practice (never the giant hourly-log sheets chunking exists for), so
     # checking it against cenpeep_check_rows (capped at 200 rows) rather
     # than the full streamed sheet is safe.
-    ext3, raw3, summary3, col_meta3, data_row_count3 = _parse_generic_row_layout(
+    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3 = _parse_generic_row_layout(
         cenpeep_check_rows
     )
     if ext3:
         return {
             'sheetName': sheet_name,
-            'strategy': 'generic_row_layout',
+            'strategy': 'generic_row_layout_calculated' if calc_only3 else 'generic_row_layout',
             'extracted': ext3,
             'rawRows': raw3,
             'summary': summary3,
@@ -1585,15 +1727,44 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     #
     # The CenPeep column-layout sheet, if present, still wins over both
     # (it's a distinct, authoritative single-value layout, not a log).
+    #
+    # Raw data-row COUNT alone isn't always enough to find the real master
+    # log, though: a plant workbook often also carries a filtered/derived
+    # subset of the same columns for one specific analysis slice (e.g. a
+    # "LOAD BAND" sheet covering only one load range), and that filtered
+    # sheet can end up with a row count that ties or even edges out the
+    # actual full-period sheet depending on how blanks/merged cells land.
+    # "OPN PARA" ("Operation Parameters") is the standard real-plant sheet
+    # name for the full-period master log this data comes from, so a sheet
+    # matching that naming convention is preferred as the primary raw
+    # source ahead of plain row-count ranking. This is purely a tiebreak/
+    # preference signal, not a requirement -- workbooks without a sheet
+    # named this way fall back to row-count ranking exactly as before.
     merged_extracted = {}
     merged_field_source = {}   # field_id -> (sheetName, dataRowCount) chosen
     merged_field_detail = {}   # field_id -> {sheet, header, source, confidence}
     cenpeep_result = None
     generic_row_layout_sheets = []
+    calculated_reference_sheets = []
     generic_sheets = []
     for sr in sheet_results:
         if 'cenpeep' in sr['sheetName'].lower():
             cenpeep_result = sr
+            continue
+        if sr.get('strategy') == 'generic_row_layout_calculated':
+            # A Strategy-3 sheet whose Symbol column contains
+            # CALCULATED_OUTPUT_ONLY_SYMBOLS (dry-gas loss, unburnt-carbon
+            # loss, etc) -- e.g. a "BOILER EFFICIENCY CALCULATION" sheet
+            # the user keeps purely as a computed reference/cross-check,
+            # not a raw input source. It legitimately re-lists real input
+            # parameters (O2in, Tgo, GCV, Cba, Cfa, ...) alongside its
+            # computed losses, which is exactly why it must NOT get the
+            # same "always wins" priority as a genuine Strategy-3 input
+            # sheet below -- otherwise it silently overrides the real raw
+            # log sheet's values with its own derived/summarized numbers.
+            # Kept only as an absolute last-resort backfill for fields no
+            # other sheet found at all.
+            calculated_reference_sheets.append(sr)
             continue
         if sr.get('strategy') == 'generic_row_layout':
             # Same reasoning as the cenpeep_result carve-out above: a sheet
@@ -1611,14 +1782,26 @@ def parse_workbook(file_bytes, filename, use_ml=True):
             continue
         generic_sheets.append(sr)
 
-    # Rank generic sheets by date-row count, most rows first.
-    ranked_sheets = sorted(generic_sheets, key=lambda sr: sr.get('dataRowCount', 0), reverse=True)
+    # Rank generic sheets by (a) whether the sheet follows the real-plant
+    # "OPN PARA" master-log naming convention, then (b) date-row count,
+    # most rows first. (a) is a preference tiebreak, not a hard filter --
+    # see the comment above.
+    ranked_sheets = sorted(
+        generic_sheets,
+        key=lambda sr: (_is_opn_para_sheet(sr['sheetName']), sr.get('dataRowCount', 0)),
+        reverse=True,
+    )
     # generic_row_layout sheets are tried first (see comment above), each
     # one ranked by how many fields it found, before falling back to the
     # ordinary date-row-count ranked sheets for anything still missing.
+    # Calculated/reference sheets (see comment above) go dead last -- after
+    # every other sheet, including plain raw-tabular ones -- so they only
+    # ever backfill a field nothing else on the workbook could find.
     ranked_sheets = sorted(
         generic_row_layout_sheets, key=lambda sr: len(sr.get('extracted', {})), reverse=True
-    ) + ranked_sheets
+    ) + ranked_sheets + sorted(
+        calculated_reference_sheets, key=lambda sr: len(sr.get('extracted', {})), reverse=True
+    )
 
     best_generic_sheet = None
     for sr in ranked_sheets:

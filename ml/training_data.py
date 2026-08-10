@@ -765,6 +765,21 @@ OUT_OF_SCOPE_EXAMPLES = [
     # different quantity that CENPEEP's "M" field must not be filled from
     # (see the M/Moisture training-data note above).
     "IM %", "IM%", "Inherent Moisture", "Inherent Moisture %",
+    # TDBFP (Turbine-Driven Boiler Feed Pump) suction inlet temperature --
+    # feedwater temperature at the pump, not Primary Air temperature. This
+    # is the same BFP family already excluded above ("BFP-A SUC TEMP 2X
+    # OUT" etc), but that entry used the "BFP-<side> SUC/DIS TEMP 2X ..."
+    # DCS tag shape; a real plant sheet using the plainer "TDBFP-<side>
+    # I/L TEMP" / "TD BFP-<side> I/L TEMP" wording wasn't covered by it and
+    # was drifting onto Tpai (Primary Air Temp In) purely via shared
+    # "<side> I/L TEMP" wording with the real "AH A/B PA I/L TEMP"
+    # examples -- averaging a ~150 C feedwater-pump-suction reading
+    # together with the genuine ~35 C primary-air-inlet reading and
+    # silently corrupting the Tpai value.
+    "TDBFP-A I/L TEMP", "TDBFP-B I/L TEMP", "TDBFP-C I/L TEMP",
+    "TDBFP A I/L TEMP", "TDBFP B I/L TEMP", "TDBFP C I/L TEMP",
+    "TD BFP-A I/L TEMP", "TD BFP-B I/L TEMP", "TD BFP-C I/L TEMP",
+    "TDBFP A I/L PRESS", "TDBFP B I/L PRESS", "TDBFP C I/L PRESS",
 ]
 
 def get_training_data():
@@ -802,6 +817,19 @@ NON_FIELD_HEADERS = {
     # defined for it.
     'sox fgd i/l', 'sox', 'nox', 'sox fgd inlet',
     'ssc current', 'burner tilt corner 1', 'burner tilt',
+    # Bare generic column-header words carry NO information about which
+    # physical quantity they hold -- "Value"/"Reading"/"Amount"/"Data"/
+    # "Result"/"Figure" show up as a column header on all kinds of
+    # completely unrelated small reference tables (e.g. a
+    # "Particulars/UOM/Formula/Value" cost-savings sheet), and letting the
+    # ML fallback confidently guess a specific field for one of these
+    # (seen: a bare "Value" column scoring GCV at ~0.55 confidence, then
+    # averaging together Unit Capacity/Coal Cost/THERMACT dosing kg -- all
+    # completely unrelated numbers -- into a garbage "GCV" figure) is worse
+    # than leaving it unmatched. Exact match only, so a real header that
+    # merely CONTAINS one of these words (e.g. "MS Flow Value") is
+    # unaffected.
+    'value', 'reading', 'amount', 'data', 'result', 'figure', 'qty', 'quantity',
 }
 
 
