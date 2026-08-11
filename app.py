@@ -33,9 +33,11 @@ app.config['DB'] = db
 # Register blueprints
 from routes.upload import upload_bp
 from routes.sessions import sessions_bp
+from routes.report import report_bp
 
 app.register_blueprint(upload_bp, url_prefix='/api/upload')
 app.register_blueprint(sessions_bp, url_prefix='/api/sessions')
+app.register_blueprint(report_bp, url_prefix='/api/report')
 
 # Health check
 @app.route('/api/health')

@@ -695,6 +695,7 @@ function renderComparison(list) {
   `).join('');
 
   document.getElementById('output-tables').innerHTML = `
+    ${_renderProcessInputsSection(list)}
     <div class="output-section">
       <div class="output-section-head"><span>Process Comparison</span></div>
       <div class="cmp-table-wrap">
@@ -704,6 +705,57 @@ function renderComparison(list) {
         </table>
       </div>
       <div class="cmp-note">Fields not present in the uploaded log (manual-only inputs, Design conditions, …) use the same value — whatever's currently in the Input Parameters tab — across every process.</div>
+    </div>`;
+}
+
+// ── Input bifurcation — mirrors the output side's per-process comparison,
+//    but for INPUTS: which input values are specific to each process (pulled
+//    from that process's own date range in the dated log) vs which ones are
+//    shared, unchanged, across every process (manual-only fields, Design
+//    conditions, anything the dated log doesn't carry). Only shown once
+//    date-wise processes are active — the no-dates path is untouched. ──────
+function _renderProcessInputsSection(list) {
+  const dateAveragedIds = new Set();
+  list.forEach(p => {
+    const { avg } = _averageFieldsInRange(p.start, p.end);
+    Object.keys(avg).forEach(fid => dateAveragedIds.add(fid));
+  });
+
+  const perProcessIds = INPUT_IDS.filter(id => dateAveragedIds.has(id));
+  const sharedIds      = INPUT_IDS.filter(id => !dateAveragedIds.has(id));
+
+  const headerCells = list.map(p => `<th>${escapeHtml(p.title)}</th>`).join('');
+  const perProcessRows = perProcessIds.map(id => {
+    const cells = list.map(p => {
+      const entry = p.result.inputs.find(i => i.id === id);
+      return `<td>${fmt(entry ? entry.value : 0, 3)}</td>`;
+    }).join('');
+    return `<tr><td class="cmp-metric">${INPUT_LABELS[id] || id}</td>${cells}</tr>`;
+  }).join('');
+
+  const sharedRows = sharedIds.map(id => {
+    const entry = list[0].result.inputs.find(i => i.id === id);
+    return `<tr><td class="cmp-metric">${INPUT_LABELS[id] || id}</td>
+      <td colspan="${list.length}">${fmt(entry ? entry.value : 0, 3)}
+        <small style="color:#94a3b8">— same for every process</small></td></tr>`;
+  }).join('');
+
+  return `
+    <div class="output-section">
+      <div class="output-section-head"><span>Process Inputs</span></div>
+      <div class="cmp-table-wrap">
+        <table class="cmp-table">
+          <thead><tr><th>From the dated log — varies per process</th>${headerCells}</tr></thead>
+          <tbody>${perProcessRows || `<tr><td colspan="${list.length + 1}">No date-based input fields — every input below is shared.</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div class="cmp-table-wrap" style="margin-top:10px">
+        <table class="cmp-table">
+          <thead><tr><th colspan="${list.length + 1}">Shared inputs — same value across every process</th></tr></thead>
+          <tbody>${sharedRows}</tbody>
+        </table>
+      </div>
+      <div class="cmp-note">The top table is averaged separately for each process's own date range; the bottom table (manual-only inputs, Design conditions, anything the dated log doesn't carry) uses whatever's currently in the Input Parameters tab for all of them.</div>
     </div>`;
 }
 
@@ -899,6 +951,58 @@ function downloadComparisonPDF() {
   ${_COMPARISON_METRIC_ROWS.map(([label,fn])=>`<tr><td>${label}</td>${list.map(p=>`<td>${fn(p)}</td>`).join('')}</tr>`).join('')}
   </table><script>window.print();<\/script></body></html>`);
   win.document.close();
+}
+
+// ── Field Detection Report (.docx) — same table r.py produces, reachable
+//    from the Results tab. Uses the fieldDetail/extracted/missingFields
+//    already sitting in window._uploadData from the last upload — no
+//    re-upload or re-parse. If date-wise processes are active, sends each
+//    process's averaged values along so the server builds one section per
+//    process (same field-detection info, different Value column) instead
+//    of a single whole-file section. ─────────────────────────────────────
+async function downloadFieldReport() {
+  const data = window._uploadData;
+  if (!data || !data.fieldDetail || !Object.keys(data.fieldDetail).length) {
+    showToast('Upload and parse a file first to generate a field report.', 'error');
+    return;
+  }
+
+  const payload = {
+    filename:      data.filename,
+    primarySheet:  data.primarySheet,
+    fieldDetail:   data.fieldDetail,
+    extracted:     data.extracted,
+    missingFields: data.missingFields,
+  };
+
+  if (window._comparisonResults && window._comparisonResults.length) {
+    payload.processes = window._comparisonResults.map(p => {
+      const { avg, rowCount } = _averageFieldsInRange(p.start, p.end);
+      return { title: p.title, start: p.start, end: p.end, rowCount, avg };
+    });
+  }
+
+  try {
+    const res = await fetch('/api/report', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Report generation failed (${res.status})`);
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = match ? match[1] : 'CENPEEP_Field_Report.docx';
+    a.click();
+    showToast('✓ Field report downloaded', 'success');
+  } catch (err) {
+    showToast('Report failed: ' + err.message, 'error');
+  }
 }
 
 function downloadPDF() {
