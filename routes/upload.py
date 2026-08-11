@@ -48,8 +48,15 @@ import io
 import os
 import re
 import time
+import datetime
 import statistics
 from flask import Blueprint, request, jsonify
+
+try:
+    from dateutil import parser as _dateutil_parser
+    HAS_DATEUTIL = True
+except ImportError:
+    HAS_DATEUTIL = False
 
 try:
     import python_calamine
@@ -948,6 +955,59 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence, headers=None)
 #     in more than one — e.g. an "Hourly" sheet AND a "Day Avg" sheet) ────────
 _DATE_COL_HINTS = {'date', 'time', 'day', 'hour', 'hrs', 'hr', 'timestamp'}
 
+# Excel's day-0, used to convert a raw numeric serial date (what xlrd hands
+# back for date-formatted cells — it never auto-converts them the way
+# openpyxl/calamine usually do) into a real calendar date. This is the
+# standard 1900-date-system epoch that both Excel and Google Sheets use for
+# the vast majority of real-world workbooks.
+_EXCEL_EPOCH = datetime.datetime(1899, 12, 30)
+
+# Hard cap on how many per-row dated snapshots we keep per sheet for the
+# date-range feature (see _accumulate_row / _parse_raw_layout). A cap keeps
+# memory/response size bounded even for a pathologically huge log sheet —
+# every real CENPEEP hourly/15-min log seen in practice (a few thousand
+# rows at most for a multi-month period) stays far under this.
+MAX_DATED_ROWS_PER_SHEET = 20000
+
+
+def _parse_date_cell(val):
+    """
+    Best-effort parse of a single cell value into a plain calendar date,
+    regardless of how the source workbook represents it:
+      - a native Python datetime/date (what openpyxl/calamine usually
+        already hand back for a date-formatted cell)
+      - a raw Excel serial number (what xlrd hands back — it never
+        auto-converts date cells, see _iter_sheet_rows_streamed)
+      - free text in more or less any common layout ("12-01-2024",
+        "1/12/24", "2024-01-12", "1 Jan 2024", etc)
+    Returns None if the value can't be read as a date at all (blank cell,
+    or a bare time-of-day fraction with no date component) — callers treat
+    that row as having an unknown date, not as an error.
+    """
+    if val is None:
+        return None
+    if isinstance(val, datetime.datetime):
+        return val.date()
+    if isinstance(val, datetime.date):
+        return val
+    if isinstance(val, (int, float)):
+        if val < 1:  # bare time-of-day serial (e.g. 0.5 = 12:00) — no date
+            return None
+        try:
+            return (_EXCEL_EPOCH + datetime.timedelta(days=float(val))).date()
+        except (OverflowError, ValueError):
+            return None
+    text = str(val).strip()
+    if not text or not HAS_DATEUTIL:
+        return None
+    try:
+        # dayfirst=True matches the dd-mm-yyyy convention most real plant/
+        # DCS exports use; dateutil still resolves unambiguous formats
+        # (yyyy-mm-dd, "Jan 2024") correctly regardless of this flag.
+        return _dateutil_parser.parse(text, dayfirst=True, fuzzy=False).date()
+    except (ValueError, OverflowError, TypeError):
+        return None
+
 
 def _find_date_col_idx(headers):
     """
@@ -1012,7 +1072,7 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
     header_row_idx = _find_header_row(sample, use_ml=use_ml)
 
     if header_row_idx is None:
-        return {}, [], {}, {}, 0, []
+        return {}, [], {}, {}, 0, [], []
 
     headers = rows[header_row_idx]
     data_rows = rows[header_row_idx + 1:]
@@ -1026,7 +1086,7 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
     )
 
     if not col_map:
-        return {}, [], {}, {}, 0, unmatched_highlighted
+        return {}, [], {}, {}, 0, unmatched_highlighted, []
 
     date_col_idx = _find_date_col_idx(headers)
     data_row_count = _count_populated_data_rows(data_rows, date_col_idx, col_map)
@@ -1034,13 +1094,34 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
     # Collect numeric values per field across all data rows. Blank / non-
     # numeric cells (_to_num returns None for these) are skipped outright —
     # they are never counted as 0, so they can't drag the average down.
+    #
+    # Alongside the flat per-field lists (used for the overall/undated
+    # average, unchanged from before), also keep a per-ROW dated snapshot
+    # of whatever fields that row actually populated — this is what lets
+    # the frontend later re-average just the rows inside a chosen date
+    # range (see MAX_DATED_ROWS_PER_SHEET) without re-uploading/re-parsing
+    # the file. A row only gets a snapshot if it actually has at least one
+    # numeric reading; its date comes from date_col_idx if one was found,
+    # else None (row is still usable for the undated overall average, just
+    # can't be placed into any date-range bucket).
     field_values = {fid: [] for fid in col_map.values()}
+    dated_rows = []
     for row in data_rows:
+        row_vals = {}
         for col_idx, fid in col_map.items():
             val = row[col_idx] if col_idx < len(row) else None
             num = _to_num(val)
             if num is not None:
                 field_values[fid].append(num)
+                row_vals[fid] = num
+        if row_vals and len(dated_rows) < MAX_DATED_ROWS_PER_SHEET:
+            row_date = None
+            if date_col_idx is not None and date_col_idx < len(row):
+                row_date = _parse_date_cell(row[date_col_idx])
+            dated_rows.append({
+                'date': row_date.isoformat() if row_date else None,
+                'values': row_vals,
+            })
 
     extracted, raw_rows, sheet_summary = _finalize_field_values(field_values)
     col_meta = {
@@ -1053,7 +1134,8 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
         }
         for col_idx, fid in col_map.items()
     }
-    return extracted, raw_rows, sheet_summary, col_meta, data_row_count, unmatched_highlighted
+    return (extracted, raw_rows, sheet_summary, col_meta, data_row_count,
+            unmatched_highlighted, dated_rows)
 
 
 def _finalize_field_values(field_values):
@@ -1269,6 +1351,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
             'columns': {},
             'dataRowCount': len(rows),
             'unmatchedHighlighted': [],
+            'datedRows': [],
         }
 
     # Strategy 3: generic labeled-row layout (position-independent Symbol
@@ -1299,10 +1382,11 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
             'columns': col_meta3,
             'dataRowCount': data_row_count3,
             'unmatchedHighlighted': [],
+            'datedRows': [],
         }
 
     # Strategy 2: raw tabular, with ML fallback for unrecognized headers
-    ext2, raw2, summary, col_meta, data_row_count, unmatched_hi = _parse_raw_layout(
+    ext2, raw2, summary, col_meta, data_row_count, unmatched_hi, dated_rows2 = _parse_raw_layout(
         rows, use_ml=use_ml, highlight_map=highlight_map
     )
     if ext2:
@@ -1316,6 +1400,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
             'columns': col_meta,
             'dataRowCount': data_row_count,
             'unmatchedHighlighted': unmatched_hi,
+            'datedRows': dated_rows2,
         }
 
     return {
@@ -1327,6 +1412,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
         'columns': {},
         'dataRowCount': 0,
         'unmatchedHighlighted': unmatched_hi,
+        'datedRows': [],
     }
 
 
@@ -1375,6 +1461,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
     date_col_idx = None
     data_row_count = 0
     unmatched_hi = []
+    dated_rows = []
 
     for row in row_iter:
         row_count += 1
@@ -1402,7 +1489,8 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
                     date_col_idx = _find_date_col_idx(headers)
                     # Process any data rows already buffered after the header
                     for data_row in chunk[header_row_idx + 1:]:
-                        _accumulate_row(data_row, col_map, field_values)
+                        _accumulate_row(data_row, col_map, field_values,
+                                         date_col_idx=date_col_idx, dated_rows=dated_rows)
                         if _row_has_data(data_row, date_col_idx, col_map):
                             data_row_count += 1
                     chunk = []
@@ -1413,7 +1501,8 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
             continue
 
         # Header already known — accumulate this row directly, no buffering
-        _accumulate_row(row, col_map, field_values)
+        _accumulate_row(row, col_map, field_values,
+                         date_col_idx=date_col_idx, dated_rows=dated_rows)
         if _row_has_data(row, date_col_idx, col_map):
             data_row_count += 1
 
@@ -1432,6 +1521,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
             'rowsScanned': row_count,
             'dataRowCount': row_count,
             'unmatchedHighlighted': [],
+            'datedRows': [],
         }
 
     # Strategy 3 fallback: generic labeled-row layout, checked against the
@@ -1462,6 +1552,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
             'rowsScanned': row_count,
             'dataRowCount': data_row_count3,
             'unmatchedHighlighted': [],
+            'datedRows': [],
         }
 
     if not col_map:
@@ -1475,6 +1566,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
             'rowsScanned': row_count,
             'dataRowCount': 0,
             'unmatchedHighlighted': unmatched_hi,
+            'datedRows': [],
         }
 
     extracted, raw_rows, summary = _finalize_field_values(field_values)
@@ -1501,16 +1593,34 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
         'rowsScanned': row_count,
         'dataRowCount': data_row_count,
         'unmatchedHighlighted': unmatched_hi,
+        'datedRows': dated_rows,
     }
 
 
-def _accumulate_row(row, col_map, field_values):
-    """Pull numeric values for mapped columns out of one data row."""
+def _accumulate_row(row, col_map, field_values, date_col_idx=None, dated_rows=None):
+    """
+    Pull numeric values for mapped columns out of one data row. If
+    `dated_rows` is given (a list), also append this row's dated snapshot
+    to it — same shape/purpose as in _parse_raw_layout, capped at
+    MAX_DATED_ROWS_PER_SHEET — so the chunked/streamed path (the one large,
+    real hourly-log workbooks actually go through) supports the date-range
+    feature too, not just the small-sheet path.
+    """
+    row_vals = {}
     for col_idx, fid in col_map.items():
         val = row[col_idx] if col_idx < len(row) else None
         num = _to_num(val)
         if num is not None:
             field_values.setdefault(fid, []).append(num)
+            row_vals[fid] = num
+    if dated_rows is not None and row_vals and len(dated_rows) < MAX_DATED_ROWS_PER_SHEET:
+        row_date = None
+        if date_col_idx is not None and date_col_idx < len(row):
+            row_date = _parse_date_cell(row[date_col_idx])
+        dated_rows.append({
+            'date': row_date.isoformat() if row_date else None,
+            'values': row_vals,
+        })
 
 
 def _is_readable_worksheet(ws):
@@ -1878,6 +1988,18 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         for fid in REQUIRED_FIELDS if fid not in merged_extracted
     ]
 
+    # ─── Date-wise process support ────────────────────────────────────────
+    # Per-row dated snapshots come ONLY from the sheet that actually backs
+    # the merged field values (best_generic_sheet) — never from a sheet
+    # that lost the ranking, and never at all when a CenPeep-column sheet
+    # won instead (that layout is a single authoritative value per field,
+    # not a time series, so there's no meaningful date range to slice it
+    # by). This keeps "pick a date range" consistent with what's actually
+    # on the calculator: a dot on the calendar always corresponds to rows
+    # that can genuinely be re-averaged into a result.
+    primary_dated_rows = [] if cenpeep_result else (best_generic_sheet or {}).get('datedRows', [])
+    available_dates = sorted({r['date'] for r in primary_dated_rows if r.get('date')})
+
     # Highlighted header cells that never resolved to any CENPEEP field on
     # their sheet, even after the relaxed highlight-only retry — these are
     # exactly the columns a person marked as important that the parser
@@ -1911,6 +2033,16 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         # i.e. still need to be entered manually.
         'missingFields': missing_fields,
         'parseTimeMs': round((time.time() - t_start) * 1000, 1),
+        # Per-row dated snapshots ({date, values}) from the sheet that
+        # backs the merged fields, and the sorted list of distinct dates
+        # that have at least one — used by the frontend to (a) put a red
+        # dot on the calendar for dates with real data, and (b) re-average
+        # just the rows inside a chosen start/end range into a separate
+        # "process" instead of the whole-file average, without another
+        # upload/reparse round-trip.
+        'datedRows': primary_dated_rows,
+        'availableDates': available_dates,
+        'dateFilteringAvailable': bool(available_dates),
     }
 
 

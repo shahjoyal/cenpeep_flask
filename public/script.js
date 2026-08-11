@@ -112,6 +112,29 @@ function initUpload() {
       autoCalcDesignUltimate();
       window._uploadedFilename = data.filename;
 
+      // ── Date-wise processes: keep the full parsed payload around ─────────
+      // (extracted + datedRows + availableDates) so "Add Process" can slice
+      // it by date range entirely client-side, with no re-upload. A fresh
+      // upload always clears any processes from a previous file — a date
+      // range/title chosen against sheet A means nothing against sheet B.
+      window._uploadData      = data;
+      window._processes       = [];
+      window._comparisonResults = null;
+      const procSection = document.getElementById('process-section');
+      if (procSection) {
+        if (data.dateFilteringAvailable && data.availableDates.length) {
+          procSection.style.display = '';
+          const hint = document.getElementById('process-hint');
+          if (hint) {
+            const first = data.availableDates[0], last = data.availableDates[data.availableDates.length - 1];
+            hint.textContent = `Dated data found from ${first} to ${last} (${data.availableDates.length} day${data.availableDates.length===1?'':'s'} with readings) on "${data.primarySheet || ''}".`;
+          }
+        } else {
+          procSection.style.display = 'none';
+        }
+      }
+      renderProcessList();
+
       // ── Build "selected sheet" AI summary panel ──────────────────────────
       // Only the sheet that was actually chosen (data.primarySheet) is shown
       // here — not every sheet in the workbook — since that's the one whose
@@ -179,16 +202,259 @@ function initUpload() {
   });
 }
 
-// ── Core calculation ──────────────────────────────────────────────────────────
-function calculate() {
-  const M=v('M'),A=v('A'),VM=v('VM'),FC=v('FC'),GCV=v('GCV'),S=v('S');
-  const O2in=v('O2in'),O2out=v('O2out'),COout=v('COout'),COin=v('COin');
-  const Tgi=v('Tgi'),Tgo=v('Tgo'),Tpai=v('Tpai'),Tpao=v('Tpao');
-  const Tsai=v('Tsai'),Tsao=v('Tsao'),Fsa=v('Fsa'),Fpa=v('Fpa');
-  const Cba=v('Cba'),Cfa=v('Cfa'),Pfa=v('Pfa'),Pba=v('Pba');
-  const Lrad=v('Lrad') || 1.2;
+// ── Date-wise Processes ─────────────────────────────────────────────────────
+// Optional feature: instead of one whole-file average, the person can name
+// one or more "processes", each with its own start/end date, and get a
+// separate result (+ side-by-side comparison) for each. A process with no
+// date range picked, or no processes added at all, falls straight back to
+// today's plain behavior — the whole file's overall average, one result.
+window._processes         = [];
+window._comparisonResults = null;
+let   _processSeq = 0;
+
+function addProcess() {
+  _processSeq++;
+  window._processes.push({
+    id: 'proc' + _processSeq,
+    title: `Process ${window._processes.length + 1}`,
+    start: null,
+    end: null,
+  });
+  renderProcessList();
+}
+
+function removeProcess(id) {
+  window._processes = window._processes.filter(p => p.id !== id);
+  renderProcessList();
+}
+
+function updateProcessTitle(id, title) {
+  const p = window._processes.find(p => p.id === id);
+  if (p) p.title = title;
+}
+
+function setProcessDate(id, which, iso) {
+  const p = window._processes.find(p => p.id === id);
+  if (!p) return;
+  p[which] = iso;   // which is 'start' or 'end'
+  renderProcessList();
+}
+
+// Rows from the uploaded file's dated log that fall inside [start, end]
+// (inclusive; an unset bound is open-ended on that side).
+function _rowsInRange(start, end) {
+  const rows = (window._uploadData && window._uploadData.datedRows) || [];
+  return rows.filter(r => r.date
+    && (!start || r.date >= start)
+    && (!end   || r.date <= end));
+}
+
+function renderProcessList() {
+  const list = document.getElementById('process-list');
+  if (!list) return;
+  if (!window._processes.length) {
+    list.innerHTML = `<div class="process-empty">No processes added — Calculate will use the whole file's average, same as today.</div>`;
+    return;
+  }
+  list.innerHTML = window._processes.map(p => {
+    const rowCount = _rowsInRange(p.start, p.end).length;
+    return `
+    <div class="process-row" data-id="${p.id}">
+      <input type="text" class="process-title-input" value="${escapeHtml(p.title)}"
+             placeholder="Process title"
+             oninput="updateProcessTitle('${p.id}', this.value)">
+      <button type="button" class="process-date-btn" data-role="start" data-id="${p.id}">
+        ${p.start || 'Start date'}
+      </button>
+      <span class="process-date-sep">→</span>
+      <button type="button" class="process-date-btn" data-role="end" data-id="${p.id}">
+        ${p.end || 'End date'}
+      </button>
+      <span class="process-row-count">${rowCount} row${rowCount===1?'':'s'} in range</span>
+      <button type="button" class="process-remove-btn" onclick="removeProcess('${p.id}')" title="Remove process">✕</button>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('.process-date-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id   = btn.dataset.id;
+      const role = btn.dataset.role;
+      const p    = window._processes.find(p => p.id === id);
+      openDatePicker(btn, {
+        selected: p ? p[role] : null,
+        onSelect: iso => setProcessDate(id, role, iso),
+      });
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ── Calendar popup (red dot = a date the uploaded file actually has data
+//    for) — shared by every process's Start/End date button. ────────────────
+let _calendarPopup = null;
+let _calendarOutsideHandler = null;
+
+function closeDatePicker() {
+  if (_calendarPopup) { _calendarPopup.remove(); _calendarPopup = null; }
+  if (_calendarOutsideHandler) {
+    document.removeEventListener('mousedown', _calendarOutsideHandler);
+    _calendarOutsideHandler = null;
+  }
+}
+
+function openDatePicker(anchorEl, { selected, onSelect }) {
+  closeDatePicker();
+  const availableDates = (window._uploadData && window._uploadData.availableDates) || [];
+  const availSet = new Set(availableDates);
+
+  const base = selected ? new Date(selected + 'T00:00:00')
+    : availableDates.length ? new Date(availableDates[availableDates.length - 1] + 'T00:00:00')
+    : new Date();
+  let viewYear  = base.getFullYear();
+  let viewMonth = base.getMonth();
+
+  const pop = document.createElement('div');
+  pop.className = 'date-picker-popup';
+  document.body.appendChild(pop);
+  _calendarPopup = pop;
+
+  function render() {
+    const first        = new Date(viewYear, viewMonth, 1);
+    const startWeekday = first.getDay();
+    const daysInMonth  = new Date(viewYear, viewMonth + 1, 0).getDate();
+    const monthLabel   = first.toLocaleString('default', { month: 'long' });
+
+    let cells = '';
+    for (let i = 0; i < startWeekday; i++) cells += `<span class="dp-cell dp-empty"></span>`;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const iso = `${viewYear}-${String(viewMonth+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const hasData = availSet.has(iso);
+      const isSelected = selected === iso;
+      cells += `<span class="dp-cell${hasData?' dp-has-data':''}${isSelected?' dp-selected':''}" data-date="${iso}">
+                   ${d}${hasData ? '<i class="dp-dot"></i>' : ''}
+                 </span>`;
+    }
+
+    pop.innerHTML = `
+      <div class="dp-head">
+        <button type="button" class="dp-nav" data-nav="-1">&lsaquo;</button>
+        <span class="dp-month">${monthLabel} ${viewYear}</span>
+        <button type="button" class="dp-nav" data-nav="1">&rsaquo;</button>
+      </div>
+      <div class="dp-grid dp-dow"><span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span></div>
+      <div class="dp-grid">${cells}</div>
+      <div class="dp-foot">
+        <span class="dp-legend"><i class="dp-dot"></i> data available</span>
+        <button type="button" class="dp-clear">Clear</button>
+      </div>`;
+
+    pop.querySelectorAll('[data-nav]').forEach(b => b.addEventListener('click', e => {
+      viewMonth += parseInt(e.currentTarget.dataset.nav, 10);
+      if (viewMonth < 0)  { viewMonth = 11; viewYear--; }
+      if (viewMonth > 11) { viewMonth = 0;  viewYear++; }
+      render();
+    }));
+    pop.querySelectorAll('.dp-cell[data-date]').forEach(c => c.addEventListener('click', e => {
+      onSelect(e.currentTarget.dataset.date);
+      closeDatePicker();
+    }));
+    pop.querySelector('.dp-clear').addEventListener('click', () => { onSelect(null); closeDatePicker(); });
+  }
+  render();
+
+  const rect = anchorEl.getBoundingClientRect();
+  pop.style.top  = (window.scrollY + rect.bottom + 6) + 'px';
+  pop.style.left = (window.scrollX + rect.left) + 'px';
+
+  _calendarOutsideHandler = e => {
+    if (_calendarPopup && !_calendarPopup.contains(e.target) && e.target !== anchorEl) closeDatePicker();
+  };
+  setTimeout(() => document.addEventListener('mousedown', _calendarOutsideHandler), 0);
+}
+
+// ── Input id / label table (single source of truth for both the plain
+//    DOM-snapshot path and the per-process pure-math path below) ────────────
+const INPUT_IDS = ['L','Ffw','Fin','Cba','Cfa','Pfa','Pba','M','A','VM','FC','GCV','S',
+  'O2in','CO2in','COin','O2out','CO2out','COout','Tgi','Tgo','Tpai','Tpao',
+  'Tsai','Tsao','Fsa','Fpa','Tref',
+  'Md','Ad','VMd','FCd','Cd','Sd','Hd','Md2','Nd','Od','Ad2','GCVd','Trad','Mwvd'];
+const INPUT_LABELS = {
+  L:'Unit Load (MW)',Ffw:'Steam Flow (T/hr)',Fin:'Total Coal Flow (T/hr)',
+  Cba:'Unburnt C Bottom Ash (%)',Cfa:'Unburnt C Fly Ash (%)',
+  Pfa:'% Fly Ash',Pba:'% Bottom Ash',
+  M:'Moisture (%)',A:'Ash (%)',VM:'Volatile Matter (%)',
+  FC:'Fixed Carbon (%)',GCV:'GCV (kcal/kg)',S:'Sulfur (%)',
+  O2in:'O2 APH In (%)',CO2in:'CO2 APH In (%)',COin:'CO APH In (ppm)',
+  O2out:'O2 APH Out (%)',CO2out:'CO2 APH Out (%)',COout:'CO APH Out (ppm)',
+  Tgi:'FG Temp APH In (°C)',Tgo:'FG Temp APH Out (°C)',
+  Tpai:'PA Temp In (°C)',Tpao:'PA Temp Out (°C)',
+  Tsai:'SA Temp In (°C)',Tsao:'SA Temp Out (°C)',
+  Fsa:'SA Flow (TPH)',Fpa:'PA Flow (TPH)',Tref:'Ambient Temp (°C)',
+  Md:'Moisture Design (%)',Ad:'Ash Design (%)',VMd:'VM Design (%)',FCd:'FC Design (%)',
+  Cd:'Carbon Design (%)',Sd:'Sulfur Design (%)',Hd:'Hydrogen Design (%)',
+  Md2:'Moisture Design Ultimate (%)',Nd:'Nitrogen Design (%)',Od:'Oxygen Design (%)',
+  Ad2:'Ash Design Ultimate (%)',GCVd:'GCV Design (kcal/kg)',
+  Trad:'Ref Air Temp Design (°C)',Mwvd:'Moisture in Air Design (kg/kg)'
+};
+const g = (obj, id) => { const n = parseFloat(obj[id]); return isNaN(n) ? 0 : n; };
+
+// Plain object snapshot of every input currently sitting in the form
+// (used by the no-process / "normal" path — identical to what collectInputs()
+// used to read straight off the DOM).
+function collectInputsFromDOM() {
+  const obj = {};
+  INPUT_IDS.forEach(id => {
+    const el = document.getElementById(id);
+    obj[id] = el ? el.value : 0;
+  });
+  obj.Lrad = document.getElementById('Lrad') ? v('Lrad') : 1.2;
+  return obj;
+}
+
+// Mirrors autoCalcCO2() + autoCalcDesignUltimate() below, but on a plain
+// {id: value} object instead of the DOM — this is what lets a per-process
+// result be computed without repeatedly overwriting the shared form fields.
+function computeDerivedInputs(raw) {
+  const inputs = { ...raw };
+  const O2in = g(inputs,'O2in'), O2out = g(inputs,'O2out');
+  inputs.CO2in  = 19.3 - O2in;
+  inputs.CO2out = 19.3 - O2out;
+
+  const Md = g(inputs,'Md'), Ad = g(inputs,'Ad'), VMd = g(inputs,'VMd'),
+        FCd = g(inputs,'FCd'), Sd = g(inputs,'Sd');
+  const FcDc = FCd / (1 - (1.1*Ad/100) - (Md/100));
+  const VmDf = 100 - FcDc;
+  const Cdf  = FcDc + 0.9*(VmDf - 14);
+  const Hdf  = VmDf * ((7.35/(VmDf+10)) - 0.013);
+  const Ndf  = 2.1 - (0.012*VmDf);
+  const k    = (VMd + FCd) / (VmDf + FcDc);
+
+  inputs.Cd  = Cdf * k;
+  inputs.Hd  = Hdf * k;
+  inputs.Nd  = Ndf * k;
+  inputs.Md2 = Md;
+  inputs.Ad2 = Ad;
+  inputs.Od  = 100 - inputs.Cd - Sd - inputs.Hd - inputs.Md2 - inputs.Nd - inputs.Ad2;
+  return inputs;
+}
+
+// ── Core calculation (pure — takes a plain {id: value} object, returns the
+//    results object; no DOM reads/writes) ────────────────────────────────────
+function runCalculation(rawInputs) {
+  const inputs = computeDerivedInputs(rawInputs);
+  const gv = id => g(inputs, id);
+
+  const M=gv('M'),A=gv('A'),VM=gv('VM'),FC=gv('FC'),GCV=gv('GCV'),S=gv('S');
+  const O2in=gv('O2in'),O2out=gv('O2out'),COout=gv('COout'),COin=gv('COin');
+  const Tgi=gv('Tgi'),Tgo=gv('Tgo'),Tpai=gv('Tpai'),Tpao=gv('Tpao');
+  const Tsai=gv('Tsai'),Tsao=gv('Tsao'),Fsa=gv('Fsa'),Fpa=gv('Fpa');
+  const Cba=gv('Cba'),Cfa=gv('Cfa'),Pfa=gv('Pfa'),Pba=gv('Pba');
+  const Lrad=gv('Lrad') || 1.2;
   const Cp=30.6, CVc=8077.8, CVco=2415, Mwv=0.0166;
-  const CO2in=v('CO2in'), CO2out=v('CO2out'), COoutp=(COout/1000000)*100;
+  const CO2in=gv('CO2in'), CO2out=gv('CO2out'), COoutp=(COout/1000000)*100;
 
   // Ultimate analysis
   const FcDc=FC/(1-(1.1*A/100)-M/100), VmDf=100-FcDc;
@@ -223,9 +489,9 @@ function calculate() {
   const BoilerEff=100-(Ldg+Luc+Lmf+Lhf+Lco+Lma+Lrad);
 
   // Design conditions
-  const Cd=v('Cd'),Sd=v('Sd'),Hd=v('Hd'),Od=v('Od');
-  const Ad2=v('Ad2'),GCVd=v('GCVd'),Trad=v('Trad'),Mwvd=v('Mwvd');
-  const Md=v('Md2');
+  const Cd=gv('Cd'),Sd=gv('Sd'),Hd=gv('Hd'),Od=gv('Od');
+  const Ad2=gv('Ad2'),GCVd=gv('GCVd'),Trad=gv('Trad'),Mwvd=gv('Mwvd');
+  const Md=gv('Md2');
 
   // Corrected gas temp
   const AL=(CO2in-CO2out)*0.9*100/CO2out;
@@ -238,7 +504,7 @@ function calculate() {
   const Ldgc=Shc*100/(GCVd*4.186);
 
   const Kc=Math.exp(0.225*Cd/Hd)-Math.exp(0.225*Ca/H);
-  const V_corr=(v('VMd')<17)?0.013*(Ad2*GCV/(A*GCVd))*Kc:0;
+  const V_corr=(gv('VMd')<17)?0.013*(Ad2*GCV/(A*GCVd))*Kc:0;
   const Lucc=Luc*((Ad2*GCV)/(A*GCVd))+V_corr;
 
   const Swd=1.88*(Tgc-25)+2442+4.2*(25-Trad);
@@ -253,47 +519,56 @@ function calculate() {
 
   const BoilerEffCorr=100-(Ldgc+Lucc+Lmfc+Lhfc+Lcoc+Lmac+Lrad);
 
-  window._results = {
+  return {
     CO2in,CO2out,COoutp,Trai,Cash,U,Fta,Rsa,Rpa,
     N2out,Sa,Ea,Ma,Wd,Sh,Sw,
     Ldg,Luc,Lmf,Lhf,Lco,Lma,Lrad,BoilerEff,
     AL,Tgnl,Tgc,Ldgc,Lucc,Lmfc,Lhfc,Lcoc,Lmac,BoilerEffCorr,
-    inputs: collectInputs()
+    inputs: INPUT_IDS.map(id => ({ id, label: INPUT_LABELS[id] || id, value: inputs[id] })),
   };
-
-  renderOutput(window._results);
-  showTab('output');
 }
 
-// ── Collect input snapshot ────────────────────────────────────────────────────
-function collectInputs() {
-  const ids=['L','Ffw','Fin','Cba','Cfa','Pfa','Pba','M','A','VM','FC','GCV','S',
-    'O2in','CO2in','COin','O2out','CO2out','COout','Tgi','Tgo','Tpai','Tpao',
-    'Tsai','Tsao','Fsa','Fpa','Tref',
-    'Md','Ad','VMd','FCd','Cd','Sd','Hd','Md2','Nd','Od','Ad2','GCVd','Trad','Mwvd'];
-  const labels={
-    L:'Unit Load (MW)',Ffw:'Steam Flow (T/hr)',Fin:'Total Coal Flow (T/hr)',
-    Cba:'Unburnt C Bottom Ash (%)',Cfa:'Unburnt C Fly Ash (%)',
-    Pfa:'% Fly Ash',Pba:'% Bottom Ash',
-    M:'Moisture (%)',A:'Ash (%)',VM:'Volatile Matter (%)',
-    FC:'Fixed Carbon (%)',GCV:'GCV (kcal/kg)',S:'Sulfur (%)',
-    O2in:'O2 APH In (%)',CO2in:'CO2 APH In (%)',COin:'CO APH In (ppm)',
-    O2out:'O2 APH Out (%)',CO2out:'CO2 APH Out (%)',COout:'CO APH Out (ppm)',
-    Tgi:'FG Temp APH In (°C)',Tgo:'FG Temp APH Out (°C)',
-    Tpai:'PA Temp In (°C)',Tpao:'PA Temp Out (°C)',
-    Tsai:'SA Temp In (°C)',Tsao:'SA Temp Out (°C)',
-    Fsa:'SA Flow (TPH)',Fpa:'PA Flow (TPH)',Tref:'Ambient Temp (°C)',
-    Md:'Moisture Design (%)',Ad:'Ash Design (%)',VMd:'VM Design (%)',FCd:'FC Design (%)',
-    Cd:'Carbon Design (%)',Sd:'Sulfur Design (%)',Hd:'Hydrogen Design (%)',
-    Md2:'Moisture Design Ultimate (%)',Nd:'Nitrogen Design (%)',Od:'Oxygen Design (%)',
-    Ad2:'Ash Design Ultimate (%)',GCVd:'GCV Design (kcal/kg)',
-    Trad:'Ref Air Temp Design (°C)',Mwvd:'Moisture in Air Design (kg/kg)'
-  };
-  return ids.map(id => ({
-    id,
-    label: labels[id] || id,
-    value: document.getElementById(id) ? document.getElementById(id).value : 'N/A'
+// Average every field the dated log actually has readings for, across just
+// the rows inside [start, end]. Fields the log doesn't carry (manual-only
+// ones like S, COin, Tref, Pfa/Pba, the whole Design block, ...) simply
+// aren't in `avg` and fall through to whatever's currently in the form —
+// same shared value for every process, exactly like today.
+function _averageFieldsInRange(start, end) {
+  const rows = _rowsInRange(start, end);
+  const sums = {}, counts = {};
+  rows.forEach(r => Object.entries(r.values).forEach(([fid, val]) => {
+    sums[fid]   = (sums[fid]   || 0) + val;
+    counts[fid] = (counts[fid] || 0) + 1;
   }));
+  const avg = {};
+  Object.keys(sums).forEach(fid => { avg[fid] = sums[fid] / counts[fid]; });
+  return { avg, rowCount: rows.length };
+}
+
+// ── Entry point wired to the "▶ Calculate Efficiency" button ────────────────
+function calculate() {
+  const activeProcesses = window._processes.filter(p => p.start || p.end);
+
+  if (!activeProcesses.length) {
+    // No date ranges chosen anywhere — exactly today's behavior.
+    window._comparisonResults = null;
+    window._results = runCalculation(collectInputsFromDOM());
+    renderOutput(window._results);
+    showTab('output');
+    return;
+  }
+
+  const baseInputs = collectInputsFromDOM();
+  const comparison = activeProcesses.map(p => {
+    const { avg, rowCount } = _averageFieldsInRange(p.start, p.end);
+    const result = runCalculation({ ...baseInputs, ...avg });
+    return { title: p.title || 'Process', start: p.start, end: p.end, rowCount, result };
+  });
+
+  window._comparisonResults = comparison;
+  window._results = comparison[0].result;   // keeps save/download working off the first process
+  renderComparison(comparison);
+  showTab('output');
 }
 
 // ── Render output KPIs ────────────────────────────────────────────────────────
@@ -389,18 +664,55 @@ function oRow(name, sym, val, uom) {
   </div>`;
 }
 
-// ── Save session to MongoDB ───────────────────────────────────────────────────
-async function saveSession() {
-  if (!window._results) { showToast('Calculate first before saving.', 'error'); return; }
+// ── Render a side-by-side comparison of multiple date-range processes ───────
+const _COMPARISON_METRIC_ROWS = [
+  ['Date Range',                       p => `${p.start || '—'} → ${p.end || '—'}`],
+  ['Rows Used',                        p => String(p.rowCount)],
+  ['Boiler Efficiency (%)',            p => fmt2(p.result.BoilerEff)],
+  ['Boiler Efficiency Corrected (%)',  p => fmt2(p.result.BoilerEffCorr)],
+  ['Dry Gas Loss (%)',                 p => fmt2(p.result.Ldg)],
+  ['Unburnt Carbon Loss (%)',          p => fmt2(p.result.Luc)],
+  ['Moisture Fuel Loss (%)',           p => fmt2(p.result.Lmf)],
+  ['Hydrogen Fuel Loss (%)',           p => fmt2(p.result.Lhf)],
+  ['CO Loss (%)',                      p => fmt(p.result.Lco)],
+  ['Moisture Air Loss (%)',            p => fmt2(p.result.Lma)],
+  ['Radiation & Unaccounted Loss (%)', p => fmt2(p.result.Lrad)],
+  ['CO₂ — APH In (%)',                 p => fmt2(p.result.CO2in)],
+  ['CO₂ — APH Out (%)',                p => fmt2(p.result.CO2out)],
+];
 
-  const r    = window._results;
-  const name = prompt('Session name (optional):', window._uploadedFilename || '');
-  if (name === null) return;   // user cancelled
+function renderComparison(list) {
+  document.getElementById('kpi-area').innerHTML = list.map(p => `
+    <div class="kpi-card kpi-green">
+      <div class="kpi-label">${escapeHtml(p.title)}</div>
+      <div class="kpi-value">${fmt2(p.result.BoilerEff)}<span class="kpi-unit">%</span></div>
+      <div class="kpi-sub">${p.start || '—'} → ${p.end || '—'} · ${p.rowCount} row${p.rowCount===1?'':'s'}</div>
+    </div>`).join('');
 
+  const headerCells = list.map(p => `<th>${escapeHtml(p.title)}</th>`).join('');
+  const bodyRows = _COMPARISON_METRIC_ROWS.map(([label, fn]) => `
+    <tr><td class="cmp-metric">${label}</td>${list.map(p => `<td>${fn(p)}</td>`).join('')}</tr>
+  `).join('');
+
+  document.getElementById('output-tables').innerHTML = `
+    <div class="output-section">
+      <div class="output-section-head"><span>Process Comparison</span></div>
+      <div class="cmp-table-wrap">
+        <table class="cmp-table">
+          <thead><tr><th></th>${headerCells}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
+      <div class="cmp-note">Fields not present in the uploaded log (manual-only inputs, Design conditions, …) use the same value — whatever's currently in the Input Parameters tab — across every process.</div>
+    </div>`;
+}
+
+// ── Save session(s) to MongoDB ───────────────────────────────────────────────
+async function _saveOneSession(r, sessionName) {
   const payload = {
-    sessionName: name.trim(),
-    sourceFile:  window._uploadedFilename || 'Manual Entry',
-    inputs:      r.inputs,
+    sessionName,
+    sourceFile: window._uploadedFilename || 'Manual Entry',
+    inputs:     r.inputs,
     results: {
       BoilerEff: r.BoilerEff, BoilerEffCorr: r.BoilerEffCorr,
       Ldg: r.Ldg, Luc: r.Luc, Lmf: r.Lmf, Lhf: r.Lhf,
@@ -411,15 +723,34 @@ async function saveSession() {
       Lhfc: r.Lhfc, Lcoc: r.Lcoc, Lmac: r.Lmac
     }
   };
+  const res  = await fetch('/api/sessions', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error);
+}
 
+async function saveSession() {
+  if (window._comparisonResults && window._comparisonResults.length) {
+    if (!confirm(`Save all ${window._comparisonResults.length} process result(s) to the database?`)) return;
+    try {
+      for (const p of window._comparisonResults) {
+        await _saveOneSession(p.result, `${window._uploadedFilename || 'Manual Entry'} — ${p.title}`);
+      }
+      showToast('✓ All process results saved to MongoDB!', 'success');
+    } catch (err) {
+      showToast('Save failed: ' + err.message, 'error');
+    }
+    return;
+  }
+
+  if (!window._results) { showToast('Calculate first before saving.', 'error'); return; }
+  const name = prompt('Session name (optional):', window._uploadedFilename || '');
+  if (name === null) return;   // user cancelled
   try {
-    const res  = await fetch('/api/sessions', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error);
+    await _saveOneSession(window._results, name.trim());
     showToast('✓ Session saved to MongoDB!', 'success');
   } catch (err) {
     showToast('Save failed: ' + err.message, 'error');
@@ -448,9 +779,15 @@ function resetInputs() {
     const el = document.getElementById(id);
     if (el) el.value = val;
   });
-  window._uploadedFilename = null;
+  window._uploadedFilename   = null;
+  window._uploadData         = null;
+  window._processes          = [];
+  window._comparisonResults  = null;
   const st = document.getElementById('upload-status');
   if (st) { st.style.display='none'; st.textContent=''; }
+  const procSection = document.getElementById('process-section');
+  if (procSection) procSection.style.display = 'none';
+  renderProcessList();
   autoCalcCO2();
   autoCalcDesignUltimate();
 }
@@ -510,6 +847,7 @@ function recalculate() {
 
 // ── CSV / PDF download ────────────────────────────────────────────────────────
 function downloadCSV() {
+  if (window._comparisonResults && window._comparisonResults.length) { downloadComparisonCSV(); return; }
   if (!window._results) { showToast('Calculate first.', 'error'); return; }
   const r=window._results, now=new Date().toISOString().slice(0,19).replace('T',' ');
   let csv=`CENPEEP Boiler Efficiency Report\nGenerated:,${now}\n\nINPUTS\nParameter,Value\n`;
@@ -535,7 +873,36 @@ function downloadCSV() {
   a.click();
 }
 
+function downloadComparisonCSV() {
+  const list = window._comparisonResults, now = new Date().toISOString().slice(0,19).replace('T',' ');
+  let csv = `CENPEEP Boiler Efficiency — Process Comparison\nGenerated:,${now}\n\n`;
+  csv += 'Metric,' + list.map(p => `"${p.title}"`).join(',') + '\n';
+  _COMPARISON_METRIC_ROWS.forEach(([label, fn]) => {
+    csv += `"${label}",` + list.map(p => `"${fn(p)}"`).join(',') + '\n';
+  });
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download=`cenpeep_comparison_${now.replace(/[: ]/g,'_')}.csv`;
+  a.click();
+}
+
+function downloadComparisonPDF() {
+  const list = window._comparisonResults, now = new Date().toLocaleString();
+  const win = window.open('', '_blank');
+  win.document.write(`<!DOCTYPE html><html><head><title>CENPEEP Comparison Report</title>
+  <style>body{font-family:Arial,sans-serif;font-size:12px;margin:30px}h1{font-size:18px}
+  table{width:100%;border-collapse:collapse}th{background:#1e3a5f;color:#fff;padding:5px 8px;text-align:left;font-size:11px}
+  td{padding:4px 8px;border-bottom:1px solid #eee;font-size:11px}tr:nth-child(even)td{background:#f5f8ff}
+  .meta{color:#666;font-size:11px;margin-bottom:16px}</style></head><body>
+  <h1>CENPEEP Boiler Efficiency — Process Comparison</h1><p class="meta">Generated: ${now}</p>
+  <table><tr><th>Metric</th>${list.map(p=>`<th>${p.title}</th>`).join('')}</tr>
+  ${_COMPARISON_METRIC_ROWS.map(([label,fn])=>`<tr><td>${label}</td>${list.map(p=>`<td>${fn(p)}</td>`).join('')}</tr>`).join('')}
+  </table><script>window.print();<\/script></body></html>`);
+  win.document.close();
+}
+
 function downloadPDF() {
+  if (window._comparisonResults && window._comparisonResults.length) { downloadComparisonPDF(); return; }
   if (!window._results) { showToast('Calculate first.', 'error'); return; }
   const r=window._results, now=new Date().toLocaleString();
   const win=window.open('','_blank');

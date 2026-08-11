@@ -57,6 +57,21 @@
       </div>
     </div>
 
+    <!-- Date-wise Processes — shown only once an upload has dated log data.
+         Split that data into one or more named date ranges, each producing
+         its own result, compared side by side. No processes added → the
+         Calculate button falls back to today's plain whole-file average. -->
+    <div class="process-section" id="process-section" style="display:none">
+      <div class="process-section-head">
+        <div class="process-section-title">
+          <strong>📅 Date-wise Processes</strong>
+          <span class="process-section-sub" id="process-hint">Optional — split this file into named date ranges and compare results side by side.</span>
+        </div>
+        <button type="button" class="btn btn-secondary" id="add-process-btn" onclick="addProcess()">+ Add Process</button>
+      </div>
+      <div id="process-list"></div>
+    </div>
+
     <!-- General Data -->
     <div class="section-header"><div class="section-label">General Data</div><div class="section-line"></div></div>
     <div class="input-grid">
