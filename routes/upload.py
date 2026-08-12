@@ -488,6 +488,30 @@ def _match_tag_patterns(norm):
     # and side-agnostic tag wording behave identically below.
     tokens = {('aph' if t in ('apha', 'aphb') else t) for t in tokens}
 
+    # Same hyphen-glued-side-qualifier problem as "APH-A"/"APH-B" above,
+    # but for "ECO-L"/"ECO-R" (Left/Right duct O2 sensor "after the
+    # economiser" -- real CSTPS header: "O2 IN FG AFT ECO-L, %" / "O2 IN FG
+    # AFT ECO-R, %"). The hyphen disappears during normalization instead of
+    # becoming a space, so "ECO-L" collapses onto the single token "ecol"
+    # (not "eco" + "l"), which defeated the 'eco' in tokens check below.
+    # Folded back to a plain "eco" token so side-qualified and
+    # side-agnostic "after ECO" wording behave identically.
+    tokens = {('eco' if t in ('ecol', 'ecor') else t) for t in tokens}
+
+    # O2 in the flue gas "after"/"aft" the economiser (ECO) -- on this
+    # plant's gas path this is physically the same point as the APH inlet
+    # (see the "O2 AT ECO OUTLET" -> O2in training examples), just phrased
+    # differently on some real sheets ("O2 IN FG AFT ECO-L, %"). Handled as
+    # a deterministic rule rather than left to the ML fallback: char
+    # n-grams in "...AFT ECO..." overlap heavily with the unrelated "FG
+    # TEMPAFTERECO..." (Tgi) training examples and were winning that
+    # match instead. Excludes "inlet"/"before" wording, which is the
+    # different, further-upstream "O2 AT ECO INLET" reading (rejected
+    # elsewhere as out-of-scope) rather than this after-ECO one.
+    if 'o2' in tokens and 'eco' in tokens and ({'aft', 'after'} & tokens) \
+            and not ({'inlet', 'inl', 'before'} & tokens):
+        return 'O2in'
+
     # Unburnt-carbon-in-ash fields: "bottom ash"/"fly ash" (%), optionally
     # qualified with "unburnt(s)" — deliberately excludes phrasings that
     # also contain "total", since those mean the % that ash type makes up
@@ -1028,6 +1052,79 @@ def _find_date_col_idx(headers):
     return None
 
 
+def _find_date_col_idx_by_data(data_rows, col_map, sample_size=40):
+    """
+    Fallback for sheets where the row that actually got picked as the
+    header (see _find_header_row — it's chosen by which row maps to the
+    most CENPEEP fields, not by which row says "Date") doesn't itself
+    carry a literal date-ish label. Real plant workbooks often stack a
+    grouping row above the real header — e.g. a lab/quality sheet with
+    "Date" on one row and the real sub-headers ("M%", "TM%", "A%", "FC%",
+    "Fly Ash", "Bottom Ash", ...) one row below it — so _find_date_col_idx
+    (header-text-only) finds nothing there even though the sheet
+    genuinely has one row per day.
+    Without a recognized date column, that sheet's rows can never be
+    placed into any date range: every field sourced from it is stuck
+    using its whole-sheet average forever, even after a person picks a
+    specific date range on the calculator — which is exactly the
+    "took the average of the whole [sheet], not just the selected
+    dates" bug for fields like Fixed Carbon, GCV, Moisture, Volatile
+    Matter, and Unburnt Carbon in Fly/Bottom Ash on this kind of sheet.
+    So: scan a sample of the actual DATA rows (not headers) and look for
+    a column where every sampled non-blank cell parses as a real date
+    (_parse_date_cell) AND the parsed dates never run backwards row to
+    row (a genuine chronological log is always sorted, or at least never
+    goes in reverse; an ordinary measurement column of similar-looking
+    numbers essentially never satisfies both). Only a column clearing
+    both bars is treated as a date column — this deliberately stays
+    conservative so a coincidentally date-like numeric column is never
+    mistaken for one.
+    Only rows that actually contain a real reading in at least one mapped
+    field column are considered — this skips spacer / section-label rows
+    (e.g. a literal "Without THERMACT" text label some plant sheets
+    insert between blocks of dated rows) so a stray label can't
+    disqualify an otherwise perfectly good date column just because it
+    doesn't parse as a date.
+    Returns the column index, or None if nothing qualifies (callers then
+    behave exactly as if no date column exists — same as before).
+    """
+    if not data_rows:
+        return None
+    exclude_cols = set(col_map.keys())
+    candidate_rows = [
+        row for row in data_rows
+        if any(_to_num(row[c]) is not None for c in col_map if c < len(row))
+    ]
+    sample = candidate_rows[:sample_size]
+    ncols = max((len(r) for r in sample), default=0)
+    best_idx, best_ratio = None, 0.0
+    for c in range(ncols):
+        if c in exclude_cols:
+            continue
+        parsed = []
+        non_blank = 0
+        for row in sample:
+            if c >= len(row):
+                continue
+            val = row[c]
+            if val is None or (isinstance(val, str) and not val.strip()):
+                continue
+            non_blank += 1
+            d = _parse_date_cell(val)
+            if d is not None:
+                parsed.append(d)
+        # Require EVERY non-blank sampled cell in the column to parse as a
+        # date, and at least a handful of samples to trust the signal.
+        if non_blank < 3 or len(parsed) != non_blank:
+            continue
+        if any(parsed[i] > parsed[i + 1] for i in range(len(parsed) - 1)):
+            continue
+        ratio = len(parsed) / non_blank
+        if ratio > best_ratio:
+            best_idx, best_ratio = c, ratio
+    return best_idx
+
+
 def _row_has_data(row, date_col_idx, col_map):
     """
     True if this row should count as a real reading, not a blank/spacer row.
@@ -1089,6 +1186,11 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
         return {}, [], {}, {}, 0, unmatched_highlighted, []
 
     date_col_idx = _find_date_col_idx(headers)
+    if date_col_idx is None:
+        # Header text alone found nothing (e.g. "Date" sits on a stacked
+        # grouping row above this one) — fall back to recognizing a date
+        # column from the actual data. See _find_date_col_idx_by_data.
+        date_col_idx = _find_date_col_idx_by_data(data_rows, col_map)
     data_row_count = _count_populated_data_rows(data_rows, date_col_idx, col_map)
 
     # Collect numeric values per field across all data rows. Blank / non-
@@ -1108,12 +1210,24 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
     dated_rows = []
     for row in data_rows:
         row_vals = {}
+        row_sums = {}
+        row_counts = {}
         for col_idx, fid in col_map.items():
             val = row[col_idx] if col_idx < len(row) else None
             num = _to_num(val)
             if num is not None:
                 field_values[fid].append(num)
-                row_vals[fid] = num
+                # See the matching comment in _accumulate_row: a field can
+                # have more than one column on the same row (e.g. O2in's
+                # Left/Right duct columns) -- average them for this row's
+                # dated snapshot instead of the second column overwriting
+                # the first, which otherwise left the per-date-range
+                # average (used once a person picks a date on the
+                # calculator) silently built from only one of the columns.
+                row_sums[fid] = row_sums.get(fid, 0.0) + num
+                row_counts[fid] = row_counts.get(fid, 0) + 1
+        for fid, total in row_sums.items():
+            row_vals[fid] = total / row_counts[fid]
         if row_vals and len(dated_rows) < MAX_DATED_ROWS_PER_SHEET:
             row_date = None
             if date_col_idx is not None and date_col_idx < len(row):
@@ -1607,12 +1721,26 @@ def _accumulate_row(row, col_map, field_values, date_col_idx=None, dated_rows=No
     feature too, not just the small-sheet path.
     """
     row_vals = {}
+    row_sums = {}
+    row_counts = {}
     for col_idx, fid in col_map.items():
         val = row[col_idx] if col_idx < len(row) else None
         num = _to_num(val)
         if num is not None:
             field_values.setdefault(fid, []).append(num)
-            row_vals[fid] = num
+            # A field can have MORE THAN ONE column on the same row (see
+            # MULTI_COLUMN_AVERAGE_FIELDS, e.g. O2in's Left/Right duct O2
+            # columns) — average them together for this row's dated
+            # snapshot instead of letting the second column's value
+            # silently overwrite the first. Without this, the whole-file
+            # value (built from field_values, which correctly pools every
+            # column's readings) stayed right, but the per-date average a
+            # person sees after picking a date range on the calculator
+            # silently used only one of the two columns for every row.
+            row_sums[fid] = row_sums.get(fid, 0.0) + num
+            row_counts[fid] = row_counts.get(fid, 0) + 1
+    for fid, total in row_sums.items():
+        row_vals[fid] = total / row_counts[fid]
     if dated_rows is not None and row_vals and len(dated_rows) < MAX_DATED_ROWS_PER_SHEET:
         row_date = None
         if date_col_idx is not None and date_col_idx < len(row):
@@ -1989,15 +2117,68 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     ]
 
     # ─── Date-wise process support ────────────────────────────────────────
-    # Per-row dated snapshots come ONLY from the sheet that actually backs
-    # the merged field values (best_generic_sheet) — never from a sheet
-    # that lost the ranking, and never at all when a CenPeep-column sheet
-    # won instead (that layout is a single authoritative value per field,
-    # not a time series, so there's no meaningful date range to slice it
-    # by). This keeps "pick a date range" consistent with what's actually
-    # on the calculator: a dot on the calendar always corresponds to rows
-    # that can genuinely be re-averaged into a result.
-    primary_dated_rows = [] if cenpeep_result else (best_generic_sheet or {}).get('datedRows', [])
+    # Per-row dated snapshots must come from EVERY sheet that actually
+    # backs a merged field value — not just best_generic_sheet. Real plant
+    # workbooks routinely split raw data across multiple sheets with
+    # different logging cadences (e.g. an hourly "OPN PARA" operating log
+    # plus a separate once-a-day "LAB" sheet for coal-quality figures, or a
+    # "GUHR Direct" sheet for GCV/coal-rate). best_generic_sheet is only
+    # ever ONE of those — it's whichever sheet has the most date rows
+    # overall — so a field whose real source is a different, lower-row-
+    # count sheet (Fixed Carbon, GCV, Moisture, Ash, Volatile Matter,
+    # Unburnt Carbon in Fly/Bottom Ash, …) previously had NO per-date rows
+    # at all. When a person then picked a start/end date on the
+    # calculator, _averageFieldsInRange() on the frontend only had
+    # best_generic_sheet's rows to filter, so those lab-only fields never
+    # appeared in `avg` and silently fell back to whatever was already in
+    # the form — the field's average across the sheet's ENTIRE row range
+    # (every process/date block in the workbook combined), not just the
+    # rows inside the selected date range. That's the "average of the
+    # whole [sheet] instead of the selected date" bug.
+    #
+    # Fix: walk every sheet in the SAME priority order used to build
+    # merged_extracted above (ranked_sheets — CenPeep-column sheets are
+    # handled separately below since they're not a time series at all),
+    # and for each sheet pull dated values ONLY for the fields that sheet
+    # actually won in that merge (merged_field_source[fid][0] ==
+    # this sheet's name). That keeps every field's date-filtered average
+    # sourced from the exact same sheet as its whole-file value — a field
+    # is never mixed across sheets, only re-averaged over fewer rows of
+    # its own sheet — while still letting fields from DIFFERENT sheets
+    # each be re-averaged over their own matching dates when a date range
+    # is chosen.
+    # NOTE: this stays a flat LIST of rows (one entry per original data
+    # row), never a dict keyed by date. A sheet like "OPN PARA" logs many
+    # rows per day (hourly readings) and every one of them must survive
+    # separately so _averageFieldsInRange() on the frontend keeps summing
+    # all of them for a date — collapsing same-date rows together here
+    # would silently throw away all but one hourly reading per day.
+    primary_dated_rows = []
+    if not cenpeep_result:
+        for sr in ranked_sheets:
+            sheet_name = sr['sheetName']
+            sheet_fields = {
+                fid for fid, src in merged_field_source.items()
+                if src[0] == sheet_name
+            }
+            if not sheet_fields:
+                continue
+            for row in sr.get('datedRows', []):
+                row_date = row.get('date')
+                if not row_date:
+                    continue
+                row_vals = {
+                    fid: val for fid, val in row.get('values', {}).items()
+                    if fid in sheet_fields
+                }
+                if not row_vals:
+                    continue
+                primary_dated_rows.append({'date': row_date, 'values': row_vals})
+
+    # CenPeep-column layout is a single authoritative value per field, not
+    # a time series, so there's no meaningful date range to slice it by —
+    # matches the previous behavior for that case (primary_dated_rows stays
+    # []  above when cenpeep_result is set).
     available_dates = sorted({r['date'] for r in primary_dated_rows if r.get('date')})
 
     # Highlighted header cells that never resolved to any CENPEEP field on
