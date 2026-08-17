@@ -443,71 +443,98 @@ function computeDerivedInputs(raw) {
 
 // ── Core calculation (pure — takes a plain {id: value} object, returns the
 //    results object; no DOM reads/writes) ────────────────────────────────────
+// NOTE: this follows the CENPEEP / IS 8753 "indirect (heat loss) method" —
+// O2-based excess air, empirical proximate→ultimate regression, fixed
+// 1.09% radiation loss, fixed 20/80 bottom/fly ash split — matching the
+// reference "Boiler Efficiency Calculation by Heat Loss Method" workbook
+// (Efficiency overall / Effi. >570 sheets) formula-for-formula, so results
+// reproduce the workbook to the same input data. This replaced an earlier
+// CO2/Ostwald-based formulation that used a different (non-CENPEEP) loss
+// methodology and did not reconcile with the workbook.
 function runCalculation(rawInputs) {
   const inputs = computeDerivedInputs(rawInputs);
   const gv = id => g(inputs, id);
 
-  const M=gv('M'),A=gv('A'),VM=gv('VM'),FC=gv('FC'),GCV=gv('GCV'),S=gv('S');
+  const M=gv('M'),A=gv('A'),VM=gv('VM'),FC=gv('FC'),GCV=gv('GCV');
+  const S=gv('S') || 0.3;                 // workbook fixes Sulphur at 0.3% (D13/E13)
   const O2in=gv('O2in'),O2out=gv('O2out'),COout=gv('COout'),COin=gv('COin');
   const Tgi=gv('Tgi'),Tgo=gv('Tgo'),Tpai=gv('Tpai'),Tpao=gv('Tpao');
   const Tsai=gv('Tsai'),Tsao=gv('Tsao'),Fsa=gv('Fsa'),Fpa=gv('Fpa');
-  const Cba=gv('Cba'),Cfa=gv('Cfa'),Pfa=gv('Pfa'),Pba=gv('Pba');
-  const Lrad=gv('Lrad') || 1.2;
-  const Cp=30.6, CVc=8077.8, CVco=2415, Mwv=0.0166;
-  const CO2in=gv('CO2in'), CO2out=gv('CO2out'), COoutp=(COout/1000000)*100;
+  const Cba=gv('Cba'),Cfa=gv('Cfa');
+  const Pfa=gv('Pfa') || 80, Pba=gv('Pba') || 20;   // workbook's fixed fly/bottom ash split (0.8 / 0.2)
+  const Lrad=gv('Lrad') || 1.09;          // workbook fixes Radiation & Unaccounted Loss at 1.09% (D41/E41)
+  const Trad=gv('Trad') || 35;            // design/reference ambient air temp (D27/E27, fixed 35°C)
+  const Cp=30.6, CVc=8077.8, Mwv=0.0166;
+  const COoutp=(COout/1000000)*100;       // convert ppm -> % (workbook's CO term is a %)
 
-  // Ultimate analysis
-  const FcDc=FC/(1-(1.1*A/100)-M/100), VmDf=100-FcDc;
-  const Cdf=FcDc+0.9*(VmDf-14), Hdf=VmDf*((7.35/(VmDf+10))-0.013);
-  const Ndf=2.1-(0.012*VmDf), k=(VM+FC)/(VmDf+FcDc);
-  const Ca=Cdf*k, H=Hdf*k, N=Ndf*k, O=100-Ca-S-H-M-N-A;
+  // Ultimate analysis — empirical regression from Proximate Analysis (AFB),
+  // matching Efficiency overall!D11:D15 exactly.
+  const Ca=0.97*FC+0.7*(VM+0.1*A)-M*(0.6-0.01*M);
+  const H =0.036*FC+0.086*(VM-0.1*A)-0.0035*M*M*(1-0.02*M);
+  const N =2.1-0.02*VM;
+  const O =100-M-A-Ca-H-S-N;
 
-  // Air flow
-  const Fta=Fsa+Fpa, Rsa=Fsa/Fta, Rpa=Fpa/Fta;
-  const Trai=Tsai*Rsa+Tpai*Rpa;
+  // Reference/ambient air temp = SA-inlet temp reading directly (no PA blend) — matches D28/E28.
+  const Trai=Tsai;
 
-  // Ash & carbon
-  const Cash=Pfa/100*Cfa+Pba/100*Cba, U=A/100*Cash/(100-Cash);
+  // CO2 at APH outlet from the workbook's O2-based relation (D17='18.5-O2out').
+  const CO2in=19.3-O2in;   // kept for the design-correction branch below (unchanged there)
+  const CO2out=18.5-O2out;
   const N2out=100-(O2out+CO2out+COoutp);
 
-  // Air calculations
+  // Ash & carbon — unburnt-in-ash uses the fixed 20% bottom / 80% fly split.
+  const Cash=Pfa/100*Cfa+Pba/100*Cba, U=A/100*Cash/(100-Cash);
+
+  // Air Heater Leakage & corrected APH-outlet gas temperature (D23:D25).
+  const AL=(O2out-O2in)/(21-O2out)*0.9*100;
+  const Tc0=(AL*0.24*(Tgo-Trai))/(100*0.13286)+Tgo;
+  const Tgc=(Trad*(Tgi-Tc0)+Tgi*(Tc0-Trai))/(Tgi-Trai);
+  const dT=Tgc-Trad;
+
+  // Theoretical Air Requirement & Actual Air Supplied (D32:D35).
+  const TAR=((11.6*Ca)+(34.8*(H-O/8))+(4.35*S))/100;
+  const EA=O2out/(21-O2out)*100;
+  const AAS=(1+EA/100)*TAR;
+  const MassDFG=(Ca/100)*44/12+(N/100)+AAS*77/100+(AAS-TAR)*23/100;
+
+  // Losses L1..L7 (D36:D42) — kept under the app's existing Ldg/Luc/Lmf/Lhf/Lco/Lma/Lrad names.
+  const Ldg=MassDFG*0.24*dT/GCV*100;                              // L1 Dry Flue Gas
+  const Lhf=9*(H/100)*(584+0.45*dT)/GCV*100;                      // L2 Hydrogen in Fuel
+  const Lmf=(M/100)*(584+0.45*dT)/GCV*100;                        // L3 Moisture in Fuel
+  const Lma=AAS*0.01765*0.45*dT/GCV*100;                          // L4 Moisture in Air
+  const Lco=(CO2out+COoutp)>0 ? (COoutp*Ca/100/(COoutp+CO2out))*5744/GCV*100 : 0; // L5 CO
+  const Luc=((A*Pba/100*Cba)/(100*(100-Cba))+(A*Pfa/100*Cfa)/(100*(100-Cfa)))*8084*100/GCV; // L7 Unburnt combustibles
+  const BoilerEff=100-(Ldg+Lhf+Lmf+Lma+Lco+Lrad+Luc);
+
+  // Kept for the "Intermediate Values" panel and the design-correction branch below.
   const Sa=(2.66*(Ca-U*100)+7.937*H+0.996*S-O)/23.2;
   const Ea=1+(O2out-COoutp/2)/(0.2682*N2out-(O2out-COoutp));
   const Ma=Sa*Ea*Mwv;
-
-  // Heat
   const Wd=(Ca+S/2.67-100*U)/(12*CO2out);
   const Sh=Wd*Cp*(Tgo-Trai), Sw=1.88*(Tgo-25)+2442+4.2*(25-Trai);
+  const Tgnl=Tc0;
 
-  // Test losses
-  const Ldg=Sh*100/(GCV*4.186);
-  const Luc=U*CVc*100/GCV;
-  const Lmf=Sw*M/(GCV*4.186);
-  const Lhf=9*H*Sw/(GCV*4.186);
-  const Lco=COoutp*7*CVco*(Ca-100*U)/3/(CO2out+COoutp)/GCV;
-  const Lma=Ma*1.88*(Tgo-Trai)*100/(GCV*4.186);
-  const BoilerEff=100-(Ldg+Luc+Lmf+Lhf+Lco+Lma+Lrad);
-
-  // Design conditions
+  // Design conditions (separate "correct-to-design-coal" branch, unrelated to
+  // the workbook's Corrected column — see comment on BoilerEffCorr below).
   const Cd=gv('Cd'),Sd=gv('Sd'),Hd=gv('Hd'),Od=gv('Od');
-  const Ad2=gv('Ad2'),GCVd=gv('GCVd'),Trad=gv('Trad'),Mwvd=gv('Mwvd');
+  const Ad2=gv('Ad2'),GCVd=gv('GCVd'),Mwvd=gv('Mwvd');
   const Md=gv('Md2');
+  const CVco=2415;
 
   // Corrected gas temp
-  const AL=(CO2in-CO2out)*0.9*100/CO2out;
-  const Tgnl=((AL*Cp*(Tgo-Trai))/(100*Cp))+Tgo;
-  const Tgc=(Trad*(Tgi-Tgo)+Tgi*(Tgo-Trai))/(Tgi-Trai);
+  const ALd=(CO2in-CO2out)*0.9*100/CO2out;
+  const Tgcd=(Trad*(Tgi-Tgo)+Tgi*(Tgo-Trai))/(Tgi-Trai);
 
   // Corrected losses
   const Wdc=(Cd+Sd/2.67-100*U)/(12*CO2out);
-  const Shc=Wdc*Cp*(Tgc-Trad);
+  const Shc=Wdc*Cp*(Tgcd-Trad);
   const Ldgc=Shc*100/(GCVd*4.186);
 
   const Kc=Math.exp(0.225*Cd/Hd)-Math.exp(0.225*Ca/H);
   const V_corr=(gv('VMd')<17)?0.013*(Ad2*GCV/(A*GCVd))*Kc:0;
   const Lucc=Luc*((Ad2*GCV)/(A*GCVd))+V_corr;
 
-  const Swd=1.88*(Tgc-25)+2442+4.2*(25-Trad);
+  const Swd=1.88*(Tgcd-25)+2442+4.2*(25-Trad);
   const Lmfc=Swd*Md/(GCVd*4.186);
   const Lhfc=9*Hd*Swd/(GCVd*4.186);
   const Lcoc=COoutp*7*CVco*(Cd-100*U)/3/(CO2out+COoutp)/GCVd;
@@ -515,15 +542,15 @@ function runCalculation(rawInputs) {
   const Sad=(2.66*(Cd-U*100)+7.937*Hd+0.996*Sd-Od)/23.2;
   const Ead=1+(O2out-COoutp/2)/(0.2682*N2out-(O2out-COoutp));
   const Mad=Sad*Ead*Mwvd;
-  const Lmac=Mad*1.88*(Tgc-Trad)*100/(GCVd*4.186);
+  const Lmac=Mad*1.88*(Tgcd-Trad)*100/(GCVd*4.186);
 
   const BoilerEffCorr=100-(Ldgc+Lucc+Lmfc+Lhfc+Lcoc+Lmac+Lrad);
 
   return {
-    CO2in,CO2out,COoutp,Trai,Cash,U,Fta,Rsa,Rpa,
+    CO2in,CO2out,COoutp,Trai,Cash,U,
     N2out,Sa,Ea,Ma,Wd,Sh,Sw,
     Ldg,Luc,Lmf,Lhf,Lco,Lma,Lrad,BoilerEff,
-    AL,Tgnl,Tgc,Ldgc,Lucc,Lmfc,Lhfc,Lcoc,Lmac,BoilerEffCorr,
+    AL,Tgnl,Tgc,ALd,Tgcd,Ldgc,Lucc,Lmfc,Lhfc,Lcoc,Lmac,BoilerEffCorr,
     inputs: INPUT_IDS.map(id => ({ id, label: INPUT_LABELS[id] || id, value: inputs[id] })),
   };
 }
@@ -611,7 +638,7 @@ function renderOutput(r) {
     <div class="kpi-card kpi-red" style="grid-column:span 2;">
       <div class="kpi-label">Radiation &amp; Unaccounted Loss</div>
       <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
-        <input type="number" id="Lrad" value="${r.Lrad||1.2}" oninput="recalculate()"
+        <input type="number" id="Lrad" value="${r.Lrad||1.09}" oninput="recalculate()"
           style="background:var(--bg);border:1px solid var(--accent);border-radius:6px;padding:6px 10px;
                  font-family:'JetBrains Mono',monospace;font-size:24px;color:var(--text-bright);width:120px;outline:none;"/>
         <span style="font-size:14px;color:var(--muted);font-family:'JetBrains Mono',monospace;">%</span>
