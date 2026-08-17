@@ -1321,8 +1321,32 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
             unmatched_highlighted, dated_rows)
 
 
+# Hard physical bounds for fields whose real-world value can never fall
+# outside a known range, no matter how a header got matched to them or
+# what the sheet's own numbers say — a backstop against a bad match
+# silently producing a nonsense average that then poisons every formula
+# downstream (e.g. BEE-2 Indirect's EA = O2fg/(21-O2fg)*100 divides by a
+# term that goes negative, and stays negative, the moment O2fg is fed
+# anything at or above 21 — which is exactly what happened with a "SOX IN
+# FLUE GAS" column getting ML-matched onto O2fg with an average of ~1794:
+# EA/AAS/m all went negative, several losses went negative with them, and
+# Boiler Efficiency came out above 100%). O2/CO2 are physically capped by
+# air's own composition (~21% O2, ~20% CO2 is already an extreme flue-gas
+# reading); CO is generous at up to 5% (50,000 ppm) since some sheets
+# report it in ppm and some in %, and this only needs to catch clearly
+# impossible values, not fine-tune plausible ones.
+PHYSICAL_RANGE_FIELDS = {
+    'O2fg': (0, 21), 'O2in': (0, 21), 'O2out': (0, 21),
+    'CO2fg': (0, 21), 'CO2in': (0, 21), 'CO2out': (0, 21),
+    'COfg': (0, 50000), 'COin': (0, 50000), 'COout': (0, 50000),
+}
+
+
 def _finalize_field_values(field_values):
-    """Average collected numeric readings per field; build raw_rows + summary."""
+    """Average collected numeric readings per field; build raw_rows + summary.
+    Drops any field whose averaged value falls outside PHYSICAL_RANGE_FIELDS
+    for it — see the comment above — rather than returning it as a
+    confidently "detected" value that's actually impossible."""
     extracted = {}
     raw_rows = []
     sheet_summary = {}
@@ -1330,6 +1354,9 @@ def _finalize_field_values(field_values):
         if not vals:
             continue
         avg = statistics.mean(vals)
+        bounds = PHYSICAL_RANGE_FIELDS.get(fid)
+        if bounds and not (bounds[0] <= avg <= bounds[1]):
+            continue
         extracted[fid] = avg
         sheet_summary[fid] = {'count': len(vals), 'values': vals[:50], 'average': avg}
         raw_rows.append({

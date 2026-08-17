@@ -913,10 +913,29 @@ NON_FIELD_HEADERS = {
     'value', 'reading', 'amount', 'data', 'result', 'figure', 'qty', 'quantity',
 }
 
+# Tokens that are unambiguous non-field markers even when they only appear
+# as ONE WORD inside a longer header (unlike NON_FIELD_HEADERS above, which
+# is only ever checked as an exact *whole-header* match). Real plant tags
+# almost never report SOx/NOx bare on their own — they show up as e.g.
+# "SOX IN FLUE GAS", "SOX FGD I/L", "NOX EMISSION" — and neither CENPEEP
+# nor BEE has a field for either. Left unguarded, the ML classifier's
+# character-n-gram similarity treats "SOX IN FLUE GAS" as close to "O2 IN
+# FLUE GAS" / "OXYGEN IN FLUE GAS" (shared "OX" and "IN FLUE GAS"
+# substrings) and confidently mismaps it onto O2fg (seen: 0.83 confidence,
+# on a SOx reading in the hundreds/thousands of ppm — nowhere near a
+# physically valid 0-21% O2 figure). That silently poisons every
+# downstream formula that divides by (21 - O2fg), e.g. BEE-2 Indirect's
+# excess-air step, and can push the final Boiler Efficiency above 100%.
+NON_FIELD_TOKENS = {'sox', 'nox'}
+
 
 def is_non_field_header(text):
-    """True if text is a known structural/non-data column header."""
+    """True if text is a known structural/non-data column header, or
+    contains one of the unambiguous non-field tokens below anywhere in it
+    (not just as the whole header string — see NON_FIELD_TOKENS)."""
     norm = str(text).strip().lower()
     norm = norm.replace('.', '').replace('-', ' ').strip()
     norm = ' '.join(norm.split())
-    return norm in NON_FIELD_HEADERS
+    if norm in NON_FIELD_HEADERS:
+        return True
+    return bool(set(norm.split()) & NON_FIELD_TOKENS)
