@@ -84,7 +84,19 @@ upload_bp = Blueprint('upload', __name__)
 # ─── Chunking config ───────────────────────────────────────────────────────────
 CHUNK_ROWS = 300          # rows processed per chunk for large sheets
 LARGE_SHEET_ROW_THRESHOLD = 500   # sheets bigger than this use chunked streaming
-HEADER_SCAN_ROWS = 5      # how many leading rows we scan to find the header row
+# How many leading rows we scan to find the header row. Real plant exports
+# often stack a report title / merged-cell banner row (and sometimes a
+# blank spacer row above that) before the actual column-header row -- e.g.
+# 4 blank rows, then a "<Sheet> Report" title row, then the header row on
+# the 6th physical row. 5 was tight enough that a sheet with just one title
+# row on top of the usual blank padding pushed its header row one row past
+# the scan window, so the header was never even considered as a candidate
+# and the whole sheet fell through to "unrecognized" (see the Coal & Ash
+# Analysis sheet case: 4 blank rows + 1 title row put the header at row
+# index 5, outside rows[:5]). Widened to 10 to comfortably cover that
+# pattern; _find_header_row still only keeps rows that look header-shaped,
+# so the wider window doesn't make it more likely to pick a wrong row.
+HEADER_SCAN_ROWS = 10
 
 # ─── Symbol → CENPEEP field-id map ────────────────────────────────────────────
 SYM_MAP = {

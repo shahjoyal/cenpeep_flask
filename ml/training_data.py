@@ -492,6 +492,14 @@ TRAINING_EXAMPLES = [
     ("Boiler side A SA flow", "Fsa"), ("Boiler side B SA flow", "Fsa"),
     ("Total Secondary Air Flow", "Fsa"), ("SA FLOW TO FURNACE - L", "Fsa"),
     ("SA FLOW TO FURNACE - R", "Fsa"), ("SA FLOW TO FURNACE", "Fsa"),
+    # "SEC" abbreviation for "Secondary" -- real hourly-export header form.
+    # Without an explicit example, "TOTAL SEC AIR FLOW" was scoring higher
+    # char n-gram similarity against the OUT_OF_SCOPE "Total Air Flow"/
+    # "TOTAL AIR FLOW" examples above (shares "TOTAL ... AIR FLOW") than
+    # against any real Fsa example, since none of the existing Fsa examples
+    # use the "SEC" abbreviation or the "TOTAL ... FLOW" word order together
+    # -- so it was landing as unmapped/out-of-scope instead of Fsa.
+    ("TOTAL SEC AIR FLOW", "Fsa"), ("SEC AIR FLOW", "Fsa"), ("TOT SEC AIR FLOW", "Fsa"),
     # "SA ... FLOW COMP" (compensated flow reading) -- real DCS-tag form.
     # Explicit anchor needed: after adding the new Ffw "MAIN STM FLOW COMP"
     # examples (for the "STM"-abbreviation fix), this started drifting onto
