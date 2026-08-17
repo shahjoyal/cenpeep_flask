@@ -112,6 +112,17 @@ SYM_MAP = {
     # Design — ultimate
     'Cd': 'Cd', 'Sd': 'Sd', 'Hd': 'Hd', 'Nd': 'Nd', 'Od': 'Od',
     'Gcvd': 'GCVd', 'GCVd': 'GCVd', 'Trad': 'Trad', 'Mwvd': 'Mwvd',
+    # BEE (BEE-2 Indirect / heat-loss method, public/tab3.html +
+    # script3.js) field ids that don't already exist as a CENPEEP
+    # symbol. M/A/GCV/Cba/Cfa are the SAME physical quantities BEE uses
+    # (coal moisture/ash/GCV, unburnt carbon in bottom/fly ash) and
+    # already resolve via the entries above, so they're intentionally
+    # not repeated here.
+    'O2fg': 'O2fg', 'COfg': 'COfg', 'CO2fg': 'CO2fg', 'Tfg': 'Tfg',
+    'Tamb': 'Tamb', 'Hum': 'Hum',
+    'C': 'C', 'H2': 'H2', 'N2': 'N2', 'O2f': 'O2f',
+    'GCVba': 'GCVba', 'GCVfa': 'GCVfa',
+    'BL': 'BL', 'SP': 'SP',
 }
 
 # Also accept case-insensitive & common variants
@@ -150,6 +161,13 @@ SYM_MAP_LOWER = {k.lower(): v for k, v in SYM_MAP.items()}
 NEVER_AUTO_DETECT = {
     'Pfa', 'Pba', 'Sd', 'GCVd', 'Trad', 'Mwvd', 'Md', 'Ad', 'VMd', 'FCd',
     'S', 'COin', 'Tref',
+    # L6 (BEE-2 Indirect — Radiation & Unaccounted Losses) carries the
+    # same "MANUAL" tag on public/tab3.html that every other field in
+    # this set carries on its own calculator form — it's an assumed/
+    # judgement figure (typically 1-2%), never a column a plant sheet
+    # reports, so it gets the same never-auto-detect / never-flagged-
+    # missing treatment as the rest of this set.
+    'L6',
 }
 
 # ─── Full list of CENPEEP input fields the calculator needs ──────────────────
@@ -193,6 +211,15 @@ FIELD_LABELS = {
     'Od': 'Oxygen \u2014 Design', 'Ad2': 'Ash \u2014 Design (Ultimate)',
     'GCVd': 'GCV \u2014 Design', 'Trad': 'Ref. Air Temp \u2014 Design',
     'Mwvd': 'Moisture in Air \u2014 Design',
+    # BEE (BEE-2 Indirect) labels, taken verbatim from public/tab3.html /
+    # script3.js's INPUT_LABELS. M/A/GCV/Cba/Cfa already have labels above
+    # and aren't repeated.
+    'O2fg': 'O2 in Flue Gas', 'COfg': 'CO in Flue Gas', 'CO2fg': 'CO2 in Flue Gas',
+    'Tfg': 'Avg. Flue Gas Temperature', 'Tamb': 'Ambient Temperature',
+    'Hum': 'Humidity in Ambient Air',
+    'C': 'Carbon', 'H2': 'Hydrogen', 'N2': 'Nitrogen', 'O2f': 'Oxygen',
+    'GCVba': 'GCV of Bottom Ash', 'GCVfa': 'GCV of Fly Ash',
+    'BL': 'Boiler Load', 'SP': 'Steam Pressure',
 }
 
 # Human-readable label guesses for unknown-layout headers
@@ -251,6 +278,33 @@ LABEL_ALIASES = {
     # the two now lives in _match_tag_patterns() below (keyed on whether
     # "total" appears in the header), since both phrasings otherwise look
     # identical.
+
+    # ── BEE (BEE-2 Indirect) exact-label aliases ──────────────────────────
+    # Taken verbatim from public/tab3.html's own field-name text (plus a
+    # couple of obvious variants) so a sheet that echoes the calculator's
+    # own wording — or a common lab-report phrasing — resolves via the
+    # fast exact-match path instead of relying solely on the ML fallback.
+    # Kept narrowly scoped (no bare "oxygen"/"o2" collisions with the
+    # APH-in/out O2in/O2out family above, which always require an in/out
+    # qualifier) so nothing here can steal a column from an existing
+    # CENPEEP alias.
+    'o2 in flue gas': 'O2fg', 'oxygen in flue gas': 'O2fg',
+    'o2 flue gas': 'O2fg', 'flue gas o2': 'O2fg', 'o2fg': 'O2fg',
+    'co in flue gas': 'COfg', 'carbon monoxide in flue gas': 'COfg',
+    'co flue gas': 'COfg', 'flue gas co': 'COfg', 'cofg': 'COfg',
+    'co2 in flue gas': 'CO2fg', 'carbon dioxide in flue gas': 'CO2fg',
+    'co2 flue gas': 'CO2fg', 'flue gas co2': 'CO2fg', 'co2fg': 'CO2fg',
+    'average flue gas temperature': 'Tfg', 'avg flue gas temperature': 'Tfg',
+    'flue gas temperature': 'Tfg', 'flue gas temp': 'Tfg', 'fg temperature': 'Tfg',
+    'ambient temperature': 'Tamb', 'atmospheric temperature': 'Tamb',
+    'ambient temp': 'Tamb', 'atmospheric air temperature': 'Tamb',
+    'humidity in ambient air': 'Hum', 'humidity': 'Hum',
+    'ambient humidity': 'Hum', 'relative humidity': 'Hum',
+    'carbon': 'C', 'hydrogen': 'H2', 'nitrogen': 'N2', 'oxygen': 'O2f',
+    'ash content': 'A', 'gcv of coal': 'GCV',
+    'gcv of bottom ash': 'GCVba', 'gcv bottom ash': 'GCVba',
+    'gcv of fly ash': 'GCVfa', 'gcv fly ash': 'GCVfa',
+    'boiler load': 'BL', 'steam pressure': 'SP',
 }
 
 
@@ -612,8 +666,11 @@ def _match_tag_patterns(norm):
 
 # Field ids that are always a TEMPERATURE reading -- never legitimately a
 # pressure/draft reading, no matter how a header's wording happens to
-# score against the ML training set.
-TEMPERATURE_ONLY_FIELDS = {'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao'}
+# score against the ML training set. Tfg/Tamb (BEE-2 Indirect's flue gas /
+# ambient temperature) get the same guard as the CENPEEP APH duct
+# temperatures for the same reason -- both share "FG"/"TEMP" wording with
+# real draft-pressure tags.
+TEMPERATURE_ONLY_FIELDS = {'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Tfg', 'Tamb'}
 
 # Unit tokens that mark a header as a PRESSURE/DRAFT reading (mmWC =
 # millimeters water column, KSC/KG per CM2 = kg per sq cm) -- real plant
@@ -1456,6 +1513,108 @@ def _parse_generic_row_layout(rows):
     return extracted, raw_rows, summary, col_meta, max_readings, is_calculated_only
 
 
+# ─── Strategy 4: Plain label/value form layout (no header row at all) ─────────
+# The reference "BEE-2 (Efficiency-Indirect).xlsx" sheet (and, in general, any
+# hand-built single-boiler "form" sheet, as opposed to a multi-column
+# log/DCS-export table) has NO anchor/header row for Strategies 1-3 to find:
+# col0 is a plain-English label ("O2 in Flue Gas"), col1 is the numeric value,
+# and an optional col2 is a unit string ("%") - one parameter per row, top to
+# bottom, starting from row 1. There's no "Symbol"/"Particulars"/"UOM" header
+# cell anywhere (Strategy 3 needs one), and it's not a table of columns with
+# a header row above data rows (Strategy 2's shape) - so every existing
+# strategy correctly finds nothing on it, and uploads silently detected 0
+# fields.
+#
+# This only activates once Strategies 1-3 have all found nothing (see
+# _parse_sheet_rows / _parse_sheet_chunked), so it can't change how any
+# already-working sheet is parsed.
+#
+# Deliberately uses EXACT alias/symbol matching only (_sym_to_field +
+# LABEL_ALIASES) - NOT the fuzzy _match_tag_patterns()/ML fallback used for
+# short column-header text. Row labels here are full sentences, and the
+# reference sheet's own "Solution" section restates several of these same
+# words in unrelated derived-value rows, e.g. "Heat loss due to unburnt in
+# fly ash" (a kcal/kg figure) or "% Heat loss due to unburnts in bottom ash
+# (L8)" (a completely different % figure). _match_tag_patterns' loose
+# {'fly','ash'} <= tokens / {'bottom','ash'} <= tokens subset check - fine
+# for terse column headers - would false-positive-match both of those onto
+# Cfa/Cba and corrupt their averaged value with an unrelated number. Exact
+# matching only fires on the sheet's actual parameter-label rows (which are
+# also duplicated verbatim in the Solution section for a couple of fields -
+# harmless, since those duplicates repeat the same value and just average
+# in cleanly) and skips every derived/step-by-step row safely.
+LABEL_VALUE_LAYOUT_MIN_FIELDS = 5
+
+
+def _label_to_field_exact(label):
+    """
+    Same as _label_to_field() minus the fuzzy _match_tag_patterns() fallback
+    - see the "Strategy 4" note above for why that fallback isn't safe to
+    use against full-sentence row labels.
+    """
+    norm = re.sub(r'[^a-z0-9 ]', '', str(label).lower().strip())
+    fid = _sym_to_field(label.strip())
+    if fid:
+        return fid
+    return LABEL_ALIASES.get(norm)
+
+
+def _parse_label_value_layout(rows):
+    """
+    Strategy 4 - see module note above. Every row is a candidate: if col0's
+    text exactly matches a known field label/symbol, the first numeric cell
+    elsewhere in that row is taken as its value (any non-numeric cell, e.g.
+    a units string or a formula-description string, is skipped over).
+    Multiple rows resolving to the same field id are averaged (same as
+    every other strategy) - which is what makes the reference sheet's own
+    "Solution" section safely restating a couple of these labels verbatim
+    (same value) a no-op rather than a conflict.
+    Requires at least LABEL_VALUE_LAYOUT_MIN_FIELDS distinct fields matched
+    before "activating", so a sheet that only incidentally has one label-
+    like row (e.g. a stray "Load:" cell in an unrelated table) isn't
+    mistaken for this layout.
+    Returns (extracted_dict, raw_rows_list, sheet_summary, col_meta,
+             matched_row_count).
+    """
+    field_values = {}
+    field_label_text = {}
+    matched_rows = 0
+    for row in rows:
+        if len(row) < 2:
+            continue
+        label = row[0]
+        if not isinstance(label, str) or not label.strip():
+            continue
+        field_id = _label_to_field_exact(label)
+        if not field_id or field_id in NEVER_AUTO_DETECT:
+            continue
+        num = None
+        for cell in row[1:]:
+            num = _to_num(cell)
+            if num is not None:
+                break
+        if num is None:
+            continue
+        field_values.setdefault(field_id, []).append(num)
+        field_label_text.setdefault(field_id, label.strip())
+        matched_rows += 1
+
+    if matched_rows < LABEL_VALUE_LAYOUT_MIN_FIELDS:
+        return {}, [], {}, {}, 0
+
+    extracted, raw_rows, summary = _finalize_field_values(field_values)
+    col_meta = {
+        fid: {
+            'fieldId': fid,
+            'header': field_label_text.get(fid, fid),
+            'source': 'rule',
+            'confidence': 1.0,
+        }
+        for fid in extracted
+    }
+    return extracted, raw_rows, summary, col_meta, matched_rows
+
+
 # ─── Per-sheet parser (tries all strategies) ───────────────────────────────────
 def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
     """
@@ -1527,6 +1686,22 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
             'dataRowCount': data_row_count,
             'unmatchedHighlighted': unmatched_hi,
             'datedRows': dated_rows2,
+        }
+
+    # Strategy 4: plain label/value form layout, no header row at all -
+    # only reached once every other strategy has found nothing.
+    ext4, raw4, summary4, col_meta4, matched_rows4 = _parse_label_value_layout(rows)
+    if ext4:
+        return {
+            'sheetName': sheet_name,
+            'strategy': 'label_value_layout',
+            'extracted': ext4,
+            'rawRows': raw4,
+            'summary': summary4,
+            'columns': col_meta4,
+            'dataRowCount': matched_rows4,
+            'unmatchedHighlighted': unmatched_hi,
+            'datedRows': [],
         }
 
     return {
@@ -1682,6 +1857,25 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
         }
 
     if not col_map:
+        # Strategy 4: plain label/value form layout, no header row at all -
+        # checked against the same buffered leading rows as Strategies 1/3
+        # above (see _parse_sheet_rows for why this shape is always a small
+        # parameter table, never one of the giant sheets chunking exists
+        # for, so checking only the buffered rows is safe).
+        ext4, raw4, summary4, col_meta4, matched_rows4 = _parse_label_value_layout(cenpeep_check_rows)
+        if ext4:
+            return {
+                'sheetName': sheet_name,
+                'strategy': 'label_value_layout',
+                'extracted': ext4,
+                'rawRows': raw4,
+                'summary': summary4,
+                'columns': col_meta4,
+                'rowsScanned': row_count,
+                'dataRowCount': matched_rows4,
+                'unmatchedHighlighted': unmatched_hi,
+                'datedRows': [],
+            }
         return {
             'sheetName': sheet_name,
             'strategy': 'unrecognized',

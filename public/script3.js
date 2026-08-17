@@ -6,15 +6,14 @@
    label so the mapping back to the workbook is obvious; formulas that
    correspond to a specific cell say so in a comment (e.g. "// B34").
 
-   Field detection (Excel upload → auto-populate) is left wired up the
-   same generic way CENPEEP's script.js does it, but ALL_FIELD_IDS now
-   lists BEE's own field ids instead of CENPEEP's. The actual server-
-   side detection rules/training data for these ids are NOT part of
-   this change (nothing in routes/upload.py, ml/field_classifier.py,
-   ml/training_data.py, or routes/basic_training_data.json was
-   touched) — until that's added, uploads will simply detect 0 BEE
-   fields, which is expected for now. Manual entry + Calculate is fully
-   live already.
+   Field detection (Excel upload → auto-populate) is wired up the same
+   generic way CENPEEP's script.js does it — ALL_FIELD_IDS lists BEE's
+   own field ids, and routes/upload.py has matching SYM_MAP/LABEL_ALIASES
+   entries for them. It also has a 4th parsing strategy (label_value_layout)
+   for the exact shape the reference "BEE-2 (Efficiency-Indirect).xlsx"
+   sheet uses — a plain label/value form with no header row at all — which
+   is what the first three CENPEEP-oriented strategies couldn't match.
+   Manual entry + Calculate is fully live already.
    ════════════════════════════════════════════════════════════════════ */
 
 // ── Tiny helpers ─────────────────────────────────────────────────────────────
@@ -338,14 +337,36 @@ function resetInputs() {
 // ── Excel upload → auto-populate (field detection) ───────────────────────────
 window._uploadedFilename = null;
 
-// Mirrors routes/upload.py's REQUIRED_FIELDS pattern used by CENPEEP, but
-// with BEE's own field ids. The backend doesn't know these ids yet (that's
-// a separate, later change to routes/upload.py / ml/field_classifier.py /
-// ml/training_data.py / routes/basic_training_data.json, deliberately left
-// untouched here) — so uploads will currently detect 0 fields for this tab.
-// The scaffolding is kept wired up so it "just works" once that lands,
-// without another pass over this file.
+// BEE's own field ids are now registered server-side too (SYM_MAP,
+// FIELD_LABELS, LABEL_ALIASES, and ml/training_data.py in routes/upload.py
+// / ml/ all know about O2fg, COfg, CO2fg, Tfg, Tamb, Hum, C, H2, N2, O2f,
+// GCVba, GCVfa, BL, SP — see the comments there. M/A/GCV/Cba/Cfa already
+// existed as CENPEEP ids for the exact same quantities, so uploads were
+// always able to fill those five; the fix registers the rest.
 const ALL_FIELD_IDS = INPUT_IDS.filter(id => !INFO_ONLY_IDS.includes(id));
+
+// Fields that are intentionally NEVER auto-detected from an upload (same
+// "MANUAL" intent as the tag on their form input) — excluded from the
+// "not detected — enter manually" callout below, since flagging them as
+// missing would just be noise for a field that isn't meant to come from a
+// file. L6 (Radiation & Unaccounted Losses) carries the MANUAL tag on
+// tab3.html itself; S (Sulphur) is treated as always-manual server-side
+// (routes/upload.py's NEVER_AUTO_DETECT) for every calculator, not just
+// this one, since lab-report sulphur figures aren't reliably a sheet
+// column.
+const MANUAL_FIELD_IDS = ['L6', 'S'];
+
+// The backend's `missingFields` response is scoped to CENPEEP's own
+// required-field list (routes/upload.py's REQUIRED_FIELDS) and doesn't
+// know BEE's field ids, so — same as CENPEEP not knowing BEE's ids would
+// be a mismatch either way — the "not detected" list here is computed
+// locally instead, straight from what this tab actually asked for
+// (ALL_FIELD_IDS) versus what the upload actually returned.
+function computeMissingFields(extracted) {
+  return ALL_FIELD_IDS
+    .filter(id => !MANUAL_FIELD_IDS.includes(id) && !(id in extracted))
+    .map(id => ({ id, label: INPUT_LABELS[id] || id }));
+}
 
 function initUpload() {
   const input = document.getElementById('upload-file-input');
@@ -386,11 +407,16 @@ function initUpload() {
         }
       }
 
-      const missingFieldsList = data.missingFields || [];
+      const missingFieldsList = computeMissingFields(extracted);
       for (const m of missingFieldsList) {
         const el = document.getElementById(m.id || m);
         if (el) el.classList.add('field-missing');
       }
+      // Overwrite the backend's CENPEEP-scoped missingFields with BEE's own
+      // locally-computed list so downloadFieldReport() (which reads
+      // window._uploadData.missingFields) reports against the right field
+      // set too, instead of CENPEEP's.
+      data.missingFields = missingFieldsList;
 
       window._uploadedFilename = data.filename;
       window._uploadData       = data;
@@ -405,6 +431,8 @@ function initUpload() {
         raw_tabular_ml:          'raw data + AI field detection',
         raw_tabular_chunked:     'large sheet, chunked',
         raw_tabular_ml_chunked:  'large sheet, chunked + AI field detection',
+        generic_row_layout:      'labeled-row layout',
+        label_value_layout:      'label/value form layout',
         unrecognized:            'no fields found',
       };
       const selectedSr = sheetResults.find(sr => sr.sheetName === primarySheet);

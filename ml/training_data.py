@@ -536,6 +536,79 @@ TRAINING_EXAMPLES = [
     ("Design GCV", "GCVd"), ("GCV Design", "GCVd"), ("Design Calorific Value", "GCVd"),
     ("Design Reference Air Temp", "Trad"), ("Ref Air Temp Design", "Trad"),
     ("Design Moisture in Air", "Mwvd"), ("Moisture in Air Design", "Mwvd"),
+
+    # ══ BEE (BEE-2 Indirect / heat-loss method) — public/tab3.html +
+    #    script3.js. M/A/GCV/Cba/Cfa are the SAME quantities CENPEEP
+    #    already trains above (coal moisture/ash/GCV, unburnt carbon in
+    #    bottom/fly ash) so they aren't repeated here — only the field ids
+    #    that don't already exist get their own examples. ══════════════
+
+    # ── O2fg — O2 in Flue Gas ───────────────────────────────────────────────
+    ("O2 in Flue Gas", "O2fg"), ("Oxygen in Flue Gas", "O2fg"),
+    ("O2 in Flue Gas %", "O2fg"), ("Flue Gas O2", "O2fg"), ("Flue Gas O2 %", "O2fg"),
+    ("O2 %", "O2fg"), ("O2 Percentage", "O2fg"), ("Excess O2", "O2fg"),
+    ("O2 in Flue Gas (%)", "O2fg"),
+
+    # ── COfg — CO in Flue Gas ───────────────────────────────────────────────
+    ("CO in Flue Gas", "COfg"), ("Carbon Monoxide in Flue Gas", "COfg"),
+    ("Flue Gas CO", "COfg"), ("Flue Gas CO ppm", "COfg"), ("CO ppm", "COfg"),
+    ("CO in Flue Gas (ppm)", "COfg"), ("CO Content", "COfg"),
+
+    # ── CO2fg — CO2 in Flue Gas ─────────────────────────────────────────────
+    ("CO2 in Flue Gas", "CO2fg"), ("Carbon Dioxide in Flue Gas", "CO2fg"),
+    ("Flue Gas CO2", "CO2fg"), ("Flue Gas CO2 %", "CO2fg"), ("CO2 %", "CO2fg"),
+    ("CO2 in Flue Gas (%)", "CO2fg"), ("CO2 Content", "CO2fg"),
+
+    # ── Tfg — Average Flue Gas Temperature ──────────────────────────────────
+    ("Average Flue Gas Temperature", "Tfg"), ("Avg Flue Gas Temperature", "Tfg"),
+    ("Flue Gas Temperature", "Tfg"), ("Flue Gas Temp", "Tfg"), ("FG Outlet Temp", "Tfg"),
+    ("Exit Flue Gas Temperature", "Tfg"), ("Boiler Exit Gas Temperature", "Tfg"),
+    ("Avg. Flue Gas Temperature", "Tfg"),
+
+    # ── Tamb — Ambient Temperature (BEE's own field; distinct from
+    #    CENPEEP's manual/design-only Tref above, so no shared example text
+    #    is used here — see LABEL_ALIASES for the exact-phrase rule match) ──
+    ("Atmospheric Temperature", "Tamb"), ("Ambient Temp", "Tamb"),
+    ("Site Ambient Temperature", "Tamb"), ("Amb Temp", "Tamb"),
+    ("Air Temperature", "Tamb"), ("Outside Air Temperature", "Tamb"),
+
+    # ── Hum — Humidity in Ambient Air ───────────────────────────────────────
+    ("Humidity in Ambient Air", "Hum"), ("Humidity", "Hum"),
+    ("Relative Humidity", "Hum"), ("Ambient Humidity", "Hum"),
+    ("Humidity kg per kg dry air", "Hum"), ("Moisture in Air", "Hum"),
+    ("Specific Humidity", "Hum"),
+
+    # ── C — Carbon (ultimate analysis, as-fired) ────────────────────────────
+    ("Carbon", "C"), ("Carbon %", "C"), ("Carbon Content", "C"),
+    ("Ultimate Carbon", "C"), ("Fixed Carbon Ultimate", "C"), ("C %", "C"),
+
+    # ── H2 — Hydrogen ────────────────────────────────────────────────────────
+    ("Hydrogen", "H2"), ("Hydrogen %", "H2"), ("H2 %", "H2"),
+    ("Ultimate Hydrogen", "H2"),
+
+    # ── N2 — Nitrogen ────────────────────────────────────────────────────────
+    ("Nitrogen", "N2"), ("Nitrogen %", "N2"), ("N2 %", "N2"),
+    ("Ultimate Nitrogen", "N2"),
+
+    # ── O2f — Oxygen (fuel ultimate analysis, distinct from O2fg's flue-gas
+    #    excess-air reading — the ML classifier already sees O2fg's very
+    #    different phrasing above, so bare "Oxygen %" here is unambiguous) ──
+    ("Oxygen", "O2f"), ("Oxygen %", "O2f"), ("O2 %  Fuel", "O2f"),
+    ("Ultimate Oxygen", "O2f"), ("Fuel Oxygen", "O2f"),
+
+    # ── GCVba — GCV of Bottom Ash ───────────────────────────────────────────
+    ("GCV of Bottom Ash", "GCVba"), ("GCV Bottom Ash", "GCVba"),
+    ("Bottom Ash GCV", "GCVba"), ("Calorific Value of Bottom Ash", "GCVba"),
+
+    # ── GCVfa — GCV of Fly Ash ──────────────────────────────────────────────
+    ("GCV of Fly Ash", "GCVfa"), ("GCV Fly Ash", "GCVfa"),
+    ("Fly Ash GCV", "GCVfa"), ("Calorific Value of Fly Ash", "GCVfa"),
+
+    # ── BL — Boiler Load (info-only) ────────────────────────────────────────
+    ("Boiler Load", "BL"), ("Boiler Load TPH", "BL"), ("Load TPH", "BL"),
+
+    # ── SP — Steam Pressure (info-only) ─────────────────────────────────────
+    ("Steam Pressure", "SP"), ("Main Steam Pressure", "SP"), ("SP kg per cm2", "SP"),
 ]
 
 
