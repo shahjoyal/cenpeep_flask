@@ -7,6 +7,17 @@
 const v    = id => { const el = document.getElementById(id); return el ? parseFloat(el.value) || 0 : 0; };
 const fmt  = (n, d=4) => (typeof n === 'number' && !isNaN(n)) ? n.toFixed(d) : '—';
 const fmt2 = n => fmt(n, 2);
+// Signed variant for delta values — always shows a leading + or −.
+const fmtSigned = (n, d=2) => (typeof n === 'number' && !isNaN(n)) ? (n >= 0 ? '+' : '') + n.toFixed(d) : '—';
+
+// "YYYY-MM-DD" -> "18 August 2026" (date month year), used everywhere a
+// date is shown on the Results tab (kpi cards, comparison table, CSV/PDF).
+function fmtDateDMY(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso + 'T00:00:00');
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+}
 
 // ── DB health pill ────────────────────────────────────────────────────────────
 async function checkDB() {
@@ -210,6 +221,7 @@ function initUpload() {
 // today's plain behavior — the whole file's overall average, one result.
 window._processes         = [];
 window._comparisonResults = null;
+window._gcvCorrection     = null;   // { target, source, targetTitle, sourceTitle } once "Apply GCV Correction" is clicked
 let   _processSeq = 0;
 
 function addProcess() {
@@ -575,6 +587,7 @@ function _averageFieldsInRange(start, end) {
 // ── Entry point wired to the "▶ Calculate Efficiency" button ────────────────
 function calculate() {
   const activeProcesses = window._processes.filter(p => p.start || p.end);
+  window._gcvCorrection = null;   // fresh Calculate — any prior correction no longer applies
 
   if (!activeProcesses.length) {
     // No date ranges chosen anywhere — exactly today's behavior.
@@ -693,7 +706,7 @@ function oRow(name, sym, val, uom) {
 
 // ── Render a side-by-side comparison of multiple date-range processes ───────
 const _COMPARISON_METRIC_ROWS = [
-  ['Date Range',                       p => `${p.start || '—'} → ${p.end || '—'}`],
+  ['Date Range',                       p => `${fmtDateDMY(p.start)} → ${fmtDateDMY(p.end)}`],
   ['Rows Used',                        p => String(p.rowCount)],
   ['Boiler Efficiency (%)',            p => fmt2(p.result.BoilerEff)],
   ['Boiler Efficiency Corrected (%)',  p => fmt2(p.result.BoilerEffCorr)],
@@ -708,23 +721,215 @@ const _COMPARISON_METRIC_ROWS = [
   ['CO₂ — APH Out (%)',                p => fmt2(p.result.CO2out)],
 ];
 
+// UI state for the two collapsible Results-tab sections — persists across
+// re-renders (Calculate, GCV correction toggle, etc.) until a fresh upload.
+window._uiState = window._uiState || { processInputsOpen: false, processComparisonOpen: false };
+function toggleResultsSection(key) {
+  window._uiState[key] = !window._uiState[key];
+  if (window._comparisonResults) renderComparison(window._comparisonResults);
+}
+
 function renderComparison(list) {
-  document.getElementById('kpi-area').innerHTML = list.map(p => `
+  const kpiCards = list.map(p => `
     <div class="kpi-card kpi-green">
-      <div class="kpi-label">${escapeHtml(p.title)}</div>
+      <div class="kpi-label">${escapeHtml(p.title)}${p.gcvCorrected ? ' <span class="cmp-badge">GCV corrected</span>' : ''}</div>
       <div class="kpi-value">${fmt2(p.result.BoilerEff)}<span class="kpi-unit">%</span></div>
-      <div class="kpi-sub">${p.start || '—'} → ${p.end || '—'} · ${p.rowCount} row${p.rowCount===1?'':'s'}</div>
+      <div class="kpi-sub">${fmtDateDMY(p.start)} → ${fmtDateDMY(p.end)} · ${p.rowCount} row${p.rowCount===1?'':'s'}</div>
     </div>`).join('');
 
-  const headerCells = list.map(p => `<th>${escapeHtml(p.title)}</th>`).join('');
+  // Delta Difference + the two correction buttons only make sense — and
+  // only appear — with exactly two processes on screen; all three sit in
+  // the same row as the Boiler Efficiency cards above.
+  const extras = (list.length === 2)
+    ? _renderDeltaCard(list[0], list[1]) + _renderCorrectionButtons()
+    : '';
+
+  document.getElementById('kpi-area').innerHTML = kpiCards + extras;
+
+  document.getElementById('output-tables').innerHTML = `
+    ${_renderProcessInputsSection(list)}
+    ${_renderProcessComparisonSection(list)}`;
+}
+
+// ── Delta Difference — Process 2's Boiler Efficiency minus Process 1's.
+//    Always shown for a two-process comparison (not gated behind clicking
+//    a correction) — can be negative or positive, colored accordingly. If a
+//    GCV correction has been applied, the processes' own results already
+//    reflect it, so this updates automatically. ──────────────────────────
+function _renderDeltaCard(p1, p2) {
+  const delta = p2.result.BoilerEff - p1.result.BoilerEff;
+  const cls   = delta >= 0 ? 'kpi-green' : 'kpi-red';
+  return `
+    <div class="kpi-card ${cls}">
+      <div class="kpi-label">Delta Difference</div>
+      <div class="kpi-value">${fmtSigned(delta)}<span class="kpi-unit">%</span></div>
+      <div class="kpi-sub">${escapeHtml(p2.title)} − ${escapeHtml(p1.title)} (Boiler Eff.)</div>
+    </div>`;
+}
+
+// ── "Apply GCV / APH Correction" — rendered as clickable cards in the same
+//    row as the Boiler Efficiency + Delta Difference cards. ─────────────────
+function _renderCorrectionButtons() {
+  const corr = window._gcvCorrection;
+  return `
+    <button type="button" class="kpi-card kpi-action${corr ? ' applied' : ''}" onclick="applyGCVCorrection()">
+      <div class="kpi-label">GCV Correction${corr ? ' <span class="cmp-badge">Applied</span>' : ''}</div>
+      <div class="kpi-value kpi-action-value">${corr ? 'Click to undo' : 'Apply GCV Correction'}</div>
+      <div class="kpi-sub">${corr
+        ? `"${escapeHtml(corr.targetTitle)}" ← Proximate As-Fired from "${escapeHtml(corr.sourceTitle)}"`
+        : `Uses the later-dated process's Proximate As-Fired data for the earlier one.`}</div>
+    </button>
+    <button type="button" class="kpi-card kpi-action" onclick="applyAPHCorrection()">
+      <div class="kpi-label">APH Correction</div>
+      <div class="kpi-value kpi-action-value">Apply APH Correction</div>
+      <div class="kpi-sub">Coming soon.</div>
+    </button>`;
+}
+
+// ── GCV Correction ───────────────────────────────────────────────────────
+// Only meaningful with exactly two active processes. The process with the
+// LATER date "donates" its Proximate Analysis — As Fired readings
+// (Moisture, Ash, Volatile Matter, Fixed Carbon, GCV) to the process with
+// the EARLIER date; every other input of the earlier process is untouched,
+// and the later process's own data is untouched too. Both efficiencies are
+// then recomputed so the update is visible on both cards.
+const PROXIMATE_AS_FIRED_IDS = ['M', 'A', 'VM', 'FC', 'GCV'];
+
+// Best single date to sort a process by — start if set, else end.
+function _processDateKey(p) { return p.start || p.end || null; }
+
+function applyGCVCorrection() {
+  const list = window._comparisonResults;
+  if (!list || list.length !== 2) {
+    showToast('GCV correction needs exactly two active processes.', 'error');
+    return;
+  }
+  if (window._gcvCorrection) { undoGCVCorrection(); return; }
+
+  const [p0, p1] = list;
+  const k0 = _processDateKey(p0), k1 = _processDateKey(p1);
+  if (!k0 || !k1) {
+    showToast('Both processes need at least one date set to apply GCV correction.', 'error');
+    return;
+  }
+  if (k0 === k1) {
+    showToast('Both processes resolve to the same date — cannot tell which is later.', 'error');
+    return;
+  }
+  const later   = k1 > k0 ? p1 : p0;   // process whose date comes after
+  const earlier = k1 > k0 ? p0 : p1;   // process whose date comes before — gets corrected
+
+  const baseInputs          = collectInputsFromDOM();
+  const { avg: avgEarlier } = _averageFieldsInRange(earlier.start, earlier.end);
+  const { avg: avgLater   } = _averageFieldsInRange(later.start,   later.end);
+
+  // Earlier process: same as it was, except Proximate As-Fired comes from
+  // the later process (falling back to the shared form value if the log
+  // doesn't carry that field, same as the normal per-process averaging).
+  const correctedInputs = { ...baseInputs, ...avgEarlier };
+  PROXIMATE_AS_FIRED_IDS.forEach(id => {
+    correctedInputs[id] = (avgLater[id] !== undefined) ? avgLater[id] : baseInputs[id];
+  });
+
+  earlier._originalResult = earlier.result;         // keep the "without correction" result for the Delta card
+  earlier.result          = runCalculation(correctedInputs);
+  earlier.gcvCorrected    = true;
+
+  // Later process's data is untouched — re-run it anyway so both numbers
+  // on screen come from the same fresh calculation pass.
+  later.result = runCalculation({ ...baseInputs, ...avgLater });
+
+  window._gcvCorrection = { target: earlier, source: later, targetTitle: earlier.title, sourceTitle: later.title };
+
+  renderComparison(window._comparisonResults);
+  showToast(`GCV correction applied — "${earlier.title}" now uses "${later.title}"'s Proximate As-Fired data.`, 'success');
+}
+
+function undoGCVCorrection() {
+  const corr = window._gcvCorrection;
+  if (!corr) return;
+  corr.target.result = corr.target._originalResult;
+  delete corr.target._originalResult;
+  corr.target.gcvCorrected = false;
+  window._gcvCorrection = null;
+  renderComparison(window._comparisonResults);
+  showToast('GCV correction removed.', 'success');
+}
+
+// APH correction — logic to follow later; button already in place.
+function applyAPHCorrection() {
+  showToast('APH correction is coming soon.', 'success');
+}
+
+// ── Input bifurcation — the per-process portion of what today already
+//    splits results (Process Comparison) by process. Only the fields the
+//    dated log actually varies by process are shown here — manual-only /
+//    Design-block fields are the same everywhere and are covered by the
+//    Process Comparison table's "Date Range" row instead of a separate
+//    table. Collapsible — click the header to expand/collapse. ─────────────
+function _renderProcessInputsSection(list) {
+  const dateAveragedIds = new Set();
+  list.forEach(p => {
+    const { avg } = _averageFieldsInRange(p.start, p.end);
+    Object.keys(avg).forEach(fid => dateAveragedIds.add(fid));
+  });
+  const perProcessIds = INPUT_IDS.filter(id => dateAveragedIds.has(id));
+
+  const corr = window._gcvCorrection;
+  const open = window._uiState.processInputsOpen;
+
+  const headerCells = list.map(p => `
+    <th>${escapeHtml(p.title)}${p.gcvCorrected ? ' <span class="cmp-badge">GCV corrected</span>' : ''}
+      <div class="cmp-th-date">${fmtDateDMY(p.start)} → ${fmtDateDMY(p.end)}</div>
+    </th>`).join('');
+
+  const perProcessRows = perProcessIds.map(id => {
+    const cells = list.map(p => {
+      const entry = p.result.inputs.find(i => i.id === id);
+      const fromCorrection = corr && p === corr.target && PROXIMATE_AS_FIRED_IDS.includes(id);
+      const flag = fromCorrection
+        ? ` <small style="color:var(--accent2)" title="From &quot;${escapeHtml(corr.sourceTitle)}&quot;">↺</small>`
+        : '';
+      return `<td>${fmt(entry ? entry.value : 0, 3)}${flag}</td>`;
+    }).join('');
+    return `<tr><td class="cmp-metric">${INPUT_LABELS[id] || id}</td>${cells}</tr>`;
+  }).join('');
+
+  return `
+    <div class="output-section">
+      <div class="output-section-head collapsible-head${open ? ' open' : ''}" onclick="toggleResultsSection('processInputsOpen')">
+        <span>Process Inputs</span>
+        <span class="collapse-chevron">${open ? '▾' : '▸'}</span>
+      </div>
+      ${open ? `
+      <div class="cmp-table-wrap">
+        <table class="cmp-table">
+          <thead><tr><th>From the dated log — varies per process</th>${headerCells}</tr></thead>
+          <tbody>${perProcessRows || `<tr><td colspan="${list.length + 1}">No date-based input fields — every process is using the same manual/Design inputs.</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div class="cmp-note">Averaged separately for each process's own date range shown above. Everything not listed here (manual-only inputs, Design conditions, anything the dated log doesn't carry) uses whatever's currently in the Input Parameters tab for all processes.</div>
+      ` : ''}
+    </div>`;
+}
+
+// ── Process Comparison — every output metric, side by side, one column per
+//    process (already includes its own "Date Range" row). Collapsible —
+//    click the header to expand/collapse. ───────────────────────────────────
+function _renderProcessComparisonSection(list) {
+  const open = window._uiState.processComparisonOpen;
+  const headerCells = list.map(p => `<th>${escapeHtml(p.title)}${p.gcvCorrected ? ' <span class="cmp-badge">GCV corrected</span>' : ''}</th>`).join('');
   const bodyRows = _COMPARISON_METRIC_ROWS.map(([label, fn]) => `
     <tr><td class="cmp-metric">${label}</td>${list.map(p => `<td>${fn(p)}</td>`).join('')}</tr>
   `).join('');
 
-  document.getElementById('output-tables').innerHTML = `
-    ${_renderProcessInputsSection(list)}
+  return `
     <div class="output-section">
-      <div class="output-section-head"><span>Process Comparison</span></div>
+      <div class="output-section-head collapsible-head${open ? ' open' : ''}" onclick="toggleResultsSection('processComparisonOpen')">
+        <span>Process Comparison</span>
+        <span class="collapse-chevron">${open ? '▾' : '▸'}</span>
+      </div>
+      ${open ? `
       <div class="cmp-table-wrap">
         <table class="cmp-table">
           <thead><tr><th></th>${headerCells}</tr></thead>
@@ -732,57 +937,7 @@ function renderComparison(list) {
         </table>
       </div>
       <div class="cmp-note">Fields not present in the uploaded log (manual-only inputs, Design conditions, …) use the same value — whatever's currently in the Input Parameters tab — across every process.</div>
-    </div>`;
-}
-
-// ── Input bifurcation — mirrors the output side's per-process comparison,
-//    but for INPUTS: which input values are specific to each process (pulled
-//    from that process's own date range in the dated log) vs which ones are
-//    shared, unchanged, across every process (manual-only fields, Design
-//    conditions, anything the dated log doesn't carry). Only shown once
-//    date-wise processes are active — the no-dates path is untouched. ──────
-function _renderProcessInputsSection(list) {
-  const dateAveragedIds = new Set();
-  list.forEach(p => {
-    const { avg } = _averageFieldsInRange(p.start, p.end);
-    Object.keys(avg).forEach(fid => dateAveragedIds.add(fid));
-  });
-
-  const perProcessIds = INPUT_IDS.filter(id => dateAveragedIds.has(id));
-  const sharedIds      = INPUT_IDS.filter(id => !dateAveragedIds.has(id));
-
-  const headerCells = list.map(p => `<th>${escapeHtml(p.title)}</th>`).join('');
-  const perProcessRows = perProcessIds.map(id => {
-    const cells = list.map(p => {
-      const entry = p.result.inputs.find(i => i.id === id);
-      return `<td>${fmt(entry ? entry.value : 0, 3)}</td>`;
-    }).join('');
-    return `<tr><td class="cmp-metric">${INPUT_LABELS[id] || id}</td>${cells}</tr>`;
-  }).join('');
-
-  const sharedRows = sharedIds.map(id => {
-    const entry = list[0].result.inputs.find(i => i.id === id);
-    return `<tr><td class="cmp-metric">${INPUT_LABELS[id] || id}</td>
-      <td colspan="${list.length}">${fmt(entry ? entry.value : 0, 3)}
-        <small style="color:#94a3b8">— same for every process</small></td></tr>`;
-  }).join('');
-
-  return `
-    <div class="output-section">
-      <div class="output-section-head"><span>Process Inputs</span></div>
-      <div class="cmp-table-wrap">
-        <table class="cmp-table">
-          <thead><tr><th>From the dated log — varies per process</th>${headerCells}</tr></thead>
-          <tbody>${perProcessRows || `<tr><td colspan="${list.length + 1}">No date-based input fields — every input below is shared.</td></tr>`}</tbody>
-        </table>
-      </div>
-      <div class="cmp-table-wrap" style="margin-top:10px">
-        <table class="cmp-table">
-          <thead><tr><th colspan="${list.length + 1}">Shared inputs — same value across every process</th></tr></thead>
-          <tbody>${sharedRows}</tbody>
-        </table>
-      </div>
-      <div class="cmp-note">The top table is averaged separately for each process's own date range; the bottom table (manual-only inputs, Design conditions, anything the dated log doesn't carry) uses whatever's currently in the Input Parameters tab for all of them.</div>
+      ` : ''}
     </div>`;
 }
 
@@ -862,6 +1017,8 @@ function resetInputs() {
   window._uploadData         = null;
   window._processes          = [];
   window._comparisonResults  = null;
+  window._gcvCorrection      = null;
+  window._uiState            = { processInputsOpen: false, processComparisonOpen: false };
   const st = document.getElementById('upload-status');
   if (st) { st.style.display='none'; st.textContent=''; }
   const procSection = document.getElementById('process-section');
