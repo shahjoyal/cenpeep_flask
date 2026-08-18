@@ -847,6 +847,20 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
             continue
         if is_non_field_header(hdr):
             continue
+        # A header cell that's actually just a bare number (e.g. a stray
+        # data value sitting in what the header-row heuristic guessed was
+        # the header row — see _find_header_row's field-count fallback,
+        # which can occasionally pick a data row when it coincidentally
+        # scores a couple of fuzzy ML matches) is never a genuine field
+        # label. Real CENPEEP/DCS headers are always text; skip it outright
+        # instead of feeding a number like "2.84" to the ML classifier as
+        # if it were a phrase, which produces meaningless similarity scores
+        # and can spuriously "match" an unrelated field. Dates are handled
+        # separately (never field headers either) and aren't caught by
+        # _to_num, so they still reach here and get skipped just below by
+        # not matching anything, harmlessly.
+        if not isinstance(hdr, (datetime.datetime, datetime.date)) and _to_num(hdr) is not None:
+            continue
         fid = _label_to_field(str(hdr))
         if fid and fid in NEVER_AUTO_DETECT:
             # Always-manual field (see NEVER_AUTO_DETECT) — treat the column
@@ -1339,6 +1353,25 @@ PHYSICAL_RANGE_FIELDS = {
     'O2fg': (0, 21), 'O2in': (0, 21), 'O2out': (0, 21),
     'CO2fg': (0, 21), 'CO2in': (0, 21), 'CO2out': (0, 21),
     'COfg': (0, 50000), 'COin': (0, 50000), 'COout': (0, 50000),
+    # Proximate/ultimate composition fields are always a percentage of the
+    # sample — a "match" that averages out to a negative number or well
+    # above 100 is a guaranteed bad column (e.g. a comparison/reference
+    # sheet's unrelated "CHANGE" or ratio column getting ML-matched onto
+    # one of these), not a real reading, same reasoning as the O2/CO2 caps
+    # above. Left generous (0-100, the hard physical ceiling) rather than
+    # tuned to "plausible for coal" since these fields legitimately apply
+    # to fly/bottom ash and design coal too, which can sit near either end.
+    'M': (0, 100), 'A': (0, 100), 'VM': (0, 100), 'FC': (0, 100), 'S': (0, 100),
+    'C': (0, 100), 'H2': (0, 100), 'N2': (0, 100), 'O2f': (0, 100),
+    'Cba': (0, 100), 'Cfa': (0, 100), 'Hum': (0, 100),
+    # Gross Calorific Value: no real as-fired/design coal, fly-ash, or
+    # bottom-ash sample reports below ~500 kcal/kg (pure incombustible
+    # ash/moisture) or above 9000 kcal/kg (that's already past furnace
+    # oil). A value outside this band means the wrong column got matched
+    # (e.g. a derived "% change" or a comparison-table column averaged in
+    # by mistake), not a genuine GCV reading — same backstop reasoning as
+    # every other entry in this table.
+    'GCV': (500, 9000), 'GCVba': (0, 9000), 'GCVfa': (0, 9000),
 }
 
 
@@ -1384,7 +1417,8 @@ def _finalize_field_values(field_values):
 GENERIC_ROW_LAYOUT_SYMBOL_HEADERS = {'symbol', 'ky hieu'}
 GENERIC_ROW_LAYOUT_UNIT_HEADERS = {'unit', 'uom', 'don vi'}
 GENERIC_ROW_LAYOUT_PARTICULARS_HEADERS = {
-    'particulars', 'parameter', 'description', 'thong so',
+    'particulars', 'parameter', 'parameters', 'description', 'descriptions',
+    'thong so',
 }
 GENERIC_ROW_LAYOUT_SKIP_HEADERS = {
     'data collection method', 'method', 'stt', 'no', 'no.', 'sr no', 'sr no.',
@@ -1466,8 +1500,28 @@ def _parse_generic_row_layout(rows):
     that parameter. Multiple reading columns on the same row (e.g. one per
     week) are averaged together, same spirit as Strategy 2 averaging
     multiple DATA ROWS for one column.
+
+    TRANSPOSED DATE-WISE VARIANT: real "Daily Efficiency" sheets often use
+    this exact Symbol-column shape but with ONE COLUMN PER DATE (the header
+    row literally has a date in each value column, e.g. 4-Sep, 5-Sep, ...)
+    instead of a handful of same-period reading columns. That's the sheet
+    rotated 90° relative to Strategy 2's row-per-date shape: here each
+    COLUMN is a date and each ROW is a parameter. When most of the detected
+    value columns' header cells parse as real dates, this also builds a
+    dated_rows list (one entry per date column, transposing column->field
+    values into the same {date, values} shape _parse_raw_layout produces)
+    so a person picking a specific date/date-range on the calculator gets
+    that date's actual reading from THIS sheet too, instead of the sheet's
+    flat whole-period average regardless of which date is selected (the
+    same "took the average of the whole sheet, not just the selected
+    dates" gap Strategy 2 already solves for row-per-date sheets — see
+    _parse_raw_layout's dated_rows and the module docstring in report.py).
+    Purely structural (looks at whether the header cells ARE dates), so it
+    only ever activates for sheets that actually have this shape and never
+    changes anything for a genuine same-period multi-reading-column sheet.
+
     Returns (extracted_dict, raw_rows_list, sheet_summary, col_meta,
-             data_row_count, is_calculated_only).
+             data_row_count, is_calculated_only, dated_rows).
     is_calculated_only is True when the Symbol column contains
     CALCULATED_OUTPUT_ONLY_SYMBOLS (see constant above) -- i.e. this looks
     like a derived boiler-efficiency results/reference sheet rather than a
@@ -1476,7 +1530,7 @@ def _parse_generic_row_layout(rows):
     sample = rows[:GENERIC_ROW_LAYOUT_HEADER_SCAN_ROWS]
     header_row_idx, symbol_col = _find_generic_header_row(sample)
     if header_row_idx is None:
-        return {}, [], {}, {}, 0, False
+        return {}, [], {}, {}, 0, False, []
 
     header_row = rows[header_row_idx]
     value_cols = []
@@ -1497,12 +1551,49 @@ def _parse_generic_row_layout(rows):
         value_cols.append(c_idx)
 
     if not value_cols:
-        return {}, [], {}, {}, 0, False
+        return {}, [], {}, {}, 0, False, []
+
+    # Which value columns are individually dated (see docstring above).
+    # Real plant "Daily Efficiency" sheets of this shape often mix daily
+    # date columns with a handful of extra named-period SUMMARY columns
+    # off to the side — e.g. a "Without THERMACT <date range>" column and
+    # one or more "With Thermact <ratio> AVG. <date range>" / "AVERAGE"
+    # columns holding an already-computed average for that period, sitting
+    # right after the run of daily date columns. Those aren't per-date
+    # readings, so requiring EVERY value column to be a date would reject
+    # this whole (very common) shape just because a few summary columns
+    # are mixed in alongside the real daily ones. Instead: only trust the
+    # signal when there's a healthy majority of genuine date columns (a
+    # real date-per-column log easily clears this; a sheet that only
+    # coincidentally has a couple of stray date-like headers, e.g. two
+    # "Week of <date>" columns, won't). The non-date columns simply don't
+    # contribute a dated_rows entry — they still flow into the flat
+    # whole-sheet average exactly as before, unchanged.
+    col_dates = {}
+    non_date_value_cols = 0
+    for c_idx in value_cols:
+        cell = header_row[c_idx] if c_idx < len(header_row) else None
+        if cell is None or (isinstance(cell, str) and not cell.strip()):
+            continue
+        d = None
+        if isinstance(cell, (datetime.datetime, datetime.date)):
+            d = cell.date() if isinstance(cell, datetime.datetime) else cell
+        elif isinstance(cell, str):
+            d = _parse_date_cell(cell)
+        if d is not None:
+            col_dates[c_idx] = d
+        else:
+            non_date_value_cols += 1
+    is_transposed_dated = (
+        len(col_dates) >= 3
+        and len(col_dates) >= 0.5 * (len(col_dates) + non_date_value_cols)
+    )
 
     field_values = {}
     field_particulars = {}
     max_readings = 0
     is_calculated_only = False
+    col_field_values = {c_idx: {} for c_idx in col_dates} if is_transposed_dated else None
     for row in rows[header_row_idx + 1:]:
         if symbol_col >= len(row):
             continue
@@ -1523,9 +1614,24 @@ def _parse_generic_row_layout(rows):
             if num is not None:
                 field_values.setdefault(field_id, []).append(num)
                 row_readings += 1
+                if col_field_values is not None and c_idx in col_field_values:
+                    # A field id could in principle come from more than one
+                    # symbol row on this sheet (e.g. a duplicated line) —
+                    # average those together per date column too, same
+                    # spirit as the flat field_values accumulation above.
+                    col_field_values[c_idx].setdefault(field_id, []).append(num)
         if row_readings:
             max_readings = max(max_readings, row_readings)
             field_particulars.setdefault(field_id, str(sym))
+
+    dated_rows = []
+    if is_transposed_dated:
+        for c_idx, d in sorted(col_dates.items(), key=lambda kv: kv[1]):
+            col_vals = col_field_values.get(c_idx) or {}
+            if not col_vals:
+                continue
+            row_vals = {fid: statistics.mean(v) for fid, v in col_vals.items()}
+            dated_rows.append({'date': d.isoformat(), 'values': row_vals})
 
     extracted, raw_rows, summary = _finalize_field_values(field_values)
     col_meta = {
@@ -1537,7 +1643,7 @@ def _parse_generic_row_layout(rows):
         }
         for fid in extracted
     }
-    return extracted, raw_rows, summary, col_meta, max_readings, is_calculated_only
+    return extracted, raw_rows, summary, col_meta, max_readings, is_calculated_only, dated_rows
 
 
 # ─── Strategy 4: Plain label/value form layout (no header row at all) ─────────
@@ -1679,7 +1785,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
     # a genuine Strategy-2 (date/tag log) sheet essentially never has, so
     # this reordering doesn't change anything for sheets that were already
     # being parsed correctly by Strategy 2.
-    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3 = _parse_generic_row_layout(rows)
+    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3, dated_rows3 = _parse_generic_row_layout(rows)
     if ext3:
         return {
             'sheetName': sheet_name,
@@ -1694,7 +1800,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
             'columns': col_meta3,
             'dataRowCount': data_row_count3,
             'unmatchedHighlighted': [],
-            'datedRows': [],
+            'datedRows': dated_rows3,
         }
 
     # Strategy 2: raw tabular, with ML fallback for unrecognized headers
@@ -1866,7 +1972,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
     # practice (never the giant hourly-log sheets chunking exists for), so
     # checking it against cenpeep_check_rows (capped at 200 rows) rather
     # than the full streamed sheet is safe.
-    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3 = _parse_generic_row_layout(
+    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3, dated_rows3 = _parse_generic_row_layout(
         cenpeep_check_rows
     )
     if ext3:
@@ -1880,7 +1986,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
             'rowsScanned': row_count,
             'dataRowCount': data_row_count3,
             'unmatchedHighlighted': [],
-            'datedRows': [],
+            'datedRows': dated_rows3,
         }
 
     if not col_map:

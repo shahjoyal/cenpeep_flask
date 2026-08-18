@@ -775,14 +775,12 @@ function _renderCorrectionButtons() {
     <button type="button" class="kpi-card kpi-action${corr ? ' applied' : ''}" onclick="applyGCVCorrection()">
       <div class="kpi-label">GCV Correction${corr ? ' <span class="cmp-badge">Applied</span>' : ''}</div>
       <div class="kpi-value kpi-action-value">${corr ? 'Click to undo' : 'Apply GCV Correction'}</div>
-      <div class="kpi-sub">${corr
-        ? `"${escapeHtml(corr.targetTitle)}" ← Proximate As-Fired from "${escapeHtml(corr.sourceTitle)}"`
-        : `Uses the later-dated process's Proximate As-Fired data for the earlier one.`}</div>
+
     </button>
     <button type="button" class="kpi-card kpi-action" onclick="applyAPHCorrection()">
       <div class="kpi-label">APH Correction</div>
       <div class="kpi-value kpi-action-value">Apply APH Correction</div>
-      <div class="kpi-sub">Coming soon.</div>
+      <div class="kpi-sub"></div>
     </button>`;
 }
 
