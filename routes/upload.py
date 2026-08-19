@@ -599,8 +599,8 @@ def _match_tag_patterns(norm):
     # <direction>" tag shape real DCS exports use (e.g. "O2 APH O/L",
     # "APH A OUTL GAS O2 CT", "APH B INL GAS O2 CT").
     if 'aph' in tokens:
-        is_out = bool(tokens & {'ol', 'out', 'outl', 'outlet'})
-        is_in = bool(tokens & {'il', 'in', 'inl', 'inlet'})
+        is_out = bool(tokens & {'ol', 'out', 'outl', 'outlet', 'aft', 'after'})
+        is_in = bool(tokens & {'il', 'in', 'inl', 'inlet', 'before', 'bef'})
         if 'o2' in tokens and is_out and not is_in:
             return 'O2out'
         if 'o2' in tokens and is_in and not is_out:
@@ -681,16 +681,55 @@ TEMPERATURE_ONLY_FIELDS = {'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Tfg', 
 # pressure column as a temperature field. This is a hard physical guard,
 # not a fuzzy one: any header carrying one of these unit tokens can never
 # resolve to a temperature-only field id, regardless of ML confidence.
+# Tokens that mark a header as an O2/CO/CO2 GAS-ANALYSIS reading rather
+# than a temperature -- real plant sheets place these right next to
+# genuine temperature tags at the very same physical location ("FG O2 A
+# AFTER APH" sitting next to "FLUE GAS TEMP APH-A O/L"), sharing enough
+# words ("FG"/"AFTER"/"APH") that the ML fallback can score the O2%
+# column as a temperature field instead — which is exactly what happened
+# with an "FG O2 A AFTER APH" column landing on Tgo (flue gas temp after
+# APH) at 0.878 confidence, averaging a handful of ~7 (percent!) readings
+# in as if they were degrees C. Hard physical guard, same shape as
+# PRESSURE_UNIT_TOKENS below: any header carrying one of these tokens can
+# never resolve to a temperature-only field id, regardless of confidence.
+GAS_ANALYSIS_TOKENS = {'o2', 'co2', 'co', 'oxygen', 'nox', 'sox', 'so2'}
+
+# Words that mark a header as a TEMPERATURE reading -- the mirror image of
+# GAS_ANALYSIS_TOKENS, used to stop the same kind of shared-wording mixup
+# in the other direction (a genuine temperature column being ML-matched
+# onto O2in/O2out/O2fg/COin/COout/COfg because it shares "after APH"-style
+# process-location wording with a real gas-analysis training example).
+# Deliberately just "temp"/"temperature" (not the bare single-letter "t",
+# which is far too common a token/abbreviation elsewhere to safely use as
+# a hard exclusion signal).
+TEMPERATURE_WORD_TOKENS = {'temp', 'temperature'}
+
+# Every field id physically measured as an O2/CO/CO2 percentage or ppm
+# reading -- gets the reverse-direction guard described above.
+GAS_ANALYSIS_ONLY_FIELDS = {'O2in', 'O2out', 'O2fg', 'COin', 'COout', 'COfg',
+                             'CO2in', 'CO2out', 'CO2fg'}
+
+# Unit tokens that mark a header as a PRESSURE/DRAFT reading (mmWC =
+# millimeters water column, KSC/KG per CM2 = kg per sq cm) -- real plant
+# sheets label draft-pressure tags this way right next to genuine
+# temperature tags with very similar wording (e.g. "FG AH 9A OUT, MMWC"
+# sitting next to "FLUE GAS TEMP APH-A O/L, DEG C"), and their shared
+# words ("FG", "AH", "OUT") can fool the ML fallback into scoring the
+# pressure column as a temperature field. This is a hard physical guard,
+# not a fuzzy one: any header carrying one of these unit tokens can never
+# resolve to a temperature-only field id, regardless of ML confidence.
 PRESSURE_UNIT_TOKENS = {'mmwc', 'mmwcl', 'mmwg', 'ksc', 'kgcm2'}
 
 
 def _unit_conflicts_with_field(header, fid):
-    """True if header's own unit wording physically rules out fid."""
-    if fid not in TEMPERATURE_ONLY_FIELDS:
-        return False
+    """True if header's own unit/quantity wording physically rules out fid."""
     norm = re.sub(r'[^a-z0-9 ]', '', str(header).lower())
     tokens = set(norm.split())
-    return bool(tokens & PRESSURE_UNIT_TOKENS)
+    if fid in TEMPERATURE_ONLY_FIELDS:
+        return bool(tokens & PRESSURE_UNIT_TOKENS) or bool(tokens & GAS_ANALYSIS_TOKENS)
+    if fid in GAS_ANALYSIS_ONLY_FIELDS:
+        return bool(tokens & TEMPERATURE_WORD_TOKENS)
+    return False
 
 
 def _label_to_field(label):
@@ -765,6 +804,136 @@ def _parse_cenpeep_layout(rows):
 
 
 # ─── Header row detection (real sheets often bury the header a few rows down) ─
+# Common short/unit-only tokens that carry no field-identifying meaning on
+# their own. Real plant workbooks often stack a merged group-label cell
+# ("O2% BEFORE AH AVG.") above a row of per-column sub-headers that just
+# repeat the unit or side ("%", "Deg C", "LHS"/"RHS") -- read alone, the
+# sub-header can't be matched (or gets matched wrong) to any field; see
+# _is_bare_header_cell / _stitch_stacked_headers.
+# Deliberately duplicates the letter/number/side tokens also captured by
+# _SIDE_INDICATOR_TOKENS (defined later in this module, alongside the
+# sibling-duct grouping logic it's used for) rather than referencing it
+# directly, so this set is available immediately here without depending on
+# module-level definition order.
+_BARE_UNIT_TOKENS = {
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h',
+    'l', 'r', 'i', 'ii', 'iii', '1', '2', '3', '4', '5', '6', '7', '8',
+    'lhs', 'rhs', 'left', 'right', 'side',
+    'pct', 'percent', 'deg', 'degc', 'degree', 'degrees', 'kg', 'mw', 'ppm',
+    'avg', 'average', 'tph', 'hr', 'hrs', 'kcal', 'nm3', 'kj', 'no',
+}
+
+
+def _is_bare_header_cell(text):
+    """
+    True if `text` (a header cell) carries no field-identifying meaning by
+    itself — either blank, or made up entirely of unit/side tokens (see
+    _BARE_UNIT_TOKENS) with no other descriptive word. Such a cell is a
+    sub-header that only makes sense combined with a group-label cell
+    above it (see _stitch_stacked_headers).
+
+    A single-letter/short cell that's actually a real CENPEEP SYMBOL on
+    its own (e.g. a column literally headed "L" for Load, or "A" for Ash,
+    per SYM_MAP) is deliberately NOT bare — the standard CenPeep column
+    layout uses exactly these bare-looking single-letter symbols as real,
+    complete headers, and they must keep resolving via the normal
+    rule-based symbol lookup rather than being swept into the
+    stacked-header rescue path (which only fires when a group label is
+    found above it).
+    """
+    if text is None:
+        return True
+    if _sym_to_field(str(text).strip()):
+        return False
+    norm = re.sub(r'[^a-z0-9]+', ' ', str(text).lower()).strip()
+    if not norm:
+        return True
+    tokens = set(norm.split())
+    if tokens <= _BARE_UNIT_TOKENS:
+        return True
+    # A header cell that's purely numeric (e.g. "2.84") is never a
+    # legitimate field label -- it's a value that landed on the header
+    # row, most likely because the actual header text sits in a merged
+    # cell/row above it (or the header-row heuristic picked a slightly
+    # wrong row on an unusual sheet layout). Treating it as bare keeps it
+    # off the ML fallback entirely rather than letting a stray number get
+    # fuzzy-matched to whichever field its digits happen to resemble.
+    if all(t.replace('.', '', 1).isdigit() for t in tokens):
+        return True
+    return False
+
+
+def _forward_fill_merged_row(row):
+    """
+    Excel stores a merged cell's text only in its top-left cell — every
+    other cell the merge visually covers reads back as blank. A group-label
+    row like "O2% BEFORE AH AVG." spanning two columns (LHS/RHS) therefore
+    often has that text in only the LEFTMOST of the two columns, with the
+    other column's cell genuinely empty in the underlying data. Forward-
+    filling (carrying the last non-blank cell rightward until the next
+    non-blank cell) reconstructs what a person looking at the merged cells
+    visually sees, so the RHS column can be stitched with the same group
+    label as the LHS column instead of being left with nothing.
+    """
+    filled = []
+    last = None
+    for val in row:
+        if val is not None and str(val).strip():
+            last = val
+        filled.append(last)
+    return filled
+
+
+def _stitch_stacked_headers(rows_above, header_row):
+    """
+    Combines a chosen header row with any group-label text sitting in the
+    SAME column on the row(s) immediately above it, for columns whose own
+    header cell is "bare" (see _is_bare_header_cell) — e.g. a merged
+    "O2% BEFORE AH AVG." cell spanning several columns, with each column's
+    own sub-header underneath just reading "%". Read alone, "%" can't be
+    matched to any field; combined with the group label above it
+    ("O2% BEFORE AH AVG. %"), it matches confidently and correctly.
+
+    `rows_above` is the handful of rows immediately preceding the header
+    row, in normal top-to-bottom order (closest row LAST) — searched
+    nearest-first so the closest non-blank label wins, and forward-filled
+    first (see _forward_fill_merged_row) so a merged group-label cell
+    reaches every column it visually spans, not just its leftmost one.
+    Only applied to columns whose header cell is bare — a column with its
+    own real header text is left completely untouched, so this can never
+    change how a sheet that already parses correctly today is read.
+    """
+    if not rows_above:
+        return list(header_row)
+    filled_rows_above = [_forward_fill_merged_row(r) for r in rows_above]
+    stitched = []
+    for col_idx, cell in enumerate(header_row):
+        if not _is_bare_header_cell(cell):
+            stitched.append(cell)
+            continue
+        label = None
+        for above_row in reversed(filled_rows_above):
+            if col_idx < len(above_row):
+                val = above_row[col_idx]
+                if val is not None and str(val).strip():
+                    label = str(val).strip()
+                    break
+        if label:
+            cell_text = str(cell).strip() if cell is not None else ''
+            stitched.append(f"{label} {cell_text}".strip())
+        else:
+            stitched.append(cell)
+    return stitched
+
+
+# How many rows directly above the chosen header row to search for a
+# group-label to stitch onto a bare sub-header cell (see
+# _stitch_stacked_headers). Kept small and close to the header row on
+# purpose — a title/banner row much further up the sheet is far more
+# likely to be unrelated report text than a genuine merged group label.
+STACKED_HEADER_LOOKUP_ROWS = 3
+
+
 def _find_header_row(sample_rows, use_ml=True):
     """
     Scans the first few rows of a sheet and picks the one most likely to be
@@ -826,7 +995,8 @@ def _find_header_row(sample_rows, use_ml=True):
 
 
 # ─── Column → field mapping (rule-based alias lookup + ML fallback) ──────────
-def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE_THRESHOLD):
+def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE_THRESHOLD,
+                            raw_headers=None):
     """
     Given a list of header strings (one per column), returns:
       col_map: {col_idx: field_id}
@@ -835,33 +1005,52 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
     Rule-based alias lookup runs first (cheap, exact); any column it can't
     place is handed to the ML classifier as a batch (fast — single vectorized
     call rather than one call per column).
+
+    `headers` is normally the stacked-header-stitched list (see
+    _stitch_stacked_headers) — a bare sub-header like "%" combined with the
+    group label above it ("O2% BEFORE AH AVG."). If `raw_headers` (the
+    UN-stitched originals) is also given, a stitched header is only ever
+    used for the safe, literal rule/alias/symbol lookup (_label_to_field_exact)
+    -- never for the fuzzy tag-pattern fallback or the ML classifier. Those
+    two are the parts that judge a header by loose word/phrase similarity,
+    and a stitched label built from a merged group-header can accidentally
+    read as "close enough" to a totally different field's training phrases
+    (e.g. "O2% BEFORE AH AVG. LHS" superficially resembling "flue gas temp
+    before aph" and getting ML-matched to Tgi, a temperature field, instead
+    of an O2 field). The raw, un-stitched header is what's actually run
+    through the fuzzy/ML paths, so a bare column that isn't rescued by the
+    literal stitched-alias lookup just stays unmatched rather than risking
+    a wrong-field match — consistent with the rest of this module always
+    preferring "leave it for the person to fill in" over guessing wrong.
     """
+    if raw_headers is None:
+        raw_headers = headers
+
     col_map = {}
     col_source = {}
     col_confidence = {}
     unmatched_idx = []
     unmatched_text = []
 
-    for col_idx, hdr in enumerate(headers):
-        if hdr is None or not str(hdr).strip():
+    for col_idx, hdr in enumerate(raw_headers):
+        stitched_hdr = headers[col_idx] if col_idx < len(headers) else hdr
+        effective_hdr = hdr if (hdr is not None and str(hdr).strip()) else None
+
+        if effective_hdr is None or is_non_field_header(effective_hdr) or _is_bare_header_cell(effective_hdr):
+            # Nothing usable in the raw cell itself. If stacked-header
+            # stitching found a group label above it, give ONLY the safe,
+            # literal exact/alias/symbol lookup a chance against the
+            # combined text — see the docstring above for why this stays
+            # off the fuzzy/ML paths.
+            if stitched_hdr and str(stitched_hdr).strip() != (str(hdr).strip() if hdr else ''):
+                fid = _label_to_field_exact(str(stitched_hdr))
+                if fid and fid not in NEVER_AUTO_DETECT:
+                    col_map[col_idx] = fid
+                    col_source[col_idx] = 'rule'
+                    col_confidence[col_idx] = 1.0
             continue
-        if is_non_field_header(hdr):
-            continue
-        # A header cell that's actually just a bare number (e.g. a stray
-        # data value sitting in what the header-row heuristic guessed was
-        # the header row — see _find_header_row's field-count fallback,
-        # which can occasionally pick a data row when it coincidentally
-        # scores a couple of fuzzy ML matches) is never a genuine field
-        # label. Real CENPEEP/DCS headers are always text; skip it outright
-        # instead of feeding a number like "2.84" to the ML classifier as
-        # if it were a phrase, which produces meaningless similarity scores
-        # and can spuriously "match" an unrelated field. Dates are handled
-        # separately (never field headers either) and aren't caught by
-        # _to_num, so they still reach here and get skipped just below by
-        # not matching anything, harmlessly.
-        if not isinstance(hdr, (datetime.datetime, datetime.date)) and _to_num(hdr) is not None:
-            continue
-        fid = _label_to_field(str(hdr))
+
+        fid = _label_to_field(str(effective_hdr))
         if fid and fid in NEVER_AUTO_DETECT:
             # Always-manual field (see NEVER_AUTO_DETECT) — treat the column
             # as unrecognized rather than auto-mapping it, and don't hand it
@@ -874,14 +1063,14 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
             col_confidence[col_idx] = 1.0
         else:
             unmatched_idx.append(col_idx)
-            unmatched_text.append(str(hdr))
+            unmatched_text.append(str(effective_hdr))
 
     if use_ml and unmatched_text:
         clf = get_classifier()
         preds = clf.predict_batch(unmatched_text, threshold=ml_threshold)
         for col_idx, (fid, score, matched_example) in zip(unmatched_idx, preds):
             if fid and fid not in NEVER_AUTO_DETECT and not _unit_conflicts_with_field(
-                headers[col_idx], fid
+                raw_headers[col_idx], fid
             ):
                 col_map[col_idx] = fid
                 col_source[col_idx] = 'ml'
@@ -918,6 +1107,94 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
 MULTI_COLUMN_AVERAGE_FIELDS = {
     'O2in', 'O2out', 'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao',
 }
+
+# Same "don't silently keep only one column" problem as
+# MULTI_COLUMN_AVERAGE_FIELDS, but for fields where the physically correct
+# combination across parallel ducts/mills is a SUM, not an average — e.g.
+# Fpa ("Total Primary Air Flow") and Fsa ("Total Secondary Air Flow", see
+# FIELD_LABELS) are the combined flow across every PA-to-mill duct / every
+# SA duct, not the reading from whichever single duct happened to score
+# best. A plant sheet with "PA FLOW TO MILL-A" .. "PA FLOW TO MILL-F" as
+# six separate columns needs all six summed per row, then that per-row
+# total averaged across rows — exactly mirroring how a human would total
+# the mill flows for each timestamp before averaging over the period.
+# These fields go through the same sibling-grouping machinery as
+# MULTI_COLUMN_AVERAGE_FIELDS (see _dedupe_columns_per_field /
+# _groups_are_siblings) but combine per-row with SUM instead of AVERAGE
+# (see the row_sums / MULTI_COLUMN_SUM_FIELDS handling in
+# _parse_raw_layout and _accumulate_row) and are not capped at two
+# sibling groups, since a real plant can have more than two mills/ducts.
+MULTI_COLUMN_SUM_FIELDS = {
+    'Fpa', 'Fsa',
+}
+
+# Cap on how many sibling groups get kept for a MULTI_COLUMN_SUM_FIELDS
+# field (e.g. one group per mill). Generous — real plants rarely exceed
+# 8-10 mills/ducts for a single field — but still bounded so a pathological
+# false-positive-heavy sheet can't pull in an unbounded number of columns.
+MAX_SUM_FIELD_GROUPS = 12
+
+# Words that mark WHICH physical duct/side/sensor a reading comes from
+# (A/B/C.../LHS/RHS/left/right/1/2/3/...) rather than WHAT is being
+# measured or WHERE in the process it sits. Two headers that differ only
+# in these tokens are the same kind of reading on sibling ducts (e.g. "SA
+# FLOW (LHS)" vs "SA FLOW (RHS)", or "PA FLOW TO MILL-A" vs "...MILL-B")
+# and should be combined. Stripped out before comparing headers in
+# _groups_are_siblings so a shared side-marker never counts as "these two
+# headers are about the same thing" on its own, and a *different*
+# equipment/location word (e.g. "mill" vs "aph", "before" vs "to") is what
+# actually decides whether two columns are genuine siblings.
+_SIDE_INDICATOR_TOKENS = {
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h',
+    'l', 'r', 'i', 'ii', 'iii', '1', '2', '3', '4', '5', '6', '7', '8',
+    'lhs', 'rhs', 'left', 'right', 'side',
+}
+
+# Minimum Jaccard overlap (after stripping side-indicator tokens) two
+# candidate columns' headers must share to be treated as siblings of the
+# same physical reading point — see _groups_are_siblings.
+_SIBLING_TOKEN_OVERLAP_THRESHOLD = 0.5
+
+
+def _core_token_set(base_tag_key):
+    """
+    Splits an already-normalized _base_tag_key(...) string into its
+    whitespace-separated tokens, with pure side-indicator tokens (see
+    _SIDE_INDICATOR_TOKENS) removed — leaving just the tokens that
+    describe WHAT/WHERE the reading is (e.g. "pa", "temp", "before",
+    "aph", or "pa", "inlet", "temp", "to", "mill").
+    """
+    tokens = set(base_tag_key.split())
+    return tokens - _SIDE_INDICATOR_TOKENS
+
+
+def _groups_are_siblings(key_a, key_b):
+    """
+    True if two _base_tag_key(...) header keys describe the SAME physical
+    reading point on two different ducts/sides/sensors (e.g. "flue gas
+    temp before aph lhs" vs "...rhs"), rather than two genuinely different
+    measurement points that merely both got mapped to the same field id
+    (e.g. "pa temp before aph" vs "pa inlet temp to mill a" — sharing only
+    "pa"/"temp" is NOT enough to call them the same reading).
+
+    Measured as Jaccard overlap of each header's core tokens (side
+    markers stripped) — high overlap means the headers differ only by
+    which duct/side/sensor they're on; low overlap means they're
+    describing different things that happen to share a field id, and
+    should NOT be blended together.
+    """
+    tokens_a = _core_token_set(key_a)
+    tokens_b = _core_token_set(key_b)
+    if not tokens_a or not tokens_b:
+        # No comparable tokens on one side (e.g. a header that was ALL
+        # side-indicator words) — nothing to confirm a match against, so
+        # don't treat it as a confident sibling.
+        return tokens_a == tokens_b
+    union = tokens_a | tokens_b
+    if not union:
+        return False
+    overlap = len(tokens_a & tokens_b) / len(union)
+    return overlap >= _SIBLING_TOKEN_OVERLAP_THRESHOLD
 
 
 # Matches a single trailing sensor-number token at the very end of an
@@ -1015,7 +1292,10 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence, headers=None)
 
     new_map, new_source, new_confidence = {}, {}, {}
     for fid, cols in by_field.items():
-        if fid in MULTI_COLUMN_AVERAGE_FIELDS and len(cols) > 1:
+        is_sum_field = fid in MULTI_COLUMN_SUM_FIELDS
+        is_avg_field = fid in MULTI_COLUMN_AVERAGE_FIELDS
+        if (is_sum_field or is_avg_field) and len(cols) > 1:
+            group_cap = MAX_SUM_FIELD_GROUPS if is_sum_field else 2
             if headers is not None:
                 groups = {}
                 for col_idx in cols:
@@ -1040,11 +1320,33 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence, headers=None)
                     return (source_rank, -len(group), neg_conf, idx)
 
                 ranked_groups = sorted(groups.values(), key=group_rank)
-                keep_cols = [c for g in ranked_groups[:2] for c in g]
+                ranked_keys = sorted(groups.keys(), key=lambda k: group_rank(groups[k]))
+
+                # Only keep the best-ranked group unconditionally. Every
+                # OTHER group must pass the sibling-token-overlap gate
+                # against that top group (see _groups_are_siblings) before
+                # it's allowed to join — this is what stops a column that
+                # merely got independently classified into the same field
+                # id (e.g. a per-mill "PA INLET TEMP TO MILL-A" reading
+                # landing on Tpai alongside the real "PA TEMP BEFORE APH"
+                # duct sensor) from being blended in just because it was
+                # one of only two candidates. Genuine duct-side siblings
+                # (LHS/RHS, A/B, ...) share all their non-side wording and
+                # pass easily; unrelated columns that only coincidentally
+                # share a field id don't.
+                kept_keys = ranked_keys[:1]
+                top_key = ranked_keys[0] if ranked_keys else None
+                for key in ranked_keys[1:]:
+                    if len(kept_keys) >= group_cap:
+                        break
+                    if top_key is not None and _groups_are_siblings(top_key, key):
+                        kept_keys.append(key)
+                keep_cols = [c for k in kept_keys for c in groups[k]]
             else:
                 # No header text to group by — fall back to the old
-                # best-two-individual-columns behavior.
-                keep_cols = sorted(cols, key=rank)[:2]
+                # best-two-individual-columns behavior (can't run the
+                # sibling-token gate without header text to compare).
+                keep_cols = sorted(cols, key=rank)[:group_cap]
             for col_idx in keep_cols:
                 new_map[col_idx] = fid
                 new_source[col_idx] = col_source[col_idx]
@@ -1254,10 +1556,16 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
     if header_row_idx is None:
         return {}, [], {}, {}, 0, [], []
 
-    headers = rows[header_row_idx]
+    raw_headers = rows[header_row_idx]
+    headers = _stitch_stacked_headers(
+        rows[max(0, header_row_idx - STACKED_HEADER_LOOKUP_ROWS):header_row_idx],
+        raw_headers,
+    )
     data_rows = rows[header_row_idx + 1:]
 
-    col_map, col_source, col_confidence = _map_columns_to_fields(headers, use_ml=use_ml)
+    col_map, col_source, col_confidence = _map_columns_to_fields(
+        headers, use_ml=use_ml, raw_headers=raw_headers
+    )
 
     highlighted_cols = (highlight_map or {}).get(header_row_idx, set())
     col_map, col_source, col_confidence, highlighted_field_ids, unmatched_highlighted = (
@@ -1298,8 +1606,11 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
         for col_idx, fid in col_map.items():
             val = row[col_idx] if col_idx < len(row) else None
             num = _to_num(val)
+            if num is not None and not _reading_in_physical_range(fid, num):
+                num = None
             if num is not None:
-                field_values[fid].append(num)
+                if fid not in MULTI_COLUMN_SUM_FIELDS:
+                    field_values[fid].append(num)
                 # See the matching comment in _accumulate_row: a field can
                 # have more than one column on the same row (e.g. O2in's
                 # Left/Right duct columns) -- average them for this row's
@@ -1307,10 +1618,17 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
                 # the first, which otherwise left the per-date-range
                 # average (used once a person picks a date on the
                 # calculator) silently built from only one of the columns.
+                # MULTI_COLUMN_SUM_FIELDS (e.g. Fpa/Fsa — "Total" duct
+                # flow, see the MULTI_COLUMN_SUM_FIELDS comment) instead
+                # want that row's columns SUMMED, not averaged.
                 row_sums[fid] = row_sums.get(fid, 0.0) + num
                 row_counts[fid] = row_counts.get(fid, 0) + 1
         for fid, total in row_sums.items():
-            row_vals[fid] = total / row_counts[fid]
+            if fid in MULTI_COLUMN_SUM_FIELDS:
+                row_vals[fid] = total
+                field_values[fid].append(total)
+            else:
+                row_vals[fid] = total / row_counts[fid]
         if row_vals and len(dated_rows) < MAX_DATED_ROWS_PER_SHEET:
             row_date = None
             if date_col_idx is not None and date_col_idx < len(row):
@@ -1349,30 +1667,44 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
 # reading); CO is generous at up to 5% (50,000 ppm) since some sheets
 # report it in ppm and some in %, and this only needs to catch clearly
 # impossible values, not fine-tune plausible ones.
+#
+# The APH/economizer-duct temperature fields get the same backstop for a
+# different real failure mode: a genuine DCS logging fault (a sensor
+# transducer glitch, or a broken formula cell in the source workbook)
+# occasionally logs one or two rows as an enormous garbage number (e.g.
+# -176,928,736 sitting among thousands of otherwise sane ~260 deg C
+# readings for the very same column) — a single such row is enough to
+# drag a whole quarter's average to something like -43,902 deg C. -50..900
+# deg C comfortably covers everything from a cold-start ambient reading to
+# the hottest APH-outlet duct gas, so genuine plant readings are never
+# affected — only DCS-fault-magnitude garbage gets rejected.
 PHYSICAL_RANGE_FIELDS = {
     'O2fg': (0, 21), 'O2in': (0, 21), 'O2out': (0, 21),
     'CO2fg': (0, 21), 'CO2in': (0, 21), 'CO2out': (0, 21),
     'COfg': (0, 50000), 'COin': (0, 50000), 'COout': (0, 50000),
-    # Proximate/ultimate composition fields are always a percentage of the
-    # sample — a "match" that averages out to a negative number or well
-    # above 100 is a guaranteed bad column (e.g. a comparison/reference
-    # sheet's unrelated "CHANGE" or ratio column getting ML-matched onto
-    # one of these), not a real reading, same reasoning as the O2/CO2 caps
-    # above. Left generous (0-100, the hard physical ceiling) rather than
-    # tuned to "plausible for coal" since these fields legitimately apply
-    # to fly/bottom ash and design coal too, which can sit near either end.
-    'M': (0, 100), 'A': (0, 100), 'VM': (0, 100), 'FC': (0, 100), 'S': (0, 100),
-    'C': (0, 100), 'H2': (0, 100), 'N2': (0, 100), 'O2f': (0, 100),
-    'Cba': (0, 100), 'Cfa': (0, 100), 'Hum': (0, 100),
-    # Gross Calorific Value: no real as-fired/design coal, fly-ash, or
-    # bottom-ash sample reports below ~500 kcal/kg (pure incombustible
-    # ash/moisture) or above 9000 kcal/kg (that's already past furnace
-    # oil). A value outside this band means the wrong column got matched
-    # (e.g. a derived "% change" or a comparison-table column averaged in
-    # by mistake), not a genuine GCV reading — same backstop reasoning as
-    # every other entry in this table.
-    'GCV': (500, 9000), 'GCVba': (0, 9000), 'GCVfa': (0, 9000),
+    'Tgi': (-50, 900), 'Tgo': (-50, 900), 'Tfg': (-50, 900),
+    'Tpai': (-50, 900), 'Tpao': (-50, 900),
+    'Tsai': (-50, 900), 'Tsao': (-50, 900),
 }
+
+
+def _reading_in_physical_range(fid, num):
+    """
+    True if a single raw reading `num` for field `fid` is within
+    PHYSICAL_RANGE_FIELDS for it (or `fid` has no registered bound, in
+    which case anything numeric is accepted). Used to drop individual
+    DCS-fault-magnitude garbage readings AT ACCUMULATION TIME — before
+    they ever reach an average — rather than only catching it after the
+    fact once it's already dragged the whole field's average outside a
+    sane range (see the PHYSICAL_RANGE_FIELDS comment above). Rejecting
+    per-reading like this means the rest of a column's thousands of
+    genuinely good readings still produce a correct average instead of
+    the entire field being discarded over one or two bad rows.
+    """
+    bounds = PHYSICAL_RANGE_FIELDS.get(fid)
+    if not bounds:
+        return True
+    return bounds[0] <= num <= bounds[1]
 
 
 def _finalize_field_values(field_values):
@@ -1417,8 +1749,7 @@ def _finalize_field_values(field_values):
 GENERIC_ROW_LAYOUT_SYMBOL_HEADERS = {'symbol', 'ky hieu'}
 GENERIC_ROW_LAYOUT_UNIT_HEADERS = {'unit', 'uom', 'don vi'}
 GENERIC_ROW_LAYOUT_PARTICULARS_HEADERS = {
-    'particulars', 'parameter', 'parameters', 'description', 'descriptions',
-    'thong so',
+    'particulars', 'parameter', 'description', 'thong so',
 }
 GENERIC_ROW_LAYOUT_SKIP_HEADERS = {
     'data collection method', 'method', 'stt', 'no', 'no.', 'sr no', 'sr no.',
@@ -1500,28 +1831,8 @@ def _parse_generic_row_layout(rows):
     that parameter. Multiple reading columns on the same row (e.g. one per
     week) are averaged together, same spirit as Strategy 2 averaging
     multiple DATA ROWS for one column.
-
-    TRANSPOSED DATE-WISE VARIANT: real "Daily Efficiency" sheets often use
-    this exact Symbol-column shape but with ONE COLUMN PER DATE (the header
-    row literally has a date in each value column, e.g. 4-Sep, 5-Sep, ...)
-    instead of a handful of same-period reading columns. That's the sheet
-    rotated 90° relative to Strategy 2's row-per-date shape: here each
-    COLUMN is a date and each ROW is a parameter. When most of the detected
-    value columns' header cells parse as real dates, this also builds a
-    dated_rows list (one entry per date column, transposing column->field
-    values into the same {date, values} shape _parse_raw_layout produces)
-    so a person picking a specific date/date-range on the calculator gets
-    that date's actual reading from THIS sheet too, instead of the sheet's
-    flat whole-period average regardless of which date is selected (the
-    same "took the average of the whole sheet, not just the selected
-    dates" gap Strategy 2 already solves for row-per-date sheets — see
-    _parse_raw_layout's dated_rows and the module docstring in report.py).
-    Purely structural (looks at whether the header cells ARE dates), so it
-    only ever activates for sheets that actually have this shape and never
-    changes anything for a genuine same-period multi-reading-column sheet.
-
     Returns (extracted_dict, raw_rows_list, sheet_summary, col_meta,
-             data_row_count, is_calculated_only, dated_rows).
+             data_row_count, is_calculated_only).
     is_calculated_only is True when the Symbol column contains
     CALCULATED_OUTPUT_ONLY_SYMBOLS (see constant above) -- i.e. this looks
     like a derived boiler-efficiency results/reference sheet rather than a
@@ -1530,7 +1841,7 @@ def _parse_generic_row_layout(rows):
     sample = rows[:GENERIC_ROW_LAYOUT_HEADER_SCAN_ROWS]
     header_row_idx, symbol_col = _find_generic_header_row(sample)
     if header_row_idx is None:
-        return {}, [], {}, {}, 0, False, []
+        return {}, [], {}, {}, 0, False
 
     header_row = rows[header_row_idx]
     value_cols = []
@@ -1551,49 +1862,12 @@ def _parse_generic_row_layout(rows):
         value_cols.append(c_idx)
 
     if not value_cols:
-        return {}, [], {}, {}, 0, False, []
-
-    # Which value columns are individually dated (see docstring above).
-    # Real plant "Daily Efficiency" sheets of this shape often mix daily
-    # date columns with a handful of extra named-period SUMMARY columns
-    # off to the side — e.g. a "Without THERMACT <date range>" column and
-    # one or more "With Thermact <ratio> AVG. <date range>" / "AVERAGE"
-    # columns holding an already-computed average for that period, sitting
-    # right after the run of daily date columns. Those aren't per-date
-    # readings, so requiring EVERY value column to be a date would reject
-    # this whole (very common) shape just because a few summary columns
-    # are mixed in alongside the real daily ones. Instead: only trust the
-    # signal when there's a healthy majority of genuine date columns (a
-    # real date-per-column log easily clears this; a sheet that only
-    # coincidentally has a couple of stray date-like headers, e.g. two
-    # "Week of <date>" columns, won't). The non-date columns simply don't
-    # contribute a dated_rows entry — they still flow into the flat
-    # whole-sheet average exactly as before, unchanged.
-    col_dates = {}
-    non_date_value_cols = 0
-    for c_idx in value_cols:
-        cell = header_row[c_idx] if c_idx < len(header_row) else None
-        if cell is None or (isinstance(cell, str) and not cell.strip()):
-            continue
-        d = None
-        if isinstance(cell, (datetime.datetime, datetime.date)):
-            d = cell.date() if isinstance(cell, datetime.datetime) else cell
-        elif isinstance(cell, str):
-            d = _parse_date_cell(cell)
-        if d is not None:
-            col_dates[c_idx] = d
-        else:
-            non_date_value_cols += 1
-    is_transposed_dated = (
-        len(col_dates) >= 3
-        and len(col_dates) >= 0.5 * (len(col_dates) + non_date_value_cols)
-    )
+        return {}, [], {}, {}, 0, False
 
     field_values = {}
     field_particulars = {}
     max_readings = 0
     is_calculated_only = False
-    col_field_values = {c_idx: {} for c_idx in col_dates} if is_transposed_dated else None
     for row in rows[header_row_idx + 1:]:
         if symbol_col >= len(row):
             continue
@@ -1614,24 +1888,9 @@ def _parse_generic_row_layout(rows):
             if num is not None:
                 field_values.setdefault(field_id, []).append(num)
                 row_readings += 1
-                if col_field_values is not None and c_idx in col_field_values:
-                    # A field id could in principle come from more than one
-                    # symbol row on this sheet (e.g. a duplicated line) —
-                    # average those together per date column too, same
-                    # spirit as the flat field_values accumulation above.
-                    col_field_values[c_idx].setdefault(field_id, []).append(num)
         if row_readings:
             max_readings = max(max_readings, row_readings)
             field_particulars.setdefault(field_id, str(sym))
-
-    dated_rows = []
-    if is_transposed_dated:
-        for c_idx, d in sorted(col_dates.items(), key=lambda kv: kv[1]):
-            col_vals = col_field_values.get(c_idx) or {}
-            if not col_vals:
-                continue
-            row_vals = {fid: statistics.mean(v) for fid, v in col_vals.items()}
-            dated_rows.append({'date': d.isoformat(), 'values': row_vals})
 
     extracted, raw_rows, summary = _finalize_field_values(field_values)
     col_meta = {
@@ -1643,7 +1902,7 @@ def _parse_generic_row_layout(rows):
         }
         for fid in extracted
     }
-    return extracted, raw_rows, summary, col_meta, max_readings, is_calculated_only, dated_rows
+    return extracted, raw_rows, summary, col_meta, max_readings, is_calculated_only
 
 
 # ─── Strategy 4: Plain label/value form layout (no header row at all) ─────────
@@ -1785,7 +2044,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
     # a genuine Strategy-2 (date/tag log) sheet essentially never has, so
     # this reordering doesn't change anything for sheets that were already
     # being parsed correctly by Strategy 2.
-    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3, dated_rows3 = _parse_generic_row_layout(rows)
+    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3 = _parse_generic_row_layout(rows)
     if ext3:
         return {
             'sheetName': sheet_name,
@@ -1800,7 +2059,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
             'columns': col_meta3,
             'dataRowCount': data_row_count3,
             'unmatchedHighlighted': [],
-            'datedRows': dated_rows3,
+            'datedRows': [],
         }
 
     # Strategy 2: raw tabular, with ML fallback for unrecognized headers
@@ -1910,9 +2169,13 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
                 idx = _find_header_row(chunk, use_ml=use_ml)
                 if idx is not None:
                     header_row_idx = idx
-                    headers = chunk[header_row_idx]
+                    raw_headers = chunk[header_row_idx]
+                    headers = _stitch_stacked_headers(
+                        chunk[max(0, header_row_idx - STACKED_HEADER_LOOKUP_ROWS):header_row_idx],
+                        raw_headers,
+                    )
                     col_map, col_source, col_confidence = _map_columns_to_fields(
-                        headers, use_ml=use_ml
+                        headers, use_ml=use_ml, raw_headers=raw_headers
                     )
                     highlighted_cols = (highlight_map or {}).get(header_row_idx, set())
                     col_map, col_source, col_confidence, _, unmatched_hi = (
@@ -1972,7 +2235,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
     # practice (never the giant hourly-log sheets chunking exists for), so
     # checking it against cenpeep_check_rows (capped at 200 rows) rather
     # than the full streamed sheet is safe.
-    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3, dated_rows3 = _parse_generic_row_layout(
+    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3 = _parse_generic_row_layout(
         cenpeep_check_rows
     )
     if ext3:
@@ -1986,7 +2249,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
             'rowsScanned': row_count,
             'dataRowCount': data_row_count3,
             'unmatchedHighlighted': [],
-            'datedRows': dated_rows3,
+            'datedRows': [],
         }
 
     if not col_map:
@@ -2065,8 +2328,11 @@ def _accumulate_row(row, col_map, field_values, date_col_idx=None, dated_rows=No
     for col_idx, fid in col_map.items():
         val = row[col_idx] if col_idx < len(row) else None
         num = _to_num(val)
+        if num is not None and not _reading_in_physical_range(fid, num):
+            num = None
         if num is not None:
-            field_values.setdefault(fid, []).append(num)
+            if fid not in MULTI_COLUMN_SUM_FIELDS:
+                field_values.setdefault(fid, []).append(num)
             # A field can have MORE THAN ONE column on the same row (see
             # MULTI_COLUMN_AVERAGE_FIELDS, e.g. O2in's Left/Right duct O2
             # columns) — average them together for this row's dated
@@ -2076,10 +2342,17 @@ def _accumulate_row(row, col_map, field_values, date_col_idx=None, dated_rows=No
             # column's readings) stayed right, but the per-date average a
             # person sees after picking a date range on the calculator
             # silently used only one of the two columns for every row.
+            # MULTI_COLUMN_SUM_FIELDS (e.g. Fpa/Fsa — "Total" duct flow,
+            # see the MULTI_COLUMN_SUM_FIELDS comment) instead want that
+            # row's columns SUMMED, not averaged.
             row_sums[fid] = row_sums.get(fid, 0.0) + num
             row_counts[fid] = row_counts.get(fid, 0) + 1
     for fid, total in row_sums.items():
-        row_vals[fid] = total / row_counts[fid]
+        if fid in MULTI_COLUMN_SUM_FIELDS:
+            row_vals[fid] = total
+            field_values.setdefault(fid, []).append(total)
+        else:
+            row_vals[fid] = total / row_counts[fid]
     if dated_rows is not None and row_vals and len(dated_rows) < MAX_DATED_ROWS_PER_SHEET:
         row_date = None
         if date_col_idx is not None and date_col_idx < len(row):

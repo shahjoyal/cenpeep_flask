@@ -222,6 +222,7 @@ function initUpload() {
 window._processes         = [];
 window._comparisonResults = null;
 window._gcvCorrection     = null;   // { target, source, targetTitle, sourceTitle } once "Apply GCV Correction" is clicked
+window._aphCorrection     = false;  // true once "Apply APH Correction" is clicked — swaps the displayed efficiency to the APH/design-corrected value
 let   _processSeq = 0;
 
 function addProcess() {
@@ -588,6 +589,7 @@ function _averageFieldsInRange(start, end) {
 function calculate() {
   const activeProcesses = window._processes.filter(p => p.start || p.end);
   window._gcvCorrection = null;   // fresh Calculate — any prior correction no longer applies
+  window._aphCorrection = false;  // fresh Calculate — any prior correction no longer applies
 
   if (!activeProcesses.length) {
     // No date ranges chosen anywhere — exactly today's behavior.
@@ -730,12 +732,16 @@ function toggleResultsSection(key) {
 }
 
 function renderComparison(list) {
-  const kpiCards = list.map(p => `
+  const aphApplied = !!window._aphCorrection;
+  const kpiCards = list.map(p => {
+    const effVal = aphApplied ? p.result.BoilerEffCorr : p.result.BoilerEff;
+    return `
     <div class="kpi-card kpi-green">
-      <div class="kpi-label">${escapeHtml(p.title)}${p.gcvCorrected ? ' <span class="cmp-badge">GCV corrected</span>' : ''}</div>
-      <div class="kpi-value">${fmt2(p.result.BoilerEff)}<span class="kpi-unit">%</span></div>
+      <div class="kpi-label">${escapeHtml(p.title)}${p.gcvCorrected ? ' <span class="cmp-badge">GCV corrected</span>' : ''}${aphApplied ? ' <span class="cmp-badge">APH corrected</span>' : ''}</div>
+      <div class="kpi-value">${fmt2(effVal)}<span class="kpi-unit">%</span></div>
       <div class="kpi-sub">${fmtDateDMY(p.start)} → ${fmtDateDMY(p.end)} · ${p.rowCount} row${p.rowCount===1?'':'s'}</div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   // Delta Difference + the two correction buttons only make sense — and
   // only appear — with exactly two processes on screen; all three sit in
@@ -757,13 +763,16 @@ function renderComparison(list) {
 //    GCV correction has been applied, the processes' own results already
 //    reflect it, so this updates automatically. ──────────────────────────
 function _renderDeltaCard(p1, p2) {
-  const delta = p2.result.BoilerEff - p1.result.BoilerEff;
+  const aphApplied = !!window._aphCorrection;
+  const e1 = aphApplied ? p1.result.BoilerEffCorr : p1.result.BoilerEff;
+  const e2 = aphApplied ? p2.result.BoilerEffCorr : p2.result.BoilerEff;
+  const delta = e2 - e1;
   const cls   = delta >= 0 ? 'kpi-green' : 'kpi-red';
   return `
     <div class="kpi-card ${cls}">
       <div class="kpi-label">Delta Difference</div>
       <div class="kpi-value">${fmtSigned(delta)}<span class="kpi-unit">%</span></div>
-      <div class="kpi-sub">${escapeHtml(p2.title)} − ${escapeHtml(p1.title)} (Boiler Eff.)</div>
+      <div class="kpi-sub">${escapeHtml(p2.title)} − ${escapeHtml(p1.title)} (Boiler Eff.${aphApplied ? ' APH corr.' : ''})</div>
     </div>`;
 }
 
@@ -771,15 +780,16 @@ function _renderDeltaCard(p1, p2) {
 //    row as the Boiler Efficiency + Delta Difference cards. ─────────────────
 function _renderCorrectionButtons() {
   const corr = window._gcvCorrection;
+  const aphApplied = !!window._aphCorrection;
   return `
     <button type="button" class="kpi-card kpi-action${corr ? ' applied' : ''}" onclick="applyGCVCorrection()">
       <div class="kpi-label">GCV Correction${corr ? ' <span class="cmp-badge">Applied</span>' : ''}</div>
       <div class="kpi-value kpi-action-value">${corr ? 'Click to undo' : 'Apply GCV Correction'}</div>
 
     </button>
-    <button type="button" class="kpi-card kpi-action" onclick="applyAPHCorrection()">
-      <div class="kpi-label">APH Correction</div>
-      <div class="kpi-value kpi-action-value">Apply APH Correction</div>
+    <button type="button" class="kpi-card kpi-action${aphApplied ? ' applied' : ''}" onclick="applyAPHCorrection()">
+      <div class="kpi-label">APH Correction${aphApplied ? ' <span class="cmp-badge">Applied</span>' : ''}</div>
+      <div class="kpi-value kpi-action-value">${aphApplied ? 'Click to undo' : 'Apply APH Correction'}</div>
       <div class="kpi-sub"></div>
     </button>`;
 }
@@ -854,9 +864,25 @@ function undoGCVCorrection() {
   showToast('GCV correction removed.', 'success');
 }
 
-// APH correction — logic to follow later; button already in place.
+// ── APH Correction ───────────────────────────────────────────────────────
+// Only meaningful with exactly two active processes, same as GCV correction.
+// Unlike GCV correction, nothing needs to be donated between processes —
+// runCalculation() already computes each process's APH/design-corrected
+// efficiency as BoilerEffCorr (the same "Boiler Efficiency Corrected" value
+// shown in the Process Comparison table). Applying the correction simply
+// swaps the Boiler Efficiency KPI cards (and the Delta card) over to that
+// corrected value for both processes; clicking again undoes it.
 function applyAPHCorrection() {
-  showToast('APH correction is coming soon.', 'success');
+  const list = window._comparisonResults;
+  if (!list || list.length !== 2) {
+    showToast('APH correction needs exactly two active processes.', 'error');
+    return;
+  }
+  window._aphCorrection = !window._aphCorrection;
+  renderComparison(window._comparisonResults);
+  showToast(window._aphCorrection
+    ? 'APH correction applied — Boiler Efficiency now shows the APH-corrected value for both processes.'
+    : 'APH correction removed.', 'success');
 }
 
 // ── Input bifurcation — the per-process portion of what today already
@@ -1016,6 +1042,7 @@ function resetInputs() {
   window._processes          = [];
   window._comparisonResults  = null;
   window._gcvCorrection      = null;
+  window._aphCorrection      = false;
   window._uiState            = { processInputsOpen: false, processComparisonOpen: false };
   const st = document.getElementById('upload-status');
   if (st) { st.style.display='none'; st.textContent=''; }
