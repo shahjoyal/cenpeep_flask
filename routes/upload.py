@@ -552,7 +552,20 @@ def _match_tag_patterns(norm):
     # which then had no side-agnostic training example to latch onto.
     # Normalizing them back to a plain "aph" token makes side-qualified
     # and side-agnostic tag wording behave identically below.
-    tokens = {('aph' if t in ('apha', 'aphb') else t) for t in tokens}
+    #
+    # Real plant sheets also number the individual sensor on each side
+    # (e.g. "APH-A1 O/L O2" and "APH-A2 O/L O2" for two separate O2 probes
+    # on the A-side duct, or "O2 AT APH-A I/L-1"/"...I/L-2" for two inlet
+    # probes) -- the sensor digit glues directly onto "apha"/"aphb" with no
+    # separating punctuation left after normalization, so a plain equality
+    # check against "apha"/"aphb" misses "apha1"/"apha2"/"aphb1"/"aphb2"
+    # entirely, leaving those columns to fall through to the ML fallback
+    # (which then had no reason to prefer O2in over O2out for an
+    # inlet-side sensor numbered "-2", and mis-scored it onto O2out
+    # instead). Match any side letter with an optional trailing sensor
+    # number, not just the bare side letter, so every numbered probe on a
+    # side folds down to the same side-agnostic "aph" token.
+    tokens = {('aph' if re.fullmatch(r'apha\d*|aphb\d*', t) else t) for t in tokens}
 
     # Same hyphen-glued-side-qualifier problem as "APH-A"/"APH-B" above,
     # but for "ECO-L"/"ECO-R" (Left/Right duct O2 sensor "after the
@@ -563,6 +576,13 @@ def _match_tag_patterns(norm):
     # Folded back to a plain "eco" token so side-qualified and
     # side-agnostic "after ECO" wording behave identically.
     tokens = {('eco' if t in ('ecol', 'ecor') else t) for t in tokens}
+
+    # "AH" (Air Heater) is the same equipment CENPEEP/most tag wording
+    # calls "APH" -- some sheets abbreviate it the short way instead (e.g.
+    # "N2 At AH Outlet", "O2 At AH Outlet"). Folded to the same 'aph'
+    # token used everywhere below so both spellings hit the same rules,
+    # same precedent as the apha/aphb and ecol/ecor folds above.
+    tokens = {('aph' if t == 'ah' else t) for t in tokens}
 
     # O2 in the flue gas "after"/"aft" the economiser (ECO) -- on this
     # plant's gas path this is physically the same point as the APH inlet
@@ -599,8 +619,16 @@ def _match_tag_patterns(norm):
     # <direction>" tag shape real DCS exports use (e.g. "O2 APH O/L",
     # "APH A OUTL GAS O2 CT", "APH B INL GAS O2 CT").
     if 'aph' in tokens:
-        is_out = bool(tokens & {'ol', 'out', 'outl', 'outlet', 'aft', 'after'})
-        is_in = bool(tokens & {'il', 'in', 'inl', 'inlet', 'before', 'bef'})
+        # Same glued-sensor-number problem as "apha"/"aphb" above, but for
+        # the in/out qualifier itself -- a per-side sensor number can land
+        # on "IL"/"OL" instead of (or in addition to) the side letter, e.g.
+        # "O2 AT APH-A I/L-1"/"...I/L-2" normalizes each inlet reading's
+        # qualifier to "il1"/"il2", not the bare "il" this membership
+        # check was looking for. Match with an optional trailing digit so
+        # every numbered probe's in/out qualifier is recognized the same
+        # way, regardless of which sensor number it carries.
+        is_out = any(re.fullmatch(r'(ol|out|outl|outlet|aft|after)\d*', t) for t in tokens)
+        is_in = any(re.fullmatch(r'(il|in|inl|inlet|before|bef)\d*', t) for t in tokens)
         if 'o2' in tokens and is_out and not is_in:
             return 'O2out'
         if 'o2' in tokens and is_in and not is_out:
@@ -660,6 +688,43 @@ def _match_tag_patterns(norm):
     # competing against.
     if {'ms', 'flow'} <= tokens or {'m', 's', 'flow'} <= tokens:
         return 'Ffw'
+
+    # Superheater-outlet Main Steam Pressure -- the physical point
+    # CENPEEP's "Steam Pressure" (SP) reading wants (e.g. "SH O/L MS
+    # PRESSURE-L"/"-R", "SH OUTLET MS PRESSURE"). Must be a deterministic
+    # RULE match, not left to the ML fallback: a Hot/Cold Reheat pressure
+    # column ("HRH STEAM PRESSURE-L") shares almost all of its vocabulary
+    # ("STEAM"/"PRESSURE") with the handful of SP training phrases and was
+    # winning the same-field tie-break at ~0.88 confidence, even though
+    # HRH/CRH is a different, downstream point after the reheater rather
+    # than the superheater-outlet reading SP actually means. (See also the
+    # 'SP' entry in _unit_conflicts_with_field, which blocks HRH/CRH
+    # columns from ever landing on SP even via ML.)
+    # "PRESSURE-L"/"PRESSURE-R" glue their side letter directly onto
+    # "pressure" once punctuation is stripped ("pressurel"/"pressurer"),
+    # same glued-suffix problem as "apha"/"aphb" above -- so this checks
+    # for a "pressure..." token by prefix rather than requiring an exact
+    # "pressure" token.
+    if {'sh', 'ms'} <= tokens and any(t.startswith('pressure') for t in tokens) \
+            and ({'ol', 'out', 'outl', 'outlet'} & tokens):
+        return 'SP'
+
+    # Plant's own precomputed "Total PA/SA Flow" column (e.g. "Total PA
+    # FLOW", "Total SA FLOW "). Summing the individual per-mill/per-duct
+    # columns instead is a fragile fallback -- a mill legitimately cycling
+    # off for part of the period leaves that column blank for those rows,
+    # undercounting the sum (see MULTI_COLUMN_SUM_FIELDS) -- so when the
+    # sheet already provides its own precomputed total, prefer it. This
+    # must be a deterministic RULE match, not left to the ML fallback:
+    # rule matches always beat ML matches in _dedupe_columns_per_field
+    # regardless of confidence, and the "total" wording also keeps this
+    # column's _base_tag_key too dissimilar from the per-mill columns'
+    # (see _groups_are_siblings) for them to be blended in alongside it.
+    if 'total' in tokens and 'flow' in tokens:
+        if {'pa', 'primary'} & tokens:
+            return 'Fpa'
+        if {'sa', 'secondary'} & tokens:
+            return 'Fsa'
 
     return None
 
@@ -729,6 +794,16 @@ def _unit_conflicts_with_field(header, fid):
         return bool(tokens & PRESSURE_UNIT_TOKENS) or bool(tokens & GAS_ANALYSIS_TOKENS)
     if fid in GAS_ANALYSIS_ONLY_FIELDS:
         return bool(tokens & TEMPERATURE_WORD_TOKENS)
+    if fid == 'SP':
+        # Hot/Cold Reheat pressure ("HRH STEAM PRESSURE-L", "CRH STEAM
+        # PRESS-R") is a different, downstream point after the reheater --
+        # not the superheater-outlet Main Steam Pressure reading SP means
+        # -- but shares almost all its vocabulary ("STEAM"/"PRESSURE")
+        # with the SP training phrases, which let it out-score the real
+        # SH-outlet reading via the ML fallback. Hard physical guard: any
+        # header naming HRH/CRH can never resolve to SP, regardless of
+        # confidence.
+        return bool(tokens & {'hrh', 'crh'})
     return False
 
 
@@ -1106,6 +1181,11 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
 # Out") already promises an average of both sides.
 MULTI_COLUMN_AVERAGE_FIELDS = {
     'O2in', 'O2out', 'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao',
+    # SP ("Steam Pressure") is read at the superheater outlet, which (like
+    # the APH/flue-gas ducts above) is commonly wired as separate L-side/
+    # R-side sensors (e.g. "SH O/L MS PRESSURE-L" + "...-R") that should be
+    # averaged together rather than one being silently dropped.
+    'SP',
 }
 
 # Same "don't silently keep only one column" problem as
@@ -1155,6 +1235,11 @@ _SIDE_INDICATOR_TOKENS = {
 # same physical reading point — see _groups_are_siblings.
 _SIBLING_TOKEN_OVERLAP_THRESHOLD = 0.5
 
+# Words that mark a header as a plant-precomputed AGGREGATE of other
+# columns (e.g. "Total PA FLOW") rather than one more sibling reading
+# alongside them (e.g. "PA FLOW TO MILL-A"). See _groups_are_siblings.
+_TOTAL_INDICATOR_TOKENS = {'total', 'overall', 'aggregate', 'sum'}
+
 
 def _core_token_set(base_tag_key):
     """
@@ -1182,9 +1267,21 @@ def _groups_are_siblings(key_a, key_b):
     which duct/side/sensor they're on; low overlap means they're
     describing different things that happen to share a field id, and
     should NOT be blended together.
+
+    A header carrying a "total"/"overall" token is never a sibling of one
+    that doesn't, regardless of overlap: a plant's own precomputed "Total
+    PA/SA Flow" column is already an aggregate of the per-side/per-mill
+    columns, so summing it alongside them (a MULTI_COLUMN_SUM_FIELDS
+    field is combined per-row with SUM, not AVERAGE) would double-count
+    it — the exact opposite of what "these describe the same reading, on
+    different ducts" is meant to detect. High token overlap between e.g.
+    "total sa flow" and "sa flow lhs" is precisely why this needs its own
+    check rather than relying on the overlap score to sort it out.
     """
     tokens_a = _core_token_set(key_a)
     tokens_b = _core_token_set(key_b)
+    if bool(tokens_a & _TOTAL_INDICATOR_TOKENS) != bool(tokens_b & _TOTAL_INDICATOR_TOKENS):
+        return False
     if not tokens_a or not tokens_b:
         # No comparable tokens on one side (e.g. a header that was ALL
         # side-indicator words) — nothing to confirm a match against, so
@@ -1230,6 +1327,19 @@ def _base_tag_key(header):
     """
     norm = re.sub(r'[^a-z0-9]+', ' ', str(header).lower()).strip()
     norm = re.sub(r'\s+', ' ', norm)
+    # Some real plant sheets glue the per-sensor number directly onto the
+    # side letter instead of trailing the whole header (e.g. "APH-A1 O/L
+    # O2" / "APH-A2 O/L O2" for two separate O2 probes on the A-side duct,
+    # vs the already-handled "...O2-1"/"...O2-2" trailing-suffix form).
+    # Without folding "a1"/"a2"/"b1"/"b2" down to the bare side letter
+    # first, each numbered probe gets its own single-column "group" below
+    # and only ever the top TWO such groups survive the sibling-group cap
+    # — silently dropping the other two probes instead of averaging all
+    # four in. Folding first means "A1"+"A2" (and "B1"+"B2") key together
+    # as one real duct-side group each, same as the trailing-suffix case.
+    norm = ' '.join(
+        re.sub(r'^([a-h]|l|r)\d+$', r'\1', tok) for tok in norm.split()
+    )
     stripped = _TRAILING_SENSOR_NUM_RE.sub('', norm).strip()
     return stripped or norm
 
@@ -1775,6 +1885,17 @@ GENERIC_ROW_LAYOUT_SYMBOL_ALIASES = {
     'vc': 'VM',                  # Volatile matter of test coal
     'ac': 'A',                   # Ash content of test coal
     'qc': 'GCV',                 # Gross calorific value of test coal
+    # Bare "N" for elemental coal Nitrogen (ultimate analysis notation --
+    # C/H/N/O/S -- as opposed to CENPEEP's own "N2" symbol for the same
+    # quantity). Kept here rather than in SYM_MAP because "N" alone is too
+    # generic a symbol to trust outside this row-per-parameter layout.
+    # Also reachable from an apostrophe-qualified variant ("N'", an
+    # air-dried-basis intermediate some sheets carry alongside the
+    # as-fired value) since the alnum-only normalization below strips the
+    # apostrophe the same way -- _row_is_flue_gas_context /
+    # the "(+)"-marked-row preference in _parse_generic_row_layout is what
+    # picks the right one of the two when both are present.
+    'n': 'N2',
 }
 
 # Symbols that ONLY ever appear as CALCULATED OUTPUTS of the boiler-
@@ -1796,12 +1917,67 @@ CALCULATED_OUTPUT_ONLY_SYMBOLS = {
     'ldg', 'luc', 'lmf', 'lhf', 'lco', 'lma', 'lrad',
 }
 
+# Field ids that are physically a property of the COAL/FUEL itself
+# (proximate/ultimate analysis) -- never a legitimate flue-gas/APH-duct
+# process reading. A Strategy-3 sheet's Symbol column is trusted blindly
+# by field id, with zero regard for what the row's own Description says
+# or which section of the sheet it's in -- which is exactly how a
+# flue-gas reading whose symbol happens to collide with a CENPEEP
+# coal-composition symbol (e.g. this workbook's "N2 At AH Outlet" duct
+# reading vs CENPEEP's own "N2" symbol for coal Nitrogen) gets mistaken
+# for the fuel-analysis value. See _row_is_flue_gas_context below.
+GENERIC_ROW_LAYOUT_COMPOSITION_FIELDS = {
+    'M', 'A', 'VM', 'FC', 'GCV', 'C', 'S', 'H2', 'N2', 'O2f',
+}
+
+# Description-text tokens that mark a row as a flue-gas/APH-duct process
+# reading. A row is only treated as flue-gas context when it has BOTH a
+# location word (APH/flue/stack/...) AND an in/out direction word --
+# "Ash" alone or "Nitrogen content Of Coal" never trip this, only
+# something shaped like "<reading> At AH Outlet" does.
+_FLUE_GAS_LOCATION_TOKENS = {'aph', 'flue', 'stack', 'duct', 'economiser', 'economizer'}
+_FLUE_GAS_DIRECTION_TOKENS = {'outlet', 'inlet', 'ol', 'il', 'out', 'in'}
+# If the description itself names the fuel, it can never be a flue-gas
+# reading no matter what other words it contains -- overrides the above.
+_FUEL_CONTEXT_TOKENS = {'coal', 'fuel'}
+
+# A trailing parenthetical qualifier on a Strategy-3 symbol (e.g. "A(f)",
+# "GCV(f)") -- seen on non-CENPEEP-authored sheets that suffix a
+# proximate-analysis symbol with its basis ("(f)" = as-fired) rather than
+# using CENPEEP's own bare symbol for the as-fired value. Stripped before
+# the SYM_MAP lookup so "A(f)" still resolves to the same field id "A"
+# does. Naive punctuation-stripping alone can't do this: removing just
+# the parentheses from "A(f)" leaves "Af", not "A" -- this removes the
+# whole trailing "(...)" group instead.
+_TRAILING_SYMBOL_QUALIFIER_RE = re.compile(r'\s*\([^()]*\)\s*$')
+
+
+def _row_is_flue_gas_context(description):
+    """
+    True if `description` (a Strategy-3 row's Particulars/Description
+    text) reads as a flue-gas/APH-duct process reading rather than a
+    coal/fuel lab-analysis result -- see GENERIC_ROW_LAYOUT_COMPOSITION_FIELDS
+    above. Used to reject a symbol match for a composition-only field id
+    whose row is actually measuring something in the gas path.
+    """
+    norm = re.sub(r'[^a-z0-9]+', ' ', str(description).lower()).strip()
+    tokens = set(norm.split())
+    tokens = {('aph' if t == 'ah' else t) for t in tokens}
+    if tokens & _FUEL_CONTEXT_TOKENS:
+        return False
+    return bool(tokens & _FLUE_GAS_LOCATION_TOKENS) and bool(tokens & _FLUE_GAS_DIRECTION_TOKENS)
+
 
 def _generic_sym_to_field(sym):
     """Like _sym_to_field, plus the Strategy-3-only alias table above."""
     fid = _sym_to_field(sym)
     if fid:
         return fid
+    stripped = _TRAILING_SYMBOL_QUALIFIER_RE.sub('', str(sym)).strip()
+    if stripped and stripped != str(sym).strip():
+        fid = _sym_to_field(stripped)
+        if fid:
+            return fid
     norm = re.sub(r'[^a-z0-9]', '', str(sym).lower().strip())
     return GENERIC_ROW_LAYOUT_SYMBOL_ALIASES.get(norm)
 
@@ -1822,7 +1998,7 @@ def _find_generic_header_row(sample_rows):
     return None, None
 
 
-def _parse_generic_row_layout(rows):
+def _parse_generic_row_layout(rows, sheet_name=None):
     """
     Strategy 3 - see module comment above. Every row below the detected
     header is one parameter: its symbol lives in the Symbol column, and any
@@ -1831,6 +2007,32 @@ def _parse_generic_row_layout(rows):
     that parameter. Multiple reading columns on the same row (e.g. one per
     week) are averaged together, same spirit as Strategy 2 averaging
     multiple DATA ROWS for one column.
+
+    A row's Symbol cell is trusted first, but two extra checks now run
+    before a row's numbers are accepted for a field:
+      1. Flue-gas-context guard: if the field id is a coal/fuel
+         COMPOSITION field (see GENERIC_ROW_LAYOUT_COMPOSITION_FIELDS) but
+         the row's own Description reads as a flue-gas/APH-duct process
+         reading (see _row_is_flue_gas_context), the row is rejected for
+         that field -- a Symbol match alone isn't enough evidence when the
+         row is plainly describing something else physically.
+      2. "(+)"-marked-row preference: some sheets carry more than one row
+         for the same field id (e.g. an as-fired value AND an air-dried-
+         basis intermediate used only to derive it) and mark, via their own
+         legend, which one is "actually used" -- typically with a "(+)" in
+         the Description. When at least one surviving candidate row for a
+         field has "+" in its description, only those marked row(s) are
+         used; unmarked duplicates are ignored instead of being blended in.
+         If none is marked, every surviving row is kept and averaged
+         together, same as before -- this only changes behavior for sheets
+         that actually use this marking convention.
+    A row whose Symbol doesn't resolve to a field is also tried against its
+    own Description text (same rule/tag matching Strategy 2 uses for
+    headers), which recovers fields identifiable from wording alone even
+    though the Symbol column doesn't carry a recognized abbreviation for
+    them (e.g. a bare "O2"/"CO" symbol next to a "... At AH Outlet"
+    description).
+
     Returns (extracted_dict, raw_rows_list, sheet_summary, col_meta,
              data_row_count, is_calculated_only).
     is_calculated_only is True when the Symbol column contains
@@ -1845,15 +2047,19 @@ def _parse_generic_row_layout(rows):
 
     header_row = rows[header_row_idx]
     value_cols = []
+    particulars_col = None
     for c_idx, cell in enumerate(header_row):
         if c_idx == symbol_col:
             continue
         text = '' if cell is None else str(cell).strip()
         norm = re.sub(r'[^a-z ]', '', text.lower())
+        if text and norm in GENERIC_ROW_LAYOUT_PARTICULARS_HEADERS:
+            if particulars_col is None:
+                particulars_col = c_idx
+            continue
         if text and (
             norm in GENERIC_ROW_LAYOUT_UNIT_HEADERS
             or norm in GENERIC_ROW_LAYOUT_SKIP_HEADERS
-            or norm in GENERIC_ROW_LAYOUT_PARTICULARS_HEADERS
         ):
             continue
         # A blank header (common above weekly value columns whose real
@@ -1864,8 +2070,12 @@ def _parse_generic_row_layout(rows):
     if not value_cols:
         return {}, [], {}, {}, 0, False
 
-    field_values = {}
-    field_particulars = {}
+    # First pass: collect every row that resolves to a field id (via its
+    # Symbol, or its Description text as a fallback), grouped by field id,
+    # instead of dumping numbers straight into field_values -- needed so
+    # the "(+)"-marked-row preference below can choose among candidates
+    # for the same field before anything is finalized.
+    candidates = {}  # field_id -> list of {description, values, marked}
     max_readings = 0
     is_calculated_only = False
     for row in rows[header_row_idx + 1:]:
@@ -1877,20 +2087,66 @@ def _parse_generic_row_layout(rows):
         sym_norm = re.sub(r'[^a-z0-9]', '', str(sym).lower().strip())
         if sym_norm in CALCULATED_OUTPUT_ONLY_SYMBOLS:
             is_calculated_only = True
+
+        description = ''
+        if particulars_col is not None and particulars_col < len(row) \
+                and row[particulars_col] is not None:
+            description = str(row[particulars_col]).strip()
+
         field_id = _generic_sym_to_field(sym)
+        if not field_id and description:
+            # Symbol didn't resolve to anything -- try the row's own
+            # Description text the same way Strategy 2 matches a header
+            # (exact alias, then the _match_tag_patterns rule set, e.g.
+            # recovering "O2 At AH Outlet" -> O2out from wording alone).
+            field_id = _label_to_field(description)
         if not field_id or field_id in NEVER_AUTO_DETECT:
             continue
-        row_readings = 0
+
+        if field_id in GENERIC_ROW_LAYOUT_COMPOSITION_FIELDS \
+                and _row_is_flue_gas_context(description):
+            # e.g. "N2 At AH Outlet" -- a flue-gas duct reading whose
+            # symbol collides with CENPEEP's coal-Nitrogen symbol, not an
+            # actual coal-composition result.
+            continue
+
+        row_values = []
         for c_idx in value_cols:
             if c_idx >= len(row):
                 continue
             num = _to_num(row[c_idx])
             if num is not None:
-                field_values.setdefault(field_id, []).append(num)
-                row_readings += 1
-        if row_readings:
-            max_readings = max(max_readings, row_readings)
-            field_particulars.setdefault(field_id, str(sym))
+                row_values.append(num)
+        if not row_values:
+            continue
+
+        max_readings = max(max_readings, len(row_values))
+        candidates.setdefault(field_id, []).append({
+            'description': description or str(sym).strip(),
+            'values': row_values,
+            'marked': '+' in description,
+        })
+
+    field_values = {}
+    field_particulars = {}
+    for field_id, rows_for_field in candidates.items():
+        marked_rows = [r for r in rows_for_field if r['marked']]
+        chosen_rows = marked_rows if marked_rows else rows_for_field
+        for r in chosen_rows:
+            field_values.setdefault(field_id, []).extend(r['values'])
+        # "Detected From" label: sheet name + the actual Description
+        # text of whichever row(s) were used, not the bare Symbol -- so
+        # "where did this come from" is answerable without reopening the
+        # workbook (a bare "C" or "N2" symbol is otherwise meaningless
+        # out of context).
+        seen_desc = []
+        for r in chosen_rows:
+            if r['description'] not in seen_desc:
+                seen_desc.append(r['description'])
+        label = ' + '.join(seen_desc)
+        if sheet_name:
+            label = f"{sheet_name}: {label}"
+        field_particulars[field_id] = label
 
     extracted, raw_rows, summary = _finalize_field_values(field_values)
     col_meta = {
@@ -2044,7 +2300,9 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
     # a genuine Strategy-2 (date/tag log) sheet essentially never has, so
     # this reordering doesn't change anything for sheets that were already
     # being parsed correctly by Strategy 2.
-    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3 = _parse_generic_row_layout(rows)
+    ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3 = _parse_generic_row_layout(
+        rows, sheet_name=sheet_name
+    )
     if ext3:
         return {
             'sheetName': sheet_name,
@@ -2236,7 +2494,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
     # checking it against cenpeep_check_rows (capped at 200 rows) rather
     # than the full streamed sheet is safe.
     ext3, raw3, summary3, col_meta3, data_row_count3, calc_only3 = _parse_generic_row_layout(
-        cenpeep_check_rows
+        cenpeep_check_rows, sheet_name=sheet_name
     )
     if ext3:
         return {
@@ -2676,6 +2934,43 @@ def parse_workbook(file_bytes, filename, use_ml=True):
                 'source': detail.get('source', 'rule'),
                 'confidence': detail.get('confidence', 1.0),
             }
+
+    # Cross-sheet override for MULTI_COLUMN_SUM_FIELDS (Fpa/Fsa): the
+    # ranking loop above is deliberately a whole-SHEET choice (see comment
+    # above), so a field only gets backfilled from a lower-ranked sheet
+    # when the higher-ranked sheet doesn't have it AT ALL — even a weak,
+    # ML-matched per-mill SUM on the top-ranked raw log sheet blocks a
+    # much stronger, deterministically rule-matched precomputed "Total
+    # PA/SA Flow" column that happens to live on a different (lower
+    # row-count) sheet. Real plant workbooks commonly split this way: the
+    # raw per-mill columns live on the big hourly log, but the engineer's
+    # own precomputed total lives on a separate period-average sheet. For
+    # just these SUM fields, a rule-matched total on ANY sheet is trusted
+    # over an ML-matched per-mill sum on another sheet — the same "rule
+    # beats ML" precedence _dedupe_columns_per_field already applies
+    # WITHIN one sheet's columns, extended across sheets here.
+    for fid in MULTI_COLUMN_SUM_FIELDS:
+        current_detail = merged_field_detail.get(fid)
+        if not current_detail or current_detail.get('source') != 'ml':
+            continue
+        for sr in ranked_sheets:
+            if sr['sheetName'] == current_detail.get('sheet'):
+                continue
+            if fid not in sr.get('extracted', {}):
+                continue
+            alt_detail = _sheet_field_details(sr).get(fid, {})
+            if alt_detail.get('source') != 'rule':
+                continue
+            merged_extracted[fid] = sr['extracted'][fid]
+            merged_field_source[fid] = (sr['sheetName'], sr.get('dataRowCount', 0))
+            merged_field_detail[fid] = {
+                'sheet': sr['sheetName'],
+                'label': FIELD_LABELS.get(fid, fid),
+                'header': alt_detail.get('header'),
+                'source': 'rule',
+                'confidence': alt_detail.get('confidence', 1.0),
+            }
+            break
 
     # Fallback primary sheet: the best-ranked generic sheet if one produced
     # fields; otherwise whichever sheet produced the most fields at all, so

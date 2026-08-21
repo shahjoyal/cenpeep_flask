@@ -609,6 +609,16 @@ TRAINING_EXAMPLES = [
 
     # ── SP — Steam Pressure (info-only) ─────────────────────────────────────
     ("Steam Pressure", "SP"), ("Main Steam Pressure", "SP"), ("SP kg per cm2", "SP"),
+    # Real-plant superheater-outlet wording -- the actual physical point
+    # "Steam Pressure" means (main steam as it leaves the superheater,
+    # before the turbine), as opposed to the Hot/Cold Reheat pressure
+    # readings ("HRH STEAM PRESSURE", "CRH STEAM PRESS") which are a
+    # different, downstream point after the reheater -- see the OUT_OF_
+    # SCOPE HRH/CRH entries below and the 'SP' guard in
+    # _unit_conflicts_with_field, both of which keep those from being
+    # mistaken for this reading despite sharing "STEAM"/"PRESSURE" wording.
+    ("SH O/L MS Pressure", "SP"), ("SH Outlet MS Pressure", "SP"),
+    ("Superheater Outlet Steam Pressure", "SP"), ("SH O/L Steam Pressure", "SP"),
 ]
 
 
