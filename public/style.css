@@ -314,6 +314,21 @@ header {
   gap: 10px;
 }
 
+/* ── "Design Conditions — for APH Correction" block on the Results tab —
+   its own bordered panel so it reads as a distinct section instead of
+   butting straight up against the Process Inputs/Comparison boxes below
+   it when its two grids are collapsed (their default state). ──────────── */
+.design-conditions-block {
+  background: rgba(96,165,250,0.03);
+  border: 1.5px dashed rgba(96,165,250,0.25);
+  border-radius: var(--radius);
+  padding: 20px 20px 22px;
+  margin-top: 4px;
+  margin-bottom: 28px;
+}
+.design-conditions-block .section-header { margin-top: 0; margin-bottom: 14px; }
+.design-conditions-block .input-grid:last-child { margin-bottom: 0; }
+
 .section-card {
   display: flex;
   align-items: center;
@@ -766,6 +781,17 @@ header {
   color: var(--muted2);
   margin-top: 8px;
   font-weight: 400;
+}
+
+/* ── Reminder note shown at the bottom of the "Boiler Efficiency Corrected"
+   card once APH Correction has been applied. ───────────────────────────── */
+.kpi-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--accent2);
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
 }
 
 .kpi-card .lrad-input {

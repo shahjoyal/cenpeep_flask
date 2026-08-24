@@ -223,6 +223,8 @@ window._processes         = [];
 window._comparisonResults = null;
 window._gcvCorrection     = null;   // { target, source, targetTitle, sourceTitle } once "Apply GCV Correction" is clicked
 window._aphCorrection     = false;  // true once "Apply APH Correction" is clicked — swaps the displayed efficiency to the APH/design-corrected value
+window._aphCorrectionSingle = false; // true once "Apply APH Correction" is clicked on the single-result (no-process) Results tab —
+                                      // re-runs the calculation using whatever is currently in the Design Conditions tab
 let   _processSeq = 0;
 
 function addProcess() {
@@ -590,6 +592,7 @@ function calculate() {
   const activeProcesses = window._processes.filter(p => p.start || p.end);
   window._gcvCorrection = null;   // fresh Calculate — any prior correction no longer applies
   window._aphCorrection = false;  // fresh Calculate — any prior correction no longer applies
+  window._aphCorrectionSingle = false;  // fresh Calculate — any prior correction no longer applies
 
   if (!activeProcesses.length) {
     // No date ranges chosen anywhere — exactly today's behavior.
@@ -625,6 +628,7 @@ function renderOutput(r) {
       <div class="kpi-label">Boiler Efficiency Corrected</div>
       <div class="kpi-value boiler-eff-corr-val">${fmt2(r.BoilerEffCorr)}<span class="kpi-unit">%</span></div>
       <div class="kpi-sub">Corrected to design conditions</div>
+      ${window._aphCorrectionSingle ? `<div class="kpi-note">Please check the input parameters if you feel any issue in the corrected efficiency figure.</div>` : ''}
     </div>
     <div class="kpi-card kpi-red">
       <div class="kpi-label">Dry Gas Loss</div>
@@ -659,7 +663,12 @@ function renderOutput(r) {
         <span style="font-size:14px;color:var(--muted);font-family:'JetBrains Mono',monospace;">%</span>
       </div>
       <div class="kpi-sub">Enter value and recalculate</div>
-    </div>`;
+    </div>
+    <button type="button" class="kpi-card kpi-action${window._aphCorrectionSingle ? ' applied' : ''}" onclick="applyAPHCorrectionResult()">
+      <div class="kpi-label">APH Correction${window._aphCorrectionSingle ? ' <span class="cmp-badge">Applied</span>' : ''}</div>
+      <div class="kpi-value kpi-action-value">${window._aphCorrectionSingle ? 'Recalculate Again' : 'Apply APH Correction'}</div>
+      <div class="kpi-sub">Uses the Design Conditions (APH Correction) tab</div>
+    </button>`;
 
   document.getElementById('output-tables').innerHTML = `
     <div class="output-section">
@@ -704,6 +713,29 @@ function oRow(name, sym, val, uom) {
     <span class="out-val">${fmt2(val)}</span>
     <span class="out-uom">${uom}</span>
   </div>`;
+}
+
+// ── APH Correction — single-result (no date-wise processes) flow ───────────
+// The Design Conditions — Proximate / Ultimate Analysis fields used to sit
+// on the Input Parameters page; they now live on the Results tab itself
+// (above the results table). Nothing about runCalculation() changed —
+// collectInputsFromDOM() still reads those same field ids wherever they sit
+// in the DOM — so clicking "Apply APH Correction" simply re-runs the whole
+// calculation with whatever is currently in those fields and re-renders the
+// Results tab. The reminder note is shown directly on the "Boiler Efficiency
+// Corrected" card itself (see renderOutput above) once applied.
+function applyAPHCorrectionResult() {
+  if (!window._results) {
+    showToast('Calculate first.', 'error');
+    return;
+  }
+  // Fresh full recalculation off whatever's currently in the form — this
+  // picks up any edits made on the Design Conditions section since the
+  // last Calculate/correction.
+  window._results = runCalculation(collectInputsFromDOM());
+  window._aphCorrectionSingle = true;
+  renderOutput(window._results);
+  showToast('APH correction recalculated using the current Design Conditions parameters.', 'success');
 }
 
 // ── Render a side-by-side comparison of multiple date-range processes ───────
@@ -796,11 +828,11 @@ function _renderCorrectionButtons() {
 
 // ── GCV Correction ───────────────────────────────────────────────────────
 // Only meaningful with exactly two active processes. The process with the
-// LATER date "donates" its Proximate Analysis — As Fired readings
+// EARLIER date "donates" its Proximate Analysis — As Fired readings
 // (Moisture, Ash, Volatile Matter, Fixed Carbon, GCV) to the process with
-// the EARLIER date; every other input of the earlier process is untouched,
-// and the later process's own data is untouched too. Both efficiencies are
-// then recomputed so the update is visible on both cards.
+// the LATER date; every other input of the later process is untouched,
+// and the earlier process's own data is untouched too. Both efficiencies
+// are then recomputed so the update is visible on both cards.
 const PROXIMATE_AS_FIRED_IDS = ['M', 'A', 'VM', 'FC', 'GCV'];
 
 // Best single date to sort a process by — start if set, else end.
@@ -824,33 +856,33 @@ function applyGCVCorrection() {
     showToast('Both processes resolve to the same date — cannot tell which is later.', 'error');
     return;
   }
-  const later   = k1 > k0 ? p1 : p0;   // process whose date comes after
-  const earlier = k1 > k0 ? p0 : p1;   // process whose date comes before — gets corrected
+  const later   = k1 > k0 ? p1 : p0;   // process whose date comes after — gets corrected
+  const earlier = k1 > k0 ? p0 : p1;   // process whose date comes before — donates its data
 
   const baseInputs          = collectInputsFromDOM();
   const { avg: avgEarlier } = _averageFieldsInRange(earlier.start, earlier.end);
   const { avg: avgLater   } = _averageFieldsInRange(later.start,   later.end);
 
-  // Earlier process: same as it was, except Proximate As-Fired comes from
-  // the later process (falling back to the shared form value if the log
+  // Later process: same as it was, except Proximate As-Fired comes from
+  // the earlier process (falling back to the shared form value if the log
   // doesn't carry that field, same as the normal per-process averaging).
-  const correctedInputs = { ...baseInputs, ...avgEarlier };
+  const correctedInputs = { ...baseInputs, ...avgLater };
   PROXIMATE_AS_FIRED_IDS.forEach(id => {
-    correctedInputs[id] = (avgLater[id] !== undefined) ? avgLater[id] : baseInputs[id];
+    correctedInputs[id] = (avgEarlier[id] !== undefined) ? avgEarlier[id] : baseInputs[id];
   });
 
-  earlier._originalResult = earlier.result;         // keep the "without correction" result for the Delta card
-  earlier.result          = runCalculation(correctedInputs);
-  earlier.gcvCorrected    = true;
+  later._originalResult = later.result;         // keep the "without correction" result for the Delta card
+  later.result          = runCalculation(correctedInputs);
+  later.gcvCorrected    = true;
 
-  // Later process's data is untouched — re-run it anyway so both numbers
+  // Earlier process's data is untouched — re-run it anyway so both numbers
   // on screen come from the same fresh calculation pass.
-  later.result = runCalculation({ ...baseInputs, ...avgLater });
+  earlier.result = runCalculation({ ...baseInputs, ...avgEarlier });
 
-  window._gcvCorrection = { target: earlier, source: later, targetTitle: earlier.title, sourceTitle: later.title };
+  window._gcvCorrection = { target: later, source: earlier, targetTitle: later.title, sourceTitle: earlier.title };
 
   renderComparison(window._comparisonResults);
-  showToast(`GCV correction applied — "${earlier.title}" now uses "${later.title}"'s Proximate As-Fired data.`, 'success');
+  showToast(`GCV correction applied — "${later.title}" now uses "${earlier.title}"'s Proximate As-Fired data.`, 'success');
 }
 
 function undoGCVCorrection() {
@@ -1043,6 +1075,7 @@ function resetInputs() {
   window._comparisonResults  = null;
   window._gcvCorrection      = null;
   window._aphCorrection      = false;
+  window._aphCorrectionSingle = false;
   window._uiState            = { processInputsOpen: false, processComparisonOpen: false };
   const st = document.getElementById('upload-status');
   if (st) { st.style.display='none'; st.textContent=''; }
