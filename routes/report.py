@@ -41,12 +41,18 @@ METHOD_COLORS = {
     "rule": "D9EAD3",
     "ml": "D6E4F0",
     "derived_fallback": "FCE5CD",
+    # BS-2885 (routes/upload_bs2885.py) methods — additive, doesn't touch
+    # the CENPEEP/BEE entries above.
+    "grid": "D9EAD3",
+    "label": "D6E4F0",
 }
 METHOD_LABELS = {
     "cenpeep_column": "CenPeep layout (exact)",
     "rule": "Exact alias/symbol match",
     "ml": "AI (ML) match",
     "derived_fallback": "Defaulted from another field",
+    "grid": "BS-2885 Sl. No. grid (Method A)",
+    "label": "Label/symbol match (Method B)",
 }
 
 
@@ -59,7 +65,7 @@ def _shade_cell(cell, hex_color):
     tcPr.append(shd)
 
 
-def _add_field_section(doc, heading, field_detail, extracted, missing_fields, level=2):
+def _add_field_section(doc, heading, field_detail, extracted, missing_fields, level=2, standard_label="CENPEEP"):
     from docx.enum.table import WD_TABLE_ALIGNMENT
 
     doc.add_heading(heading, level=level)
@@ -80,7 +86,7 @@ def _add_field_section(doc, heading, field_detail, extracted, missing_fields, le
             row = table.add_row().cells
             row[0].text = d.get("label") or fid
             row[1].text = d.get("header") or "—"
-            method = d.get("source", "rule")
+            method = d.get("source") or "rule"
             row[2].text = METHOD_LABELS.get(method, method)
             conf = d.get("confidence")
             row[3].text = f"{conf:.2f}" if isinstance(conf, (int, float)) else "—"
@@ -94,14 +100,14 @@ def _add_field_section(doc, heading, field_detail, extracted, missing_fields, le
     doc.add_heading("Fields Not Detected", level=level + 1)
     if missing_fields:
         doc.add_paragraph(
-            "The following required CENPEEP input fields were not found on "
+            f"The following required {standard_label} input fields were not found on "
             "any sheet in this workbook and must be entered manually:"
         )
         for m in missing_fields:
             label = (m.get("label") or m.get("id")) if isinstance(m, dict) else str(m)
             doc.add_paragraph(label or str(m), style="List Bullet")
     else:
-        doc.add_paragraph("All required CENPEEP input fields were detected.")
+        doc.add_paragraph(f"All required {standard_label} input fields were detected.")
     doc.add_paragraph()
 
 
@@ -119,7 +125,9 @@ def generate_report():
           {"title": str, "start": str|None, "end": str|None,
            "rowCount": int, "avg": {fieldId: value}},
           ...
-        ]
+        ],
+        "reportTitle": str,       // optional, defaults to the CENPEEP title
+        "filenamePrefix": str     // optional, defaults to "CENPEEP_Field_Report"
       }
     Returns the .docx as a file download.
     """
@@ -139,6 +147,11 @@ def generate_report():
     primary_sheet  = data.get('primarySheet') or ''
     filename       = data.get('filename') or 'workbook'
     processes      = data.get('processes') or []
+    # Both default to the original CENPEEP wording/filename exactly, so
+    # existing callers (CENPEEP, BEE) that don't send these are unaffected.
+    report_title    = data.get('reportTitle') or 'CENPEEP Field Detection Report'
+    filename_prefix = data.get('filenamePrefix') or 'CENPEEP_Field_Report'
+    standard_label  = data.get('standardLabel') or 'CENPEEP'
 
     if not field_detail:
         return jsonify({
@@ -151,12 +164,13 @@ def generate_report():
     normal.font.name = "Calibri"
     normal.font.size = Pt(10.5)
 
-    doc.add_heading(f"CENPEEP Field Detection Report — {filename}", level=1)
+    doc.add_heading(f"{report_title} — {filename}", level=1)
 
     if not processes:
         # Whole-file report — identical shape to r.py's output.
         _add_field_section(doc, primary_sheet or "No sheet selected",
-                            field_detail, extracted, missing_fields)
+                            field_detail, extracted, missing_fields,
+                            standard_label=standard_label)
     else:
         # One section per date-wise process, each using its own averaged
         # values but the same field-detection info (see module docstring).
@@ -168,7 +182,8 @@ def generate_report():
             avg        = p.get('avg') or {}
             proc_extracted = {**extracted, **avg}
             heading = f"{title}  —  {start} \u2192 {end}  ({row_count} row{'s' if row_count != 1 else ''})"
-            _add_field_section(doc, heading, field_detail, proc_extracted, missing_fields)
+            _add_field_section(doc, heading, field_detail, proc_extracted, missing_fields,
+                                standard_label=standard_label)
 
     buf = io.BytesIO()
     doc.save(buf)
@@ -176,7 +191,7 @@ def generate_report():
 
     base = filename.rsplit('.', 1)[0] if '.' in filename else filename
     safe_name = re.sub(r'[^A-Za-z0-9 _-]', '', base).strip() or 'workbook'
-    out_name = f"CENPEEP_Field_Report_{safe_name}.docx"
+    out_name = f"{filename_prefix}_{safe_name}.docx"
 
     return send_file(
         buf,

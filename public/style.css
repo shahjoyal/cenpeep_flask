@@ -627,6 +627,56 @@ header {
   font-weight: 500;
 }
 
+/* ── Enthalpy auto-calc (T & P → enthalpy), BS-2885 only ────────────────────
+   Small sub-row under Feedwater/Drum/Steam enthalpy fields. Leave both
+   boxes empty to type the enthalpy by hand as before; fill both and the
+   enthalpy field above fills itself in (see initEnthalpyAutoCalc() in
+   script1.js) and picks up .field-computed until either box is cleared. */
+.field-calc {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.field-calc-label {
+  font-size: 10px;
+  color: var(--muted2);
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.field-calc-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface2);
+  border: 1.5px solid var(--border);
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  outline: none;
+  transition: all 0.2s;
+}
+
+.field-calc-input::placeholder { color: var(--muted2); opacity: 0.8; }
+
+.field-calc-input:focus {
+  border-color: var(--accent2);
+  box-shadow: 0 0 0 3px rgba(8,145,178,0.12);
+}
+
+/* .field-computed — enthalpy value was filled in from Temperature &
+   Pressure rather than typed or detected from an upload. Cleared the
+   moment either T or P box is emptied out. */
+.field-input.field-computed {
+  border-color: var(--accent2);
+  background: rgba(8,145,178,0.08);
+}
+
 .action-bar {
   display: flex;
   gap: 12px;

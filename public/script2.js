@@ -1,15 +1,41 @@
 /* ════════════════════════════════════════════════════════════════════
    Boiler Efficiency — ASME-PTC 4.1 — script2.js
-   Field detection ONLY (upload → auto-populate). No formula / output yet
-   — that's added later, once the ASME-PTC 4.1 method is defined. Reuses the
-   exact same upload endpoint, field ids, and detection logic as CENPEEP
-   (see public/script.js), just without calculate()/renderOutput()/
-   saveSession()/downloadCSV()/downloadPDF().
+   Field detection (upload → auto-populate) — reuses the exact same upload
+   endpoint, field ids, and detection logic as CENPEEP (see public/
+   script.js) — PLUS the ASME PTC 4.1 (Abbreviated Efficiency Test / Losses
+   Method, HHV basis) calculation itself (calculate()/runCalculation()/
+   renderOutput()), reference: "ASME PTC 4.1 — Boiler Efficiency" workbook,
+   sheet "PTC 4.1 Calculator", Items 22–72.
+
+   ── Why this reuses the CENPEEP/BEE field set ──────────────────────────
+   Items 37–41 (as-fired proximate: Moisture/VM/FC/Ash/HHV), Item 47
+   (Sulfur), Items 32–34 (dry flue-gas O₂/CO/CO₂ at the point the gas
+   leaves the boiler — same physical location as CENPEEP's APH-out
+   reading), Items 13/14 (flue-gas temps) and the refuse/unburnt-carbon
+   inputs (Cba/Cfa/Pfa/Pba) are the SAME physical quantities CENPEEP and
+   BEE already detect from an uploaded sheet — so this tab's Excel upload
+   (initUpload() below) reuses them as-is via the shared field ids/
+   REQUIRED_FIELDS in routes/upload.py. The Ultimate Analysis (Items
+   43–46, Carbon/Hydrogen/Nitrogen/Oxygen) is derived from the Proximate
+   Analysis with the same regression CENPEEP already uses — no separate
+   detection needed. Only two ASME-specific loss terms have no CENPEEP/BEE
+   equivalent and stay manual, entered directly on the Results page
+   exactly like CENPEEP's own Radiation Loss box: Item 69 (Radiation) and
+   Item 70 (Unmeasured Losses).
+
+   Items 1–21/26/27/29–31/48/50–59/60/63/64 (steam pressures/temperatures,
+   enthalpies, steam/blowdown flow, heat input/output, ash-softening temp)
+   feed the workbook's separate heat-input/output energy balance, not the
+   Item-72 efficiency % itself — CENPEEP/BEE don't compute that energy
+   balance either (only the efficiency + loss breakdown), so it's left out
+   here for the same reason, keeping this tab consistent with the other
+   two.
    ════════════════════════════════════════════════════════════════════ */
 
 // ── Tiny helpers ─────────────────────────────────────────────────────────────
 const v    = id => { const el = document.getElementById(id); return el ? parseFloat(el.value) || 0 : 0; };
-const fmt2 = n => (typeof n === 'number' && !isNaN(n)) ? n.toFixed(2) : '—';
+const fmt  = (n, d=4) => (typeof n === 'number' && !isNaN(n)) ? n.toFixed(d) : '—';
+const fmt2 = n => fmt(n, 2);
 
 // ── DB health pill (kept for parity with CENPEEP page; harmless if absent) ──
 async function checkDB() {
@@ -48,11 +74,28 @@ window._uploadedFilename = null;
 // since ASME-PTC 4.1 reuses the identical input-field set for now. Used only to
 // reset detected/missing coloring across uploads.
 const ALL_FIELD_IDS = [
-  'L', 'Ffw', 'Fin', 'Cba', 'Cfa',
+  'Cba', 'Cfa',
   'M', 'A', 'VM', 'FC', 'GCV',
-  'O2in', 'O2out', 'COout',
-  'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao', 'Fsa', 'Fpa',
+  'O2out', 'COout', 'Tgo',
 ];
+
+// ── Persist for the Summary tab ──────────────────────────────────────────
+// See script.js for the full explanation — same idea, same sessionStorage
+// key, so any tab's upload (this one included) feeds the Summary tab
+// without a second upload there.
+function stashForSummary(data, sourceTab) {
+  try {
+    sessionStorage.setItem('cenpeep_lastUpload', JSON.stringify({
+      filename: data.filename,
+      primarySheet: data.primarySheet,
+      sheetNameBS2885: data.sheetNameBS2885,
+      extracted: data.extracted || {},
+      extractedBS2885: data.extractedBS2885 || {},
+      sourceTab,
+      savedAt: Date.now(),
+    }));
+  } catch (e) { /* storage full/unavailable — Summary just won't auto-populate */ }
+}
 
 function initUpload() {
   const input = document.getElementById('upload-file-input');
@@ -74,6 +117,7 @@ function initUpload() {
       const data = await res.json();
 
       if (!data.ok) throw new Error(data.error || 'Upload failed');
+      stashForSummary(data, 'ASME PTC 4.1');
 
       // ── Reset previous upload's coloring before applying the new one ─────
       for (const fid of ALL_FIELD_IDS) {
@@ -100,10 +144,6 @@ function initUpload() {
         if (el) el.classList.add('field-missing');
       }
 
-      // Recalc CO2 + Design Ultimate Analysis auto-fields (these are input-
-      // side derived fields, same as CENPEEP — not the efficiency formula).
-      autoCalcCO2();
-      autoCalcDesignUltimate();
       window._uploadedFilename = data.filename;
 
       // ── Build "selected sheet" AI summary panel ──────────────────────────
@@ -166,16 +206,266 @@ function initUpload() {
   });
 }
 
+// ── ASME PTC 4.1 — calculation ───────────────────────────────────────────────
+// Field ids this calculation reads, all pre-existing on this form and already
+// populated by the CENPEEP-shared upload/detection above.
+const ASME_INPUT_IDS = [
+  'M', 'A', 'VM', 'FC', 'GCV', 'S',
+  'Cba', 'Cfa', 'Pfa', 'Pba',
+  'O2out', 'COout', 'Tgo', 'Tref',
+];
+const ASME_INPUT_LABELS = {
+  M: 'Moisture — Item 37', A: 'Ash — Item 40', VM: 'Volatile Matter — Item 38',
+  FC: 'Fixed Carbon — Item 39', GCV: 'HHV, as fired — Item 41', S: 'Sulfur — Item 47',
+  Cba: 'Unburnt Carbon — Bottom Ash', Cfa: 'Unburnt Carbon — Fly Ash',
+  Pfa: '% Fly Ash in Total Ash', Pba: '% Bottom Ash in Total Ash',
+  O2out: 'O\u2082, dry — Item 33',
+  COout: 'CO, dry — Item 34',
+  Tgo: 'Flue-Gas Temp Leaving Boiler — Item 13', Tref: 'Reference Air Temp — Items 10/11',
+};
+const g = (obj, id) => { const n = parseFloat(obj[id]); return isNaN(n) ? 0 : n; };
+
+function collectInputsFromDOM() {
+  const obj = {};
+  ASME_INPUT_IDS.forEach(id => { const el = document.getElementById(id); obj[id] = el ? el.value : 0; });
+  // Radiation (Item 69) / Unmeasured Losses (Item 70) live as editable boxes
+  // on the Results page itself (see renderOutput), same UX as CENPEEP's own
+  // Radiation & Unaccounted Loss box — undefined until first Calculate.
+  obj.Lrad = document.getElementById('Lrad') ? v('Lrad') : undefined;
+  obj.Lunm = document.getElementById('Lunm') ? v('Lunm') : undefined;
+  return obj;
+}
+
+// Ultimate Analysis (Items 43/44/45/46 — Carbon/Hydrogen/Nitrogen/Oxygen) via
+// the same empirical regression from Proximate Analysis CENPEEP already uses
+// (public/script.js runCalculation) — Items 48/49 (Ash/Moisture) are the
+// as-fired Ash/Moisture directly (Items 40/37). Also derives the weighted
+// combustibles-in-refuse % (Item 61) from the same Cba/Cfa/Pfa/Pba fields
+// CENPEEP collects.
+function computeDerivedInputs(raw) {
+  const inputs = { ...raw };
+  const M = g(inputs,'M'), A = g(inputs,'A'), VM = g(inputs,'VM'), FC = g(inputs,'FC'), S = g(inputs,'S');
+
+  inputs.Ca = 0.97*FC + 0.7*(VM+0.1*A) - M*(0.6-0.01*M);
+  inputs.H  = 0.036*FC + 0.086*(VM-0.1*A) - 0.0035*M*M*(1-0.02*M);
+  inputs.N  = 2.1 - 0.02*VM;
+  inputs.O  = 100 - M - A - inputs.Ca - S - inputs.H - inputs.N;
+
+  const Pfa = g(inputs,'Pfa') || 80, Pba = g(inputs,'Pba') || 20;
+  inputs.Cash = Pfa/100*g(inputs,'Cfa') + Pba/100*g(inputs,'Cba');   // Item 61
+  return inputs;
+}
+
+// ── Core calculation (pure — takes a plain {id: value} object, returns the
+//    results object; no DOM reads/writes) ────────────────────────────────────
+// Follows the ASME PTC 4.1 Abbreviated Efficiency Test — Losses (Heat-Loss)
+// Method, HHV basis, Items 22–72 of the reference "PTC 4.1 Calculator"
+// workbook, kept in consistent metric units throughout (Btu/lb-°F and
+// kcal/kg-°C are numerically the same specific-heat value, so no unit
+// conversion is needed for the % loss results — °C temperature differences
+// and kcal/kg GCV can be used directly in place of °F/Btu-lb).
+function runCalculation(rawInputs) {
+  const inputs = computeDerivedInputs(rawInputs);
+  const gv = id => g(inputs, id);
+
+  const GCV = gv('GCV'), S = gv('S');
+  const O2out = gv('O2out'), COout = gv('COout');
+  const Tgo = gv('Tgo'), Tref = gv('Tref');
+  const A = gv('A'), M = gv('M');
+  const Ca = gv('Ca'), H = gv('H'), Cash = gv('Cash');
+  const Lrad = (inputs.Lrad === undefined || isNaN(inputs.Lrad)) ? 1.0 : inputs.Lrad;  // Item 69 — ABMA/measured, manual
+  const Lunm = (inputs.Lunm === undefined || isNaN(inputs.Lunm)) ? 0.5 : inputs.Lunm;  // Item 70 — mutually agreed, manual
+
+  // Dry flue-gas analysis (Items 32–35) — CO2 by the same 19.3−O₂ relation
+  // CENPEEP already uses (same APH-out / "leaving boiler" sampling point
+  // as Item 13).
+  const COoutp = (COout/1000000)*100;         // Item 34, ppm → % vol
+  const CO2    = 19.3 - O2out;                // Item 32
+  const N2     = 100 - CO2 - O2out - COoutp;  // Item 35, by difference
+  const ExcessAir = (0.2682*N2 - (O2out - COoutp/2)) !== 0
+    ? 100*(O2out - COoutp/2)/(0.2682*N2 - (O2out - COoutp/2))
+    : 0;                                      // Item 36 (informational)
+
+  // Refuse / unburnt-carbon chain (Items 22/24/61) — dry refuse per unit
+  // fuel estimated from Ash (Item 40) and combustibles-in-refuse % (Item 61,
+  // from Cba/Cfa/Pfa/Pba), same fallback the workbook itself uses when
+  // Item 22 isn't directly measured (Item 25 formula: Ash/(100−Item61)).
+  const DryRefuse   = (100 - Cash) !== 0 ? A/(100 - Cash) : 0;    // Item 22
+  const U           = A/100 * (Cash/(100-Cash || 1));             // unburnt-carbon fraction
+  const CarbonBurned= Ca - 100*U;                                 // Item 24
+
+  // Dry flue gas per unit as-fired fuel (Item 25/28) from the measured
+  // flue-gas analysis directly (rather than a theoretical-air estimate).
+  const denom = 3*(CO2+COoutp);
+  const MassDFG = denom !== 0
+    ? ((11*CO2 + 8*O2out + 7*(N2+COoutp))/denom) * (CarbonBurned/100 + S/267)
+    : 0;
+
+  const dT = Tgo - Tref;   // Item 13 − Item 11
+  const CVc = 8077.8;      // HHV of pure unburnt carbon, kcal/kg (matches CENPEEP's own constant)
+
+  // Heat-loss components (Items 65–70), HHV basis.
+  const L65 = MassDFG*0.24*dT/GCV*100;                              // Dry flue-gas sensible heat
+  const L66 = M/100*(584+0.45*dT)/GCV*100;                          // Moisture in fuel
+  const L67 = 9*(H/100)*(584+0.45*dT)/GCV*100;                      // Water from combustion of H2
+  const L68 = (100-Cash) !== 0 ? (A/(100-Cash))*(Cash/100*CVc)/GCV*100 : 0;  // Combustibles in refuse
+  const L69 = Lrad;                                                 // Radiation
+  const L70 = Lunm;                                                 // Unmeasured losses
+
+  const TotalLosses = L65+L66+L67+L68+L69+L70;   // Item 71
+  const BoilerEff   = 100 - TotalLosses;         // Item 72
+
+  return {
+    CO2, N2, COoutp, ExcessAir,
+    Ca, H, N: gv('N'), O: gv('O'),
+    Cash, DryRefuse, U, CarbonBurned, MassDFG, dT,
+    L65, L66, L67, L68, L69, L70, TotalLosses, BoilerEff,
+    Lrad, Lunm,
+    inputs: ASME_INPUT_IDS.map(id => ({ id, label: ASME_INPUT_LABELS[id] || id, value: inputs[id] })),
+  };
+}
+
+// ── Entry point wired to the "▶ Calculate Efficiency" button ────────────────
+function calculate() {
+  window._results = runCalculation(collectInputsFromDOM());
+  renderOutput(window._results);
+  showTab('output');
+}
+
+// ── Render output KPIs + loss breakdown ──────────────────────────────────────
+function renderOutput(r) {
+  document.getElementById('kpi-area').innerHTML = `
+    <div class="kpi-card kpi-green">
+      <div class="kpi-label">Boiler Efficiency</div>
+      <div class="kpi-value boiler-eff-val">${fmt2(r.BoilerEff)}<span class="kpi-unit">%</span></div>
+      <div class="kpi-sub">ASME PTC 4.1 — Losses Method, HHV basis</div>
+    </div>
+    <div class="kpi-card kpi-red">
+      <div class="kpi-label">Dry Flue Gas Loss <span style="opacity:.6">(Item 65)</span></div>
+      <div class="kpi-value">${fmt2(r.L65)}<span class="kpi-unit">%</span></div>
+    </div>
+    <div class="kpi-card kpi-blue">
+      <div class="kpi-label">Moisture in Fuel Loss <span style="opacity:.6">(Item 66)</span></div>
+      <div class="kpi-value">${fmt2(r.L66)}<span class="kpi-unit">%</span></div>
+    </div>
+    <div class="kpi-card kpi-green">
+      <div class="kpi-label">H\u2082 Combustion Loss <span style="opacity:.6">(Item 67)</span></div>
+      <div class="kpi-value">${fmt2(r.L67)}<span class="kpi-unit">%</span></div>
+    </div>
+    <div class="kpi-card kpi-amber">
+      <div class="kpi-label">Combustibles in Refuse <span style="opacity:.6">(Item 68)</span></div>
+      <div class="kpi-value">${fmt2(r.L68)}<span class="kpi-unit">%</span></div>
+    </div>
+    <div class="kpi-card kpi-red">
+      <div class="kpi-label">Radiation Loss <span style="opacity:.6">(Item 69)</span></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+        <input type="number" id="Lrad" value="${r.Lrad}" oninput="recalculate()"
+          style="background:var(--bg);border:1px solid var(--accent);border-radius:6px;padding:6px 10px;
+                 font-family:'JetBrains Mono',monospace;font-size:20px;color:var(--text-bright);width:90px;outline:none;"/>
+        <span style="font-size:14px;color:var(--muted);font-family:'JetBrains Mono',monospace;">%</span>
+      </div>
+      <div class="kpi-sub">ABMA curve / measured — enter &amp; recalculate</div>
+    </div>
+    <div class="kpi-card kpi-blue">
+      <div class="kpi-label">Unmeasured Losses <span style="opacity:.6">(Item 70)</span></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+        <input type="number" id="Lunm" value="${r.Lunm}" oninput="recalculate()"
+          style="background:var(--bg);border:1px solid var(--accent);border-radius:6px;padding:6px 10px;
+                 font-family:'JetBrains Mono',monospace;font-size:20px;color:var(--text-bright);width:90px;outline:none;"/>
+        <span style="font-size:14px;color:var(--muted);font-family:'JetBrains Mono',monospace;">%</span>
+      </div>
+      <div class="kpi-sub">Mutually agreed value — enter &amp; recalculate</div>
+    </div>`;
+
+  document.getElementById('output-tables').innerHTML = `
+    <div class="output-section">
+      <div class="output-section-head"><span>Heat-Loss Efficiency — Items 65\u201372</span></div>
+      <div class="output-row header-row">
+        <span>Parameter</span><span style="text-align:right">Item</span>
+        <span style="text-align:right">Value</span><span style="text-align:right">UoM</span>
+      </div>
+      ${oRow('Dry Flue Gas Loss',        '65', r.L65, '%')}
+      ${oRow('Moisture in Fuel',         '66', r.L66, '%')}
+      ${oRow('Water from H\u2082 Combustion', '67', r.L67, '%')}
+      ${oRow('Combustibles in Refuse',   '68', r.L68, '%')}
+      ${oRow('Radiation',                '69', r.L69, '%')}
+      ${oRow('Unmeasured Losses',        '70', r.L70, '%')}
+      <div class="output-row highlight-row2">
+        <span class="out-name">Total Losses</span>
+        <span class="out-sym">71</span>
+        <span class="out-val">${fmt2(r.TotalLosses)}</span>
+        <span class="out-uom">%</span>
+      </div>
+      <div class="output-row highlight-row2">
+        <span class="out-name">Boiler Efficiency</span>
+        <span class="out-sym">72</span>
+        <span class="out-val">${fmt2(r.BoilerEff)}</span>
+        <span class="out-uom">%</span>
+      </div>
+    </div>
+    <div class="output-section">
+      <div class="output-section-head"><span>Intermediate Values</span></div>
+      <div class="output-row header-row">
+        <span>Parameter</span><span style="text-align:right">Item</span>
+        <span style="text-align:right">Value</span><span style="text-align:right">UoM</span>
+      </div>
+      ${oRow('CO\u2082, dry',                     '32', r.CO2,           '%')}
+      ${oRow('N\u2082, dry (by difference)',      '35', r.N2,            '%')}
+      ${oRow('Excess Air',                        '36', r.ExcessAir,     '%')}
+      ${oRow('Carbon, as fired (ultimate)',       '43', r.Ca,            '%')}
+      ${oRow('Hydrogen, as fired (ultimate)',     '44', r.H,             '%')}
+      ${oRow('Dry Refuse per Unit Fuel',          '22', r.DryRefuse,     '\u2014')}
+      ${oRow('Carbon Burned per Unit Fuel',       '24', r.CarbonBurned,  '%')}
+      ${oRow('Dry Flue Gas per Unit Fuel',        '25', r.MassDFG,       '\u2014')}
+    </div>`;
+}
+
+function oRow(name, item, val, uom) {
+  return `<div class="output-row">
+    <span class="out-name">${name}</span>
+    <span class="out-sym">${item}</span>
+    <span class="out-val">${fmt2(val)}</span>
+    <span class="out-uom">${uom}</span>
+  </div>`;
+}
+
+// Live-recalculate when the Radiation (Item 69) / Unmeasured Losses
+// (Item 70) boxes on the Results page are edited — same pattern as
+// CENPEEP's own Radiation & Unaccounted Loss box (public/script.js
+// recalculate()) — re-derives just the total/efficiency without a full
+// re-run, then refreshes the KPI + table numbers in place.
+function recalculate() {
+  if (!window._results) return;
+  const r = window._results;
+  r.Lrad = parseFloat(document.getElementById('Lrad').value) || 0;
+  r.Lunm = parseFloat(document.getElementById('Lunm').value) || 0;
+  r.L69  = r.Lrad;
+  r.L70  = r.Lunm;
+  r.TotalLosses = r.L65+r.L66+r.L67+r.L68+r.L69+r.L70;
+  r.BoilerEff   = 100 - r.TotalLosses;
+  document.querySelectorAll('.boiler-eff-val').forEach(el => {
+    el.innerHTML = fmt2(r.BoilerEff) + '<span class="kpi-unit">%</span>';
+  });
+  const totalRow = document.querySelector('#output-tables .highlight-row2:nth-of-type(1) .out-val');
+  const effRow   = document.querySelector('#output-tables .highlight-row2:nth-of-type(2) .out-val');
+  if (totalRow) totalRow.textContent = fmt2(r.TotalLosses);
+  if (effRow)   effRow.textContent   = fmt2(r.BoilerEff);
+}
+
+// ── Tab switching (Input Parameters / Results & Losses) ─────────────────────
+function showTab(tab) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-'+tab).classList.add('active');
+  document.querySelectorAll('.tab-btn')[tab === 'input' ? 0 : 1].classList.add('active');
+}
+
 // ── Reset inputs ──────────────────────────────────────────────────────────────
 function resetInputs() {
-  const d={L:210,Ffw:615,Fin:140,Cba:1.2,Cfa:0.4,Pfa:80,Pba:20,
+  const d={Cba:1.2,Cfa:0.4,Pfa:80,Pba:20,
     M:12.2,A:40,VM:22.9,FC:24.9,GCV:3320,S:0.6,
-    O2in:3.5,COin:39,O2out:5,COout:50,
-    Tgi:350,Tgo:135,Tpai:40,Tpao:325,Tsai:34,Tsao:325,
-    Fsa:450,Fpa:250,Tref:30,
-    Md:13,Ad:40,VMd:24,FCd:23,
-    Sd:0.3,
-    GCVd:3300,Trad:38,Mwvd:0.013};
+    O2out:5,COout:50,
+    Tgo:135,Tref:30};
   Object.entries(d).forEach(([id,val]) => {
     const el = document.getElementById(id);
     if (el) el.value = val;
@@ -185,58 +475,13 @@ function resetInputs() {
     if (el) el.classList.remove('field-detected', 'field-missing');
   }
   window._uploadedFilename = null;
+  window._results = null;
   const st = document.getElementById('upload-status');
   if (st) { st.style.display='none'; st.textContent=''; }
-  autoCalcCO2();
-  autoCalcDesignUltimate();
-}
-
-// ── CO₂ auto-calc (input-side derived field, same as CENPEEP) ───────────────
-function autoCalcCO2() {
-  const O2in  = v('O2in'),  O2out = v('O2out');
-  const co2in = document.getElementById('CO2in');
-  const co2out= document.getElementById('CO2out');
-  if (co2in)  co2in.value  = (19.3 - O2in).toFixed(2);
-  if (co2out) co2out.value = (19.3 - O2out).toFixed(2);
-}
-
-// ── Design — Ultimate Analysis auto-calc (input-side derived field, same
-//    formula chain as CENPEEP's Ultimate Analysis — As Fired) ───────────────
-function autoCalcDesignUltimate() {
-  const Md = v('Md'), Ad = v('Ad'), VMd = v('VMd'), FCd = v('FCd'), Sd = v('Sd');
-
-  const FcDc = FCd / (1 - (1.1 * Ad / 100) - (Md / 100));
-  const VmDf = 100 - FcDc;
-  const Cdf  = FcDc + 0.9 * (VmDf - 14);
-  const Hdf  = VmDf * ((7.35 / (VmDf + 10)) - 0.013);
-  const Ndf  = 2.1 - (0.012 * VmDf);
-  const k    = (VMd + FCd) / (VmDf + FcDc);
-
-  const Cd  = Cdf * k;
-  const Hd  = Hdf * k;
-  const Nd  = Ndf * k;
-  const Md2 = Md;
-  const Ad2 = Ad;
-  const Od  = 100 - Cd - Sd - Hd - Md2 - Nd - Ad2;
-
-  const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = fmt2(val); };
-  set('Cd', Cd); set('Hd', Hd); set('Nd', Nd); set('Od', Od);
-  set('Md2', Md2); set('Ad2', Ad2);
 }
 
 // ── Event listeners + init ────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  const o2in  = document.getElementById('O2in');
-  const o2out = document.getElementById('O2out');
-  if (o2in)  o2in.addEventListener('input',  autoCalcCO2);
-  if (o2out) o2out.addEventListener('input', autoCalcCO2);
-  autoCalcCO2();
-
-  ['Md', 'Ad', 'VMd', 'FCd', 'Sd'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('input', autoCalcDesignUltimate);
-  });
-  autoCalcDesignUltimate();
   initUpload();
   checkDB();
 });

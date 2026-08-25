@@ -368,6 +368,24 @@ function computeMissingFields(extracted) {
     .map(id => ({ id, label: INPUT_LABELS[id] || id }));
 }
 
+// ── Persist for the Summary tab ──────────────────────────────────────────
+// See script.js for the full explanation — same idea, same sessionStorage
+// key, so any tab's upload (this one included) feeds the Summary tab
+// without a second upload there.
+function stashForSummary(data, sourceTab) {
+  try {
+    sessionStorage.setItem('cenpeep_lastUpload', JSON.stringify({
+      filename: data.filename,
+      primarySheet: data.primarySheet,
+      sheetNameBS2885: data.sheetNameBS2885,
+      extracted: data.extracted || {},
+      extractedBS2885: data.extractedBS2885 || {},
+      sourceTab,
+      savedAt: Date.now(),
+    }));
+  } catch (e) { /* storage full/unavailable — Summary just won't auto-populate */ }
+}
+
 function initUpload() {
   const input = document.getElementById('upload-file-input');
   if (!input) return;
@@ -388,6 +406,7 @@ function initUpload() {
       const data = await res.json();
 
       if (!data.ok) throw new Error(data.error || 'Upload failed');
+      stashForSummary(data, 'BEE');
 
       // ── Reset previous upload's coloring before applying the new one ─────
       for (const fid of ALL_FIELD_IDS) {

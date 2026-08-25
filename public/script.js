@@ -49,6 +49,27 @@ function showToast(msg, type = 'success') {
   t._timer = setTimeout(() => { t.className = 'toast'; }, 3200);
 }
 
+// ── Persist for the Summary tab ──────────────────────────────────────────
+// Lets the Summary tab auto-show all 4 methods' efficiency without a
+// second upload — any tab's successful upload stashes the same parsed
+// data Summary needs (filename + both field keysets), scoped to this
+// browser tab's session (sessionStorage) — same lifetime as the login
+// flag. Best-effort: a full/unavailable storage just means Summary won't
+// auto-populate; it never blocks this tab's own upload.
+function stashForSummary(data, sourceTab) {
+  try {
+    sessionStorage.setItem('cenpeep_lastUpload', JSON.stringify({
+      filename: data.filename,
+      primarySheet: data.primarySheet,
+      sheetNameBS2885: data.sheetNameBS2885,
+      extracted: data.extracted || {},
+      extractedBS2885: data.extractedBS2885 || {},
+      sourceTab,
+      savedAt: Date.now(),
+    }));
+  } catch (e) { /* storage full/unavailable — Summary just won't auto-populate */ }
+}
+
 // ── Excel upload → auto-populate ─────────────────────────────────────────────
 window._uploadedFilename = null;
 
@@ -92,6 +113,7 @@ function initUpload() {
       const data = await res.json();
 
       if (!data.ok) throw new Error(data.error || 'Upload failed');
+      stashForSummary(data, 'CENPEEP');
 
       // ── Reset previous upload's coloring before applying the new one ─────
       for (const fid of ALL_FIELD_IDS) {

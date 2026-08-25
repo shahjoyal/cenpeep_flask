@@ -79,6 +79,13 @@ except ImportError:
 from ml.field_classifier import get_classifier, DEFAULT_CONFIDENCE_THRESHOLD
 from ml.training_data import is_non_field_header
 
+# BS-2885 detection is a separate, self-contained module (its own item
+# catalog, its own row-scanning logic) — imported here only so its result
+# can be added as an extra key on this same endpoint's response. It shares
+# no dicts/state with the CENPEEP/BEE detection above, so nothing here
+# changes how CENPEEP or BEE fields are found.
+from routes.upload_bs2885 import extract_bs2885
+
 upload_bp = Blueprint('upload', __name__)
 
 # ─── Chunking config ───────────────────────────────────────────────────────────
@@ -3201,6 +3208,16 @@ def upload_file():
             (sr for sr in result['sheetResults'] if sr['sheetName'] == result['primarySheet']),
             result['sheetResults'][0] if result['sheetResults'] else None,
         )
+
+        # BS-2885 detection — additive only. Runs against the same upload,
+        # in its own try/except, so a problem here can never take down the
+        # CENPEEP/BEE response above; on failure it just contributes an
+        # empty extraction instead of erroring the whole request.
+        try:
+            bs2885_result = extract_bs2885(file_bytes)
+        except Exception:
+            bs2885_result = {'extracted': {}, 'missingFields': [], 'sheetName': None, 'fieldDetail': {}}
+
         return jsonify({
             'ok': True,
             'filename': f.filename,
@@ -3209,6 +3226,12 @@ def upload_file():
             # Keep legacy fields for backward compat with existing frontend
             'sheetName': result['primarySheet'],
             'rawRows': primary_sheet_result['rawRows'] if primary_sheet_result else [],
+            # BS-2885-specific keys, namespaced so they never collide with
+            # the CENPEEP/BEE keys above.
+            'extractedBS2885':    bs2885_result['extracted'],
+            'missingFieldsBS2885': bs2885_result['missingFields'],
+            'sheetNameBS2885':    bs2885_result['sheetName'],
+            'fieldDetailBS2885':  bs2885_result.get('fieldDetail', {}),
         })
     except MemoryError:
         return jsonify({

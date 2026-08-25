@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boiler Efficiency Calculator — Summary</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ── Navbar ──────────────────────────────────────────────────────────── -->
+<nav class="navbar">
+  <div class="nav-inner">
+    <div class="nav-logo">
+      <div class="nav-logo-icon"><img src="images/abhitech-logo.png" alt="ABHITECH"></div>
+      <span class="nav-logo-text">Boiler<small>Efficiency Calculator</small></span>
+    </div>
+    <div class="nav-links">
+      <a href="calculator.html" class="nav-link">CENPEEP</a>
+      <a href="tab1.html"       class="nav-link">BS-2885</a>
+      <a href="tab2.html"       class="nav-link">ASME-PTC 4.1</a>
+      <a href="tab3.html"       class="nav-link">BEE</a>
+      <a href="summary.html"    class="nav-link active">Summary</a>
+      <a href="sessions.html"   class="nav-link">Sessions</a>
+    </div>
+    <button class="nav-logout" onclick="logout()">Logout</button>
+  </div>
+</nav>
+
+<!-- ── Toast ──────────────────────────────────────────────────────────── -->
+<div class="toast" id="toast"></div>
+
+<div class="container">
+  <div class="section-header" style="margin-top:0"><div class="section-label">Summary — All Methods</div><div class="section-line"></div></div>
+
+  <!-- Excel upload banner — one upload drives all four methods below -->
+  <div class="upload-banner" id="upload-banner">
+    <div class="upload-banner-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></div>
+    <div class="upload-banner-text">
+      <strong>Import from Excel</strong>
+      <span>Upload one data sheet — CENPEEP, BS-2885, ASME-PTC 4.1 and BEE efficiencies are all calculated from it, each using only its own required input fields.</span>
+    </div>
+    <div class="upload-banner-actions">
+      <input type="file" id="upload-file-input" accept=".xlsx,.xls,.xlsm">
+      <button class="btn-upload" onclick="document.getElementById('upload-file-input').click()">
+        <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>Upload Excel Sheet
+      </button>
+      <span class="upload-status" id="upload-status" style="display:none"></span>
+    </div>
+  </div>
+
+  <div id="summary-empty" style="text-align:center;padding:60px 20px;color:var(--muted);font-size:14px;">
+    Upload a data sheet above — or upload one on any other tab and come back here — to see Boiler Efficiency computed by all four methods side by side.
+  </div>
+
+  <div id="summary-source-note" style="display:none;font-size:12px;color:var(--muted);margin:-6px 0 14px;padding:0 4px;"></div>
+
+  <div id="summary-results" style="display:none">
+    <div class="output-summary" id="summary-kpi-area"></div>
+    <div id="summary-detail-tables"></div>
+  </div>
+
+</div>
+
+<!-- ── Hidden calculation engines ────────────────────────────────────────
+     Each existing tab is loaded in its own iframe purely so its own
+     runCalculation()/runBS2885Calculation() (pure functions — plain
+     {id:value} object in, results object out, no DOM involved) can be
+     called directly. This reuses each method's exact formulas with zero
+     duplication/drift risk instead of re-implementing them here — the
+     only thing summary.js does is build the right {id:value} object per
+     method from this page's single upload and read back .BoilerEff /
+     .methodB. Nothing is rendered from these frames; they never navigate
+     and their own upload/DOM-bound code paths are never triggered. ──── -->
+<iframe id="frame-cenpeep" src="calculator.html" style="display:none" title="calc-engine-cenpeep"></iframe>
+<iframe id="frame-bs2885"  src="tab1.html"       style="display:none" title="calc-engine-bs2885"></iframe>
+<iframe id="frame-asme"    src="tab2.html"       style="display:none" title="calc-engine-asme"></iframe>
+<iframe id="frame-bee"     src="tab3.html"       style="display:none" title="calc-engine-bee"></iframe>
+
+<script src="particles.js"></script>
+<script src="summary.js"></script>
+<script>
+if (!sessionStorage.getItem('loggedIn')) {
+  window.location.href = 'index.html';
+}
+function logout() {
+  sessionStorage.removeItem('loggedIn');
+  window.location.href = 'index.html';
+}
+</script>
+</body>
+</html>
