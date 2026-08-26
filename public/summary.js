@@ -217,27 +217,7 @@ function renderSummary(results, data) {
   ].filter(v => typeof v === 'number' && isFinite(v));
   const spread = effs.length > 1 ? Math.max(...effs) - Math.min(...effs) : null;
 
-  document.getElementById('summary-detail-tables').innerHTML = `
-    <div class="output-section">
-      <div class="output-section-head"><span>Source File</span></div>
-      <div class="output-row">
-        <span class="out-name">File</span><span></span>
-        <span class="out-val" style="text-align:left">${data.filename || '—'}</span><span></span>
-      </div>
-      <div class="output-row">
-        <span class="out-name">Sheet used — CENPEEP / ASME / BEE</span><span></span>
-        <span class="out-val" style="text-align:left">${data.primarySheet || '—'}</span><span></span>
-      </div>
-      <div class="output-row">
-        <span class="out-name">Sheet used — BS-2885</span><span></span>
-        <span class="out-val" style="text-align:left">${data.sheetNameBS2885 || '—'}</span><span></span>
-      </div>
-      ${spread !== null ? `
-      <div class="output-row highlight-row2">
-        <span class="out-name">Spread across methods</span><span></span>
-        <span class="out-val">${fmt2(spread)}</span><span class="out-uom">pts</span>
-      </div>` : ''}
-    </div>`;
+
 }
 
 function timeAgo(ms) {
