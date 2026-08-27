@@ -56,6 +56,19 @@
   letter-spacing: 1px;
   text-transform: uppercase;
 }
+.boiler-type-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: #93c5fd;
+  background: rgba(59,130,246,0.12);
+  border: 1px solid rgba(96,165,250,0.3);
+  padding: 4px 10px;
+  border-radius: 999px;
+  margin-left: 6px;
+}
 .nav-links {
   display: flex;
   align-items: center;

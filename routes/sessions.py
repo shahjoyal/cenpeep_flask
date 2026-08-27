@@ -56,6 +56,7 @@ def create_session():
         doc = {
             'sessionName': body.get('sessionName', ''),
             'sourceFile':  body.get('sourceFile', 'Manual Entry'),
+            'boilerType':  body.get('boilerType', ''),
             'inputs':      body.get('inputs', []),
             'results':     body.get('results', {}),
             'uploadedAt':  datetime.utcnow(),

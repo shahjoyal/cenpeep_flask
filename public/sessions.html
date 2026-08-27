@@ -61,6 +61,7 @@
 </div>
 
 <script src="particles.js"></script>
+<script src="boiler-badge.js"></script>
 <script>
 if (!sessionStorage.getItem('loggedIn')) {
   window.location.href = 'index.html';
@@ -155,6 +156,7 @@ function buildCard(s) {
         ${escHtml(s.sourceFile || 'Manual')}
       </div>
     </div>
+    ${s.boilerType ? `<div class="boiler-type-badge" style="margin:0 0 12px;display:inline-block">${escHtml(s.boilerType)}</div>` : ''}
     <div class="session-kpis">
       <div class="session-kpi">
         <div class="session-kpi-label">Boiler Eff.</div>
@@ -213,7 +215,7 @@ function openModal(s) {
 
   document.getElementById('modal-body').innerHTML = `
     <div style="font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace;margin-bottom:18px;">
-      Source: ${escHtml(s.sourceFile||'Manual')} &nbsp;|&nbsp; Saved: ${formatDate(s.uploadedAt||s.createdAt)}
+      Source: ${escHtml(s.sourceFile||'Manual')} &nbsp;|&nbsp; Saved: ${formatDate(s.uploadedAt||s.createdAt)}${s.boilerType ? ` &nbsp;|&nbsp; Boiler: ${escHtml(s.boilerType)}` : ''}
     </div>
 
     <div class="modal-section-title">Efficiency Results</div>

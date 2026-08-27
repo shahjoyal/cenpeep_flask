@@ -511,6 +511,7 @@ async function saveSession() {
   const payload = {
     sessionName: name.trim(),
     sourceFile:  window._uploadedFilename || 'Manual Entry',
+    boilerType:  sessionStorage.getItem('boilerType') || '',
     inputs:      r.inputs,
     results: {
       method: 'BEE-2 Indirect',

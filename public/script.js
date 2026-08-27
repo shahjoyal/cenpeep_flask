@@ -1024,6 +1024,7 @@ async function _saveOneSession(r, sessionName) {
   const payload = {
     sessionName,
     sourceFile: window._uploadedFilename || 'Manual Entry',
+    boilerType: sessionStorage.getItem('boilerType') || '',
     inputs:     r.inputs,
     results: {
       BoilerEff: r.BoilerEff, BoilerEffCorr: r.BoilerEffCorr,

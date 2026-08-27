@@ -264,6 +264,58 @@ body::after {
 }
 .login-footer b { color: #93c5fd; font-weight: 700; }
 
+/* ── Boiler-type selection (shown right after login) ─────────────── */
+.boiler-box { display: none; }
+.boiler-box.show { display: block; }
+.boiler-icon {
+  width: 64px; height: 64px;
+  margin: 0 auto 18px;
+  border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, rgba(59,130,246,0.18), rgba(96,165,250,0.10));
+  border: 1px solid rgba(96,165,250,0.3);
+  color: #93c5fd;
+}
+.form-group label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 8px;
+  letter-spacing: 0.2px;
+}
+.select-wrap { position: relative; }
+.select-wrap select {
+  width: 100%;
+  padding: 13px 40px 13px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 14.5px;
+  color: var(--text);
+  background: rgba(255,255,255,0.03);
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.select-wrap select:focus {
+  border-color: var(--accent);
+  background: rgba(59,130,246,0.06);
+  box-shadow: 0 0 0 3px rgba(59,130,246,0.14);
+}
+.select-wrap select option { background: #101d42; color: var(--text); }
+.select-wrap::after {
+  content: '';
+  position: absolute; right: 16px; top: 50%;
+  width: 9px; height: 9px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
 @media (max-width: 880px) {
   .screen { grid-template-columns: 1fr; }
   .brand-panel { display: none; }
@@ -287,7 +339,7 @@ body::after {
   </div>
 
   <div class="form-panel">
-    <div class="login-box">
+    <div class="login-box" id="loginBox">
       <div class="login-logo-icon"><img src="images/abhitech-logo.png" alt="ABHITECH"></div>
       <div class="login-title">Welcome Back</div>
       <div class="login-sub">Sign in to access the Efficiency Calculator</div>
@@ -311,6 +363,31 @@ body::after {
       <button class="btn-login" onclick="login()">Login</button>
       <div class="login-footer">Powered by <b>ABHITECH EnergyCon Ltd.</b></div>
     </div>
+
+    <!-- Boiler-type selection — shown right after a successful login,
+         before the calculator loads. Selection is stored in
+         sessionStorage as 'boilerType' so it can be shown in the
+         navbar badge and carried into saved sessions/reports. ────── -->
+    <div class="login-box boiler-box" id="boilerBox">
+      <div class="boiler-icon">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15h18"/><path d="M5 15V6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v9"/><path d="M8 15v4"/><path d="M16 15v4"/><path d="M9 8h.01"/><path d="M13 8h.01"/></svg>
+      </div>
+      <div class="login-title">Select Your Boiler Type</div>
+      <div class="login-sub">This helps tailor the calculation to your plant</div>
+      <div class="login-divider"></div>
+      <div class="form-group">
+        <label for="boilerType">Boiler Type</label>
+        <div class="select-wrap">
+          <select id="boilerType">
+            <option value="PF Fired">PF Fired</option>
+            <option value="AFBC">AFBC</option>
+            <option value="Pulverized Coal">Pulverized Coal</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn-login" onclick="continueToCalculator()">Continue</button>
+      <div class="login-footer">Powered by <b>ABHITECH EnergyCon Ltd.</b></div>
+    </div>
   </div>
 </div>
 
@@ -321,15 +398,28 @@ function login() {
   const password = document.getElementById('password').value;
   if (username === 'admin' && password === 'admin123') {
     sessionStorage.setItem('loggedIn', 'true');
-    window.location.href = 'calculator.html';
+    document.getElementById('loginBox').classList.remove('show');
+    document.getElementById('loginBox').style.display = 'none';
+    document.getElementById('boilerBox').classList.add('show');
   } else {
     document.getElementById('errorMsg').classList.remove('show');
     void document.getElementById('errorMsg').offsetWidth;
     document.getElementById('errorMsg').classList.add('show');
   }
 }
+
+function continueToCalculator() {
+  const boilerType = document.getElementById('boilerType').value;
+  sessionStorage.setItem('boilerType', boilerType);
+  window.location.href = 'calculator.html';
+}
 document.addEventListener('keydown', e => {
-  if (e.key === 'Enter') login();
+  if (e.key !== 'Enter') return;
+  if (document.getElementById('boilerBox').classList.contains('show')) {
+    continueToCalculator();
+  } else {
+    login();
+  }
 });
 
 const pwd = document.getElementById('password');
