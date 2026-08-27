@@ -58,8 +58,24 @@
       </div>
     </div>
 
-    <!-- Calculate / Reset — placed after upload so any auto-detected values
-         are visible before running the calculation. -->
+    <!-- Date-wise Processes — shown only once an upload has dated log data.
+         Split that data into one or more named date ranges, each producing
+         its own result, compared side by side. No processes added → the
+         Calculate button falls back to today's plain whole-file average.
+         Same mechanism as CENPEEP (see calculator.html / script.js). ────── -->
+    <div class="process-section" id="process-section" style="display:none">
+      <div class="process-section-head">
+        <div class="process-section-title">
+          <strong><svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>Date-wise Processes</strong>
+          <span class="process-section-sub" id="process-hint">Optional — split this file into named date ranges and compare results side by side.</span>
+        </div>
+        <button type="button" class="btn btn-secondary" id="add-process-btn" onclick="addProcess()">+ Add Process</button>
+      </div>
+      <div id="process-list"></div>
+    </div>
+
+    <!-- Calculate / Reset — placed after upload + date-wise processes so the
+         date ranges (if any) are picked before running the calculation. -->
     <div class="action-bar">
       <button class="btn btn-ghost" onclick="resetInputs()"><svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.64-6.36"/><path d="M3 4v5h5"/></svg>Reset to Defaults</button>
       <button class="btn btn-primary" onclick="calculate()" title="ASME PTC 4.1 — Losses Method"><svg class="icon-svg" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>Calculate Efficiency</button>
@@ -134,6 +150,7 @@
 
 <script src="particles.js"></script>
 <script src="boiler-badge.js"></script>
+<script src="boiler-gate.js"></script>
 <script src="script2.js"></script>
 <script>
 if (!sessionStorage.getItem('loggedIn')) {
@@ -141,6 +158,7 @@ if (!sessionStorage.getItem('loggedIn')) {
 }
 function logout() {
   sessionStorage.removeItem('loggedIn');
+  sessionStorage.removeItem('boilerType');
   window.location.href = 'index.html';
 }
 function toggleSection(header) {

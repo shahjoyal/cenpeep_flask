@@ -216,6 +216,7 @@
 
 <script src="particles.js"></script>
 <script src="boiler-badge.js"></script>
+<script src="boiler-gate.js"></script>
 <script src="script.js"></script>
 <script>
 if (!sessionStorage.getItem('loggedIn')) {
@@ -223,6 +224,7 @@ if (!sessionStorage.getItem('loggedIn')) {
 }
 function logout() {
   sessionStorage.removeItem('loggedIn');
+  sessionStorage.removeItem('boilerType');
   window.location.href = 'index.html';
 }
 function toggleSection(header) {

@@ -36,6 +36,17 @@
 const v    = id => { const el = document.getElementById(id); return el ? parseFloat(el.value) || 0 : 0; };
 const fmt  = (n, d=4) => (typeof n === 'number' && !isNaN(n)) ? n.toFixed(d) : '—';
 const fmt2 = n => fmt(n, 2);
+// Signed variant for delta values — always shows a leading + or −.
+const fmtSigned = (n, d=2) => (typeof n === 'number' && !isNaN(n)) ? (n >= 0 ? '+' : '') + n.toFixed(d) : '—';
+
+// "YYYY-MM-DD" -> "18 August 2026" (date month year), used on the Results
+// tab (kpi cards, comparison table) — same as CENPEEP.
+function fmtDateDMY(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso + 'T00:00:00');
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+}
 
 // ── DB health pill (kept for parity with CENPEEP page; harmless if absent) ──
 async function checkDB() {
@@ -146,6 +157,29 @@ function initUpload() {
 
       window._uploadedFilename = data.filename;
 
+      // ── Date-wise processes: keep the full parsed payload around ─────────
+      // (extracted + datedRows + availableDates) so "Add Process" can slice
+      // it by date range entirely client-side, with no re-upload. A fresh
+      // upload always clears any processes from a previous file. Same
+      // mechanism as CENPEEP (public/script.js).
+      window._uploadData      = data;
+      window._processes       = [];
+      window._comparisonResults = null;
+      const procSection = document.getElementById('process-section');
+      if (procSection) {
+        if (data.dateFilteringAvailable && data.availableDates.length) {
+          procSection.style.display = '';
+          const hint = document.getElementById('process-hint');
+          if (hint) {
+            const first = data.availableDates[0], last = data.availableDates[data.availableDates.length - 1];
+            hint.textContent = `Dated data found from ${first} to ${last} (${data.availableDates.length} day${data.availableDates.length===1?'':'s'} with readings) on "${data.primarySheet || ''}".`;
+          }
+        } else {
+          procSection.style.display = 'none';
+        }
+      }
+      renderProcessList();
+
       // ── Build "selected sheet" AI summary panel ──────────────────────────
       const sheetResults  = data.sheetResults || [];
       const fieldDetail   = data.fieldDetail || {};
@@ -204,6 +238,194 @@ function initUpload() {
     // Reset the file input so the same file can be re-uploaded
     input.value = '';
   });
+}
+
+// ── Date-wise Processes ─────────────────────────────────────────────────────
+// Optional feature: instead of one whole-file average, the person can name
+// one or more "processes", each with its own start/end date, and get a
+// separate result (+ side-by-side comparison) for each. A process with no
+// date range picked, or no processes added at all, falls straight back to
+// today's plain behavior — the whole file's overall average, one result.
+// Same mechanism as CENPEEP (see public/script.js) — kept independent here
+// since this page loads its own script, not CENPEEP's.
+window._uploadData        = null;
+window._processes         = [];
+window._comparisonResults = null;
+let   _processSeq = 0;
+
+function addProcess() {
+  _processSeq++;
+  window._processes.push({
+    id: 'proc' + _processSeq,
+    title: `Process ${window._processes.length + 1}`,
+    start: null,
+    end: null,
+  });
+  renderProcessList();
+}
+
+function removeProcess(id) {
+  window._processes = window._processes.filter(p => p.id !== id);
+  renderProcessList();
+}
+
+function updateProcessTitle(id, title) {
+  const p = window._processes.find(p => p.id === id);
+  if (p) p.title = title;
+}
+
+function setProcessDate(id, which, iso) {
+  const p = window._processes.find(p => p.id === id);
+  if (!p) return;
+  p[which] = iso;   // which is 'start' or 'end'
+  renderProcessList();
+}
+
+// Rows from the uploaded file's dated log that fall inside [start, end]
+// (inclusive; an unset bound is open-ended on that side).
+function _rowsInRange(start, end) {
+  const rows = (window._uploadData && window._uploadData.datedRows) || [];
+  return rows.filter(r => r.date
+    && (!start || r.date >= start)
+    && (!end   || r.date <= end));
+}
+
+function _averageFieldsInRange(start, end) {
+  const rows = _rowsInRange(start, end);
+  const sums = {}, counts = {};
+  rows.forEach(r => Object.entries(r.values).forEach(([fid, val]) => {
+    sums[fid]   = (sums[fid]   || 0) + val;
+    counts[fid] = (counts[fid] || 0) + 1;
+  }));
+  const avg = {};
+  Object.keys(sums).forEach(fid => { avg[fid] = sums[fid] / counts[fid]; });
+  return { avg, rowCount: rows.length };
+}
+
+function renderProcessList() {
+  const list = document.getElementById('process-list');
+  if (!list) return;
+  if (!window._processes.length) {
+    list.innerHTML = `<div class="process-empty">No processes added — Calculate will use the whole file's average, same as today.</div>`;
+    return;
+  }
+  list.innerHTML = window._processes.map(p => {
+    const rowCount = _rowsInRange(p.start, p.end).length;
+    return `
+    <div class="process-row" data-id="${p.id}">
+      <input type="text" class="process-title-input" value="${escapeHtml(p.title)}"
+             placeholder="Process title"
+             oninput="updateProcessTitle('${p.id}', this.value)">
+      <button type="button" class="process-date-btn" data-role="start" data-id="${p.id}">
+        ${p.start || 'Start date'}
+      </button>
+      <span class="process-date-sep">→</span>
+      <button type="button" class="process-date-btn" data-role="end" data-id="${p.id}">
+        ${p.end || 'End date'}
+      </button>
+      <span class="process-row-count">${rowCount} row${rowCount===1?'':'s'} in range</span>
+      <button type="button" class="process-remove-btn" onclick="removeProcess('${p.id}')" title="Remove process">✕</button>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('.process-date-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id   = btn.dataset.id;
+      const role = btn.dataset.role;
+      const p    = window._processes.find(p => p.id === id);
+      openDatePicker(btn, {
+        selected: p ? p[role] : null,
+        onSelect: iso => setProcessDate(id, role, iso),
+      });
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ── Calendar popup (red dot = a date the uploaded file actually has data
+//    for) — shared by every process's Start/End date button. ────────────────
+let _calendarPopup = null;
+let _calendarOutsideHandler = null;
+
+function closeDatePicker() {
+  if (_calendarPopup) { _calendarPopup.remove(); _calendarPopup = null; }
+  if (_calendarOutsideHandler) {
+    document.removeEventListener('mousedown', _calendarOutsideHandler);
+    _calendarOutsideHandler = null;
+  }
+}
+
+function openDatePicker(anchorEl, { selected, onSelect }) {
+  closeDatePicker();
+  const availableDates = (window._uploadData && window._uploadData.availableDates) || [];
+  const availSet = new Set(availableDates);
+
+  const base = selected ? new Date(selected + 'T00:00:00')
+    : availableDates.length ? new Date(availableDates[availableDates.length - 1] + 'T00:00:00')
+    : new Date();
+  let viewYear  = base.getFullYear();
+  let viewMonth = base.getMonth();
+
+  const pop = document.createElement('div');
+  pop.className = 'date-picker-popup';
+  document.body.appendChild(pop);
+  _calendarPopup = pop;
+
+  function render() {
+    const first        = new Date(viewYear, viewMonth, 1);
+    const startWeekday = first.getDay();
+    const daysInMonth  = new Date(viewYear, viewMonth + 1, 0).getDate();
+    const monthLabel   = first.toLocaleString('default', { month: 'long' });
+
+    let cells = '';
+    for (let i = 0; i < startWeekday; i++) cells += `<span class="dp-cell dp-empty"></span>`;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const iso = `${viewYear}-${String(viewMonth+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const hasData = availSet.has(iso);
+      const isSelected = selected === iso;
+      cells += `<span class="dp-cell${hasData?' dp-has-data':''}${isSelected?' dp-selected':''}" data-date="${iso}">
+                   ${d}${hasData ? '<i class="dp-dot"></i>' : ''}
+                 </span>`;
+    }
+
+    pop.innerHTML = `
+      <div class="dp-head">
+        <button type="button" class="dp-nav" data-nav="-1">&lsaquo;</button>
+        <span class="dp-month">${monthLabel} ${viewYear}</span>
+        <button type="button" class="dp-nav" data-nav="1">&rsaquo;</button>
+      </div>
+      <div class="dp-grid dp-dow"><span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span></div>
+      <div class="dp-grid">${cells}</div>
+      <div class="dp-foot">
+        <span class="dp-legend"><i class="dp-dot"></i> data available</span>
+        <button type="button" class="dp-clear">Clear</button>
+      </div>`;
+
+    pop.querySelectorAll('[data-nav]').forEach(b => b.addEventListener('click', e => {
+      viewMonth += parseInt(e.currentTarget.dataset.nav, 10);
+      if (viewMonth < 0)  { viewMonth = 11; viewYear--; }
+      if (viewMonth > 11) { viewMonth = 0;  viewYear++; }
+      render();
+    }));
+    pop.querySelectorAll('.dp-cell[data-date]').forEach(c => c.addEventListener('click', e => {
+      onSelect(e.currentTarget.dataset.date);
+      closeDatePicker();
+    }));
+    pop.querySelector('.dp-clear').addEventListener('click', () => { onSelect(null); closeDatePicker(); });
+  }
+  render();
+
+  const rect = anchorEl.getBoundingClientRect();
+  pop.style.top  = (window.scrollY + rect.bottom + 6) + 'px';
+  pop.style.left = (window.scrollX + rect.left) + 'px';
+
+  _calendarOutsideHandler = e => {
+    if (_calendarPopup && !_calendarPopup.contains(e.target) && e.target !== anchorEl) closeDatePicker();
+  };
+  setTimeout(() => document.addEventListener('mousedown', _calendarOutsideHandler), 0);
 }
 
 // ── ASME PTC 4.1 — calculation ───────────────────────────────────────────────
@@ -327,12 +549,50 @@ function runCalculation(rawInputs) {
 
 // ── Entry point wired to the "▶ Calculate Efficiency" button ────────────────
 function calculate() {
-  window._results = runCalculation(collectInputsFromDOM());
-  renderOutput(window._results);
+  const activeProcesses = window._processes.filter(p => p.start || p.end);
+
+  if (!activeProcesses.length) {
+    // No date ranges chosen anywhere — exactly today's behavior.
+    window._comparisonResults = null;
+    window._results = runCalculation(collectInputsFromDOM());
+    renderOutput(window._results);
+    showTab('output');
+    return;
+  }
+
+  const baseInputs = collectInputsFromDOM();
+  const comparison = activeProcesses.map(p => {
+    const { avg, rowCount } = _averageFieldsInRange(p.start, p.end);
+    const result = runCalculation({ ...baseInputs, ...avg });
+    return { title: p.title || 'Process', start: p.start, end: p.end, rowCount, result };
+  });
+
+  window._comparisonResults = comparison;
+  window._results = comparison[0].result;   // keeps save/download working off the first process
+  renderComparison(comparison);
   showTab('output');
 }
 
-// ── Render output KPIs + loss breakdown ──────────────────────────────────────
+// UI state for the collapsible Results-tab sections — persists across
+// re-renders (Calculate, Radiation/Unmeasured edits, etc.) until a fresh
+// upload. Same pattern as CENPEEP. The two base tables default open so
+// existing behaviour doesn't regress; the process tables default closed.
+window._uiState = window._uiState || {
+  lossesOpen: true, intermediateOpen: true,
+  processInputsOpen: false, processComparisonOpen: false,
+};
+
+function toggleResultsSection(key) {
+  window._uiState[key] = !window._uiState[key];
+  if (window._comparisonResults) {
+    renderComparison(window._comparisonResults);
+  } else if (window._results) {
+    renderOutput(window._results);
+  }
+}
+
+// ── Render output KPIs + loss breakdown (single result — no date-wise
+//    processes active) ───────────────────────────────────────────────────
 function renderOutput(r) {
   document.getElementById('kpi-area').innerHTML = `
     <div class="kpi-card kpi-green">
@@ -377,9 +637,16 @@ function renderOutput(r) {
       <div class="kpi-sub">Mutually agreed value — enter &amp; recalculate</div>
     </div>`;
 
+  const lossesOpen       = window._uiState.lossesOpen;
+  const intermediateOpen = window._uiState.intermediateOpen;
+
   document.getElementById('output-tables').innerHTML = `
     <div class="output-section">
-      <div class="output-section-head"><span>Heat-Loss Efficiency — Items 65\u201372</span></div>
+      <div class="output-section-head collapsible-head${lossesOpen ? ' open' : ''}" onclick="toggleResultsSection('lossesOpen')">
+        <span>Heat-Loss Efficiency — Items 65\u201372</span>
+        <span class="collapse-chevron">${lossesOpen ? '▾' : '▸'}</span>
+      </div>
+      ${lossesOpen ? `
       <div class="output-row header-row">
         <span>Parameter</span><span style="text-align:right">Item</span>
         <span style="text-align:right">Value</span><span style="text-align:right">UoM</span>
@@ -393,18 +660,22 @@ function renderOutput(r) {
       <div class="output-row highlight-row2">
         <span class="out-name">Total Losses</span>
         <span class="out-sym">71</span>
-        <span class="out-val">${fmt2(r.TotalLosses)}</span>
+        <span class="out-val" id="losses-total-val">${fmt2(r.TotalLosses)}</span>
         <span class="out-uom">%</span>
       </div>
       <div class="output-row highlight-row2">
         <span class="out-name">Boiler Efficiency</span>
         <span class="out-sym">72</span>
-        <span class="out-val">${fmt2(r.BoilerEff)}</span>
+        <span class="out-val" id="losses-eff-val">${fmt2(r.BoilerEff)}</span>
         <span class="out-uom">%</span>
-      </div>
+      </div>` : ''}
     </div>
     <div class="output-section">
-      <div class="output-section-head"><span>Intermediate Values</span></div>
+      <div class="output-section-head collapsible-head${intermediateOpen ? ' open' : ''}" onclick="toggleResultsSection('intermediateOpen')">
+        <span>Intermediate Values</span>
+        <span class="collapse-chevron">${intermediateOpen ? '▾' : '▸'}</span>
+      </div>
+      ${intermediateOpen ? `
       <div class="output-row header-row">
         <span>Parameter</span><span style="text-align:right">Item</span>
         <span style="text-align:right">Value</span><span style="text-align:right">UoM</span>
@@ -416,7 +687,7 @@ function renderOutput(r) {
       ${oRow('Hydrogen, as fired (ultimate)',     '44', r.H,             '%')}
       ${oRow('Dry Refuse per Unit Fuel',          '22', r.DryRefuse,     '\u2014')}
       ${oRow('Carbon Burned per Unit Fuel',       '24', r.CarbonBurned,  '%')}
-      ${oRow('Dry Flue Gas per Unit Fuel',        '25', r.MassDFG,       '\u2014')}
+      ${oRow('Dry Flue Gas per Unit Fuel',        '25', r.MassDFG,       '\u2014')}` : ''}
     </div>`;
 }
 
@@ -433,7 +704,8 @@ function oRow(name, item, val, uom) {
 // (Item 70) boxes on the Results page are edited — same pattern as
 // CENPEEP's own Radiation & Unaccounted Loss box (public/script.js
 // recalculate()) — re-derives just the total/efficiency without a full
-// re-run, then refreshes the KPI + table numbers in place.
+// re-run, then refreshes the KPI + table numbers in place. Only runs for
+// the single-result view (comparison mode has no live edit boxes).
 function recalculate() {
   if (!window._results) return;
   const r = window._results;
@@ -446,11 +718,129 @@ function recalculate() {
   document.querySelectorAll('.boiler-eff-val').forEach(el => {
     el.innerHTML = fmt2(r.BoilerEff) + '<span class="kpi-unit">%</span>';
   });
-  const totalRow = document.querySelector('#output-tables .highlight-row2:nth-of-type(1) .out-val');
-  const effRow   = document.querySelector('#output-tables .highlight-row2:nth-of-type(2) .out-val');
+  const totalRow = document.getElementById('losses-total-val');
+  const effRow   = document.getElementById('losses-eff-val');
   if (totalRow) totalRow.textContent = fmt2(r.TotalLosses);
   if (effRow)   effRow.textContent   = fmt2(r.BoilerEff);
 }
+
+// ── Render a side-by-side comparison of multiple date-range processes ──────
+const _COMPARISON_METRIC_ROWS = [
+  ['Date Range',                    p => `${fmtDateDMY(p.start)} → ${fmtDateDMY(p.end)}`],
+  ['Rows Used',                     p => String(p.rowCount)],
+  ['Boiler Efficiency (%)',         p => fmt2(p.result.BoilerEff)],
+  ['Dry Flue Gas Loss (%) — 65',    p => fmt2(p.result.L65)],
+  ['Moisture in Fuel (%) — 66',     p => fmt2(p.result.L66)],
+  ['H\u2082 Combustion (%) — 67',   p => fmt2(p.result.L67)],
+  ['Combustibles in Refuse (%) — 68', p => fmt2(p.result.L68)],
+  ['Radiation (%) — 69',            p => fmt2(p.result.L69)],
+  ['Unmeasured Losses (%) — 70',    p => fmt2(p.result.L70)],
+  ['Total Losses (%) — 71',         p => fmt2(p.result.TotalLosses)],
+];
+
+function renderComparison(list) {
+  const kpiCards = list.map(p => `
+    <div class="kpi-card kpi-green">
+      <div class="kpi-label">${escapeHtml(p.title)}</div>
+      <div class="kpi-value">${fmt2(p.result.BoilerEff)}<span class="kpi-unit">%</span></div>
+      <div class="kpi-sub">${fmtDateDMY(p.start)} → ${fmtDateDMY(p.end)} · ${p.rowCount} row${p.rowCount===1?'':'s'}</div>
+    </div>`).join('');
+
+  // Delta Difference only makes sense — and only appears — with exactly
+  // two processes on screen, same as CENPEEP.
+  const extras = (list.length === 2) ? _renderDeltaCard(list[0], list[1]) : '';
+
+  document.getElementById('kpi-area').innerHTML = kpiCards + extras;
+
+  document.getElementById('output-tables').innerHTML = `
+    ${_renderProcessInputsSection(list)}
+    ${_renderProcessComparisonSection(list)}`;
+}
+
+// ── Delta Difference — Process 2's Boiler Efficiency minus Process 1's. ────
+function _renderDeltaCard(p1, p2) {
+  const delta = p2.result.BoilerEff - p1.result.BoilerEff;
+  const cls   = delta >= 0 ? 'kpi-green' : 'kpi-red';
+  return `
+    <div class="kpi-card ${cls}">
+      <div class="kpi-label">Delta Difference</div>
+      <div class="kpi-value">${fmtSigned(delta)}<span class="kpi-unit">%</span></div>
+      <div class="kpi-sub">${escapeHtml(p2.title)} − ${escapeHtml(p1.title)} (Boiler Eff.)</div>
+    </div>`;
+}
+
+// ── Process Inputs — the per-process portion of what already splits results
+//    (Process Comparison) by process. Only fields the dated log actually
+//    varies by process are shown here. Collapsible — click the header to
+//    expand/collapse. ───────────────────────────────────────────────────────
+function _renderProcessInputsSection(list) {
+  const dateAveragedIds = new Set();
+  list.forEach(p => {
+    const { avg } = _averageFieldsInRange(p.start, p.end);
+    Object.keys(avg).forEach(fid => dateAveragedIds.add(fid));
+  });
+  const perProcessIds = ASME_INPUT_IDS.filter(id => dateAveragedIds.has(id));
+  const open = window._uiState.processInputsOpen;
+
+  const headerCells = list.map(p => `
+    <th>${escapeHtml(p.title)}
+      <div class="cmp-th-date">${fmtDateDMY(p.start)} → ${fmtDateDMY(p.end)}</div>
+    </th>`).join('');
+
+  const perProcessRows = perProcessIds.map(id => {
+    const cells = list.map(p => {
+      const entry = p.result.inputs.find(i => i.id === id);
+      return `<td>${fmt(entry ? entry.value : 0, 3)}</td>`;
+    }).join('');
+    return `<tr><td class="cmp-metric">${ASME_INPUT_LABELS[id] || id}</td>${cells}</tr>`;
+  }).join('');
+
+  return `
+    <div class="output-section">
+      <div class="output-section-head collapsible-head${open ? ' open' : ''}" onclick="toggleResultsSection('processInputsOpen')">
+        <span>Process Inputs</span>
+        <span class="collapse-chevron">${open ? '▾' : '▸'}</span>
+      </div>
+      ${open ? `
+      <div class="cmp-table-wrap">
+        <table class="cmp-table">
+          <thead><tr><th>From the dated log — varies per process</th>${headerCells}</tr></thead>
+          <tbody>${perProcessRows || `<tr><td colspan="${list.length + 1}">No date-based input fields — every process is using the same manual inputs.</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div class="cmp-note">Averaged separately for each process's own date range shown above. Everything not listed here (manual-only inputs, anything the dated log doesn't carry) uses whatever's currently in the Input Parameters tab for all processes.</div>
+      ` : ''}
+    </div>`;
+}
+
+// ── Process Comparison — every output metric, side by side, one column per
+//    process (already includes its own "Date Range" row). Collapsible —
+//    click the header to expand/collapse. ───────────────────────────────────
+function _renderProcessComparisonSection(list) {
+  const open = window._uiState.processComparisonOpen;
+  const headerCells = list.map(p => `<th>${escapeHtml(p.title)}</th>`).join('');
+  const bodyRows = _COMPARISON_METRIC_ROWS.map(([label, fn]) => `
+    <tr><td class="cmp-metric">${label}</td>${list.map(p => `<td>${fn(p)}</td>`).join('')}</tr>
+  `).join('');
+
+  return `
+    <div class="output-section">
+      <div class="output-section-head collapsible-head${open ? ' open' : ''}" onclick="toggleResultsSection('processComparisonOpen')">
+        <span>Process Comparison</span>
+        <span class="collapse-chevron">${open ? '▾' : '▸'}</span>
+      </div>
+      ${open ? `
+      <div class="cmp-table-wrap">
+        <table class="cmp-table">
+          <thead><tr><th></th>${headerCells}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
+      <div class="cmp-note">Fields not present in the uploaded log (manual-only inputs, …) use the same value — whatever's currently in the Input Parameters tab — across every process.</div>
+      ` : ''}
+    </div>`;
+}
+
 
 // ── Tab switching (Input Parameters / Results & Losses) ─────────────────────
 function showTab(tab) {
@@ -474,10 +864,17 @@ function resetInputs() {
     const el = document.getElementById(fid);
     if (el) el.classList.remove('field-detected', 'field-missing');
   }
-  window._uploadedFilename = null;
-  window._results = null;
+  window._uploadedFilename  = null;
+  window._uploadData        = null;
+  window._processes         = [];
+  window._comparisonResults = null;
+  window._results           = null;
+  window._uiState = { lossesOpen: true, intermediateOpen: true, processInputsOpen: false, processComparisonOpen: false };
   const st = document.getElementById('upload-status');
   if (st) { st.style.display='none'; st.textContent=''; }
+  const procSection = document.getElementById('process-section');
+  if (procSection) procSection.style.display = 'none';
+  renderProcessList();
 }
 
 // ── Event listeners + init ────────────────────────────────────────────────────

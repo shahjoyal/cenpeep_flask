@@ -62,12 +62,14 @@
 
 <script src="particles.js"></script>
 <script src="boiler-badge.js"></script>
+<script src="boiler-gate.js"></script>
 <script>
 if (!sessionStorage.getItem('loggedIn')) {
   window.location.href = 'index.html';
 }
 function logout() {
   sessionStorage.removeItem('loggedIn');
+  sessionStorage.removeItem('boilerType');
   window.location.href = 'index.html';
 }
 

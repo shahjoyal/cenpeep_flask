@@ -15,6 +15,9 @@
     badge.title = 'Boiler type selected at login';
     navLogo.appendChild(badge);
   }
+  // exposed so boiler-gate.js can re-render the badge immediately after
+  // a boiler type is picked from the popup, without a page reload
+  window.__renderBoilerBadge = renderBadge;
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', renderBadge);
   } else {

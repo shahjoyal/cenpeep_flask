@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Boiler Efficiency — Login</title>
+<title>Boiler Efficiency Calculator</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -328,11 +328,11 @@ body::after {
 <div class="screen">
   <div class="brand-panel">
     <div class="brand-logo-ring"><div class="inner"><img src="images/abhitech-logo.png" alt="ABHITECH"></div></div>
-    <div class="brand-title">Boiler <span class="accent">Efficiency</span></div>
+    <div class="brand-title">Boiler <span class="accent">Efficiency</span> Calculator</div>
     <div class="brand-rule"></div>
-    <div class="brand-sub">Advanced boiler combustion analysis and heat-loss optimization — starting with the CENPEEP standard, with more calculation methods on the way.</div>
+
     <div class="stat-row">
-      <div class="stat-chip"><div class="n">99.9%</div><div class="l">Boiler Eff.</div></div>
+      <div class="stat-chip"><div class="n">87%</div><div class="l">Boiler Eff.</div></div>
       <div class="stat-chip"><div class="n">5.8%</div><div class="l">Dry Gas Loss</div></div>
       <div class="stat-chip"><div class="n">1.2%</div><div class="l">Unburnt C</div></div>
     </div>
@@ -341,7 +341,7 @@ body::after {
   <div class="form-panel">
     <div class="login-box" id="loginBox">
       <div class="login-logo-icon"><img src="images/abhitech-logo.png" alt="ABHITECH"></div>
-      <div class="login-title">Welcome Back</div>
+      <div class="login-title">Welcome</div>
       <div class="login-sub">Sign in to access the Efficiency Calculator</div>
       <div class="login-divider"></div>
       <div class="error-msg" id="errorMsg">Incorrect username or password!</div>
@@ -398,9 +398,11 @@ function login() {
   const password = document.getElementById('password').value;
   if (username === 'admin' && password === 'admin123') {
     sessionStorage.setItem('loggedIn', 'true');
-    document.getElementById('loginBox').classList.remove('show');
-    document.getElementById('loginBox').style.display = 'none';
-    document.getElementById('boilerBox').classList.add('show');
+    // Boiler type is now picked from a popup card on the calculator
+    // page itself (see boiler-gate.js), not on a separate screen here,
+    // so go straight in. The boiler-box markup below is left in place
+    // and unused rather than removed.
+    window.location.href = 'calculator.html';
   } else {
     document.getElementById('errorMsg').classList.remove('show');
     void document.getElementById('errorMsg').offsetWidth;
