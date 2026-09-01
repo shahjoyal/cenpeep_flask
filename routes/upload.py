@@ -312,6 +312,17 @@ LABEL_ALIASES = {
     'gcv of bottom ash': 'GCVba', 'gcv bottom ash': 'GCVba',
     'gcv of fly ash': 'GCVfa', 'gcv fly ash': 'GCVfa',
     'boiler load': 'BL', 'steam pressure': 'SP',
+    # Exact real-sheet phrasing seen on a "LAB" (lab-tested coal/flue-gas
+    # results) sheet's own precomputed period-average O2 column, stitched
+    # from its two-row header ("O2% AFTER AH AVG." group label over a bare
+    # "%" cell — see _stitch_stacked_headers). This is the same physical
+    # AH/APH-outlet O2 reading CENPEEP/ASME-PTC 4.1 call O2out, but under
+    # BEE-2 Indirect's own single "O2 in Flue Gas" field (O2fg) — see the
+    # SYM_MAP comment on why these stay separate ids. Only reachable via
+    # the stitched-header exact-match path (_label_to_field_exact), which
+    # is intentionally the ONLY thing bare/blank sub-header cells like a
+    # lone "%" are ever matched against — see _map_columns_to_fields.
+    'o2 after ah avg': 'O2fg',
 }
 
 
@@ -644,6 +655,15 @@ def _match_tag_patterns(norm):
             return 'COout'
         if 'co' in tokens and is_in and not is_out:
             return 'COin'
+        # CO2 at the APH/AH outlet (e.g. an "EFF"-style efficiency-
+        # calculation sheet's own "CO2 At AH Outlet" row). CENPEEP/
+        # ASME-PTC 4.1 have no raw CO2 input field of their own (their
+        # formulas derive CO2 internally as 100-O2-N2-CO), so this can
+        # only ever resolve to BEE-2 Indirect's CO2fg — no shared-id risk
+        # the way Ash (A) has. Token is 'co2', never 'co', so this can't
+        # collide with the COout/COin checks just above.
+        if 'co2' in tokens and is_out and not is_in:
+            return 'CO2fg'
 
         # Flue Gas / Primary Air / Secondary Air TEMPERATURE at the APH,
         # same tag shape (e.g. "FLUE GAS TEMP APH-A O/L, DEG C"). Only
@@ -733,6 +753,24 @@ def _match_tag_patterns(norm):
         if {'sa', 'secondary'} & tokens:
             return 'Fsa'
 
+    # Ultimate-analysis Hydrogen / Oxygen content of coal (BEE-2 Indirect's
+    # H2/O2f fields — see SYM_MAP comment; CENPEEP/ASME-PTC 4.1 have no
+    # input field with either id, so this can't affect them). The
+    # LABEL_ALIASES exact entries for bare 'hydrogen'/'oxygen' only fire
+    # when the ENTIRE header is that one word — real efficiency-calculation
+    # sheets instead spell this out as a full row description ("Hydrogen
+    # Content Of Coal (+)", "Oxygen Content Of Coal (+)"), which needs the
+    # token-pattern fallback here. Requiring the 'content' token (the exact
+    # real-sheet phrasing) keeps this from also matching an unrelated row
+    # that merely mentions the element in passing — e.g. "Heat Loss Due To
+    # Burning Of Hydrogen" (a computed KJ/kg loss, symbol 'LH', not a %
+    # composition reading) has no 'content' token and is correctly left
+    # unmatched here.
+    if 'hydrogen' in tokens and 'content' in tokens:
+        return 'H2'
+    if 'oxygen' in tokens and 'content' in tokens and 'aph' not in tokens:
+        return 'O2f'
+
     return None
 
 
@@ -817,6 +855,14 @@ def _unit_conflicts_with_field(header, fid):
 def _label_to_field(label):
     """Map a header label string to a CENPEEP field id."""
     norm = re.sub(r'[^a-z0-9 ]', '', str(label).lower().strip())
+    # Collapse any run of whitespace (and drop a trailing one) left over
+    # from stripping punctuation out of a multi-cell stitched header (e.g.
+    # a group label forward-filled next to a bare unit cell) — a purely
+    # cosmetic difference that shouldn't stop an otherwise-exact alias
+    # match. Can only ever let a previously-unmatched header through; every
+    # existing LABEL_ALIASES key is already a single-spaced, untrailed
+    # string, so this never changes what an already-matching header maps to.
+    norm = re.sub(r'\s+', ' ', norm).strip()
     # Direct symbol match first
     fid = _sym_to_field(label.strip())
     if fid:
@@ -2208,6 +2254,11 @@ def _label_to_field_exact(label):
     use against full-sentence row labels.
     """
     norm = re.sub(r'[^a-z0-9 ]', '', str(label).lower().strip())
+    # See the matching comment in _label_to_field — same safe whitespace
+    # cleanup, needed here too since a stitched group-label + bare-unit-cell
+    # header (e.g. "O2% AFTER AH AVG." + "%") is exactly what this exact-
+    # match path exists to handle.
+    norm = re.sub(r'\s+', ' ', norm).strip()
     fid = _sym_to_field(label.strip())
     if fid:
         return fid
@@ -2271,6 +2322,53 @@ def _parse_label_value_layout(rows):
 
 
 # ─── Per-sheet parser (tries all strategies) ───────────────────────────────────
+def _scan_lab_sheet_for_ash(rows, sheet_name):
+    """
+    BEE-2 Indirect-only Ash (A) override — see 'beeOverrides' in
+    parse_workbook()/upload_file(). BEE-2's own form wants Ash sourced from
+    the plant's lab-tested reading; CENPEEP / ASME-PTC 4.1 share that SAME
+    'A' field id and must NOT change, so this never touches the shared
+    column-mapping engine (SYM_MAP/LABEL_ALIASES) that feeds every tab's
+    `extracted` dict — it only ever returns a value into the separate,
+    additive `beeOverrides` dict that only BEE-2's frontend reads.
+
+    Looks for a sheet whose name contains "lab" (case-insensitive — matches
+    this and similarly-named real plant workbooks without hardcoding one
+    specific file/sheet name) and, on it, a column whose header is exactly
+    the Ash symbol/word CENPEEP's own SYM_MAP['A'] / LABEL_ALIASES['ash']
+    already treat as unambiguous — just also accepting the common real-
+    sheet "<symbol>%" percent-suffixed spelling ("A%"), which the always-on
+    matcher deliberately does NOT auto-resolve for the shared field (a bare
+    percent-suffixed single letter is too easy to collide with an unrelated
+    column elsewhere — see _find_header_row's own MIN_HEADER_FIELD_COUNT
+    guard against exactly that kind of coincidence). Returns the plain
+    average of that column's numeric values, or None if no such
+    sheet/column exists.
+    """
+    if 'lab' not in str(sheet_name).lower():
+        return None
+    header_row_idx = _find_header_row(rows[:HEADER_SCAN_ROWS])
+    if header_row_idx is None:
+        return None
+    header_row = rows[header_row_idx]
+    for col_idx, raw_hdr in enumerate(header_row):
+        if raw_hdr is None:
+            continue
+        norm = re.sub(r'[^a-z0-9]', '', str(raw_hdr).lower().strip())
+        if norm not in ('a', 'ash'):
+            continue
+        values = []
+        for r in rows[header_row_idx + 1:]:
+            if col_idx >= len(r):
+                continue
+            num = _to_num(r[col_idx])
+            if num is not None:
+                values.append(num)
+        if values:
+            return sum(values) / len(values)
+    return None
+
+
 def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
     """
     Tries CenPeep column layout first, then raw tabular layout (ML-augmented),
@@ -2333,7 +2431,7 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
     )
     if ext2:
         ml_used = any(c['source'] in ('ml', 'ml_highlighted') for c in col_meta.values())
-        return {
+        result = {
             'sheetName': sheet_name,
             'strategy': 'raw_tabular_ml' if ml_used else 'raw_tabular',
             'extracted': ext2,
@@ -2344,6 +2442,13 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
             'unmatchedHighlighted': unmatched_hi,
             'datedRows': dated_rows2,
         }
+        # BEE-2 Indirect-only Ash override — additive, see docstring. Never
+        # overwrites anything in `ext2`/`extracted` above (CENPEEP/ASME-PTC
+        # 4.1's own 'A' value from this or any other sheet is untouched).
+        bee_ash = _scan_lab_sheet_for_ash(rows, sheet_name)
+        if bee_ash is not None:
+            result['beeOverrides'] = {'A': bee_ash}
+        return result
 
     # Strategy 4: plain label/value form layout, no header row at all -
     # only reached once every other strategy has found nothing.
@@ -3025,10 +3130,47 @@ def parse_workbook(file_bytes, filename, use_ml=True):
             'confidence': tsai_detail.get('confidence', 1.0),
         }
 
+    # Fallback: BEE-2 Indirect's "CO in Flue Gas" (COfg) / "O2 in Flue Gas"
+    # (O2fg) are, physically, the SAME AH/APH-outlet flue-gas reading
+    # CENPEEP/ASME-PTC 4.1 already call COout/O2out — BEE-2's own form
+    # (public/tab3.html) just doesn't split CO/O2 by APH in/out the way
+    # CENPEEP's does (see the SYM_MAP comment). COfg/O2fg only exist on
+    # BEE-2's form, so defaulting them from an already-detected COout/O2out
+    # here can never affect CENPEEP/ASME-PTC 4.1 — those tabs have no
+    # "COfg"/"O2fg" input to read it into. Only fires when COfg/O2fg
+    # weren't already found under their own name/wording somewhere (e.g.
+    # the direct LAB-sheet O2 alias just above, or an exact "CO in Flue
+    # Gas" style column) — never overrides an actually-detected value.
+    for bee_fid, cenpeep_fid in (('COfg', 'COout'), ('O2fg', 'O2out')):
+        if bee_fid in merged_extracted or cenpeep_fid not in merged_extracted:
+            continue
+        merged_extracted[bee_fid] = merged_extracted[cenpeep_fid]
+        src = merged_field_source.get(cenpeep_fid)
+        if src:
+            merged_field_source[bee_fid] = src
+        detail = merged_field_detail.get(cenpeep_fid, {})
+        merged_field_detail[bee_fid] = {
+            'sheet': detail.get('sheet'),
+            'label': FIELD_LABELS.get(bee_fid, bee_fid),
+            'header': f"defaulted = {FIELD_LABELS.get(cenpeep_fid, cenpeep_fid)} ({detail.get('header') or cenpeep_fid})",
+            'source': 'derived_fallback',
+            'confidence': detail.get('confidence', 1.0),
+        }
+
     missing_fields = [
         {'id': fid, 'label': FIELD_LABELS.get(fid, fid)}
         for fid in REQUIRED_FIELDS if fid not in merged_extracted
     ]
+
+    # BEE-2 Indirect-only overrides (see _scan_lab_sheet_for_ash) — additive,
+    # separate from `merged_extracted`, so no other tab's response is ever
+    # affected. Sheets are walked in the same priority order as the main
+    # merge above; first sheet to offer an override for a field wins.
+    bee_overrides = {}
+    for sr in sheet_results:
+        for fid, val in sr.get('beeOverrides', {}).items():
+            if fid not in bee_overrides:
+                bee_overrides[fid] = val
 
     # ─── Date-wise process support ────────────────────────────────────────
     # Per-row dated snapshots must come from EVERY sheet that actually
@@ -3138,6 +3280,10 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         'datedRows': primary_dated_rows,
         'availableDates': available_dates,
         'dateFilteringAvailable': bool(available_dates),
+        # BEE-2 Indirect-only field overrides (see _scan_lab_sheet_for_ash)
+        # — additive only. CENPEEP/ASME-PTC 4.1/BS-2885's own frontends
+        # never read this key, so they're byte-for-byte unaffected by it.
+        'beeOverrides': bee_overrides,
     }
 
 

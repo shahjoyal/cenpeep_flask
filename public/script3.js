@@ -364,7 +364,17 @@ function runCalculation(rawInputs) {
   //   here EXACTLY as the sheet computes it, per "match what's in the
   //   sheet" — the likely-intended corrected version is included below,
   //   commented out, for when you're ready to fix the source data/formula.
-  const L5 = COfg * C/100 / COfg + CO2fg/5654/GCV/100;
+  //
+  // Written as the already-cancelled C/100 (not the literal
+  // "COfg * C/100 / COfg") — those two are mathematically identical for
+  // every COfg the sheet was ever tested with (x/x = 1 for any x ≠ 0), but
+  // the literal form divides by COfg first and blows up to NaN (0/0)
+  // whenever the actual CO reading is legitimately 0 ppm — a real, common
+  // case (complete/good combustion), not an edge case to guard against
+  // with a special-case check. The sheet's own formula has no real
+  // discontinuity at COfg=0, only an accidental one from how it's typed —
+  // this removes that without changing the result for any other reading.
+  const L5 = (C/100) + CO2fg/5654/GCV/100;
   // Likely-intended version (uses CO/CO2 in % — convert COfg ppm→% first):
   // const COfgPct = COfg / 10000;
   // const L5 = (COfgPct / (COfgPct + CO2fg)) * (C/100) * 5654 / GCV * 100;
@@ -774,7 +784,13 @@ function initUpload() {
       }
 
       // ── Populate every returned field id that this form actually has ────
-      const extracted = data.extracted || {};
+      // BEE-2 Indirect-only overrides (see comment on the 'target' param
+      // above) take priority over the shared extraction for the same
+      // field id — applied here, on a local copy, so the shared
+      // `data.extracted` / `data.fieldDetail` this response also carries
+      // (and that any future cross-tab logic might read) stay exactly as
+      // the backend returned them.
+      const extracted = { ...(data.extracted || {}), ...(data.beeOverrides || {}) };
       let   populated = 0;
       for (const [fieldId, val] of Object.entries(extracted)) {
         const el = document.getElementById(fieldId);
@@ -822,7 +838,18 @@ function initUpload() {
       }
       renderProcessList();
 
-      const fieldDetail  = data.fieldDetail || {};
+      // Same override precedence as `extracted` above, so the "Detected
+      // From" summary table matches what actually landed in the form
+      // instead of describing the pre-override shared value.
+      const fieldDetail = { ...(data.fieldDetail || {}) };
+      for (const fid of Object.keys(data.beeOverrides || {})) {
+        fieldDetail[fid] = {
+          label: INPUT_LABELS[fid] || fid,
+          header: 'LAB sheet (lab-tested reading)',
+          source: 'rule',
+          confidence: 1.0,
+        };
+      }
       const primarySheet = data.primarySheet || '';
       const sheetResults = data.sheetResults || [];
 
