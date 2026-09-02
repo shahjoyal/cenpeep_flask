@@ -168,6 +168,17 @@ SYM_MAP_LOWER = {k.lower(): v for k, v in SYM_MAP.items()}
 NEVER_AUTO_DETECT = {
     'Pfa', 'Pba', 'Sd', 'GCVd', 'Trad', 'Mwvd', 'Md', 'Ad', 'VMd', 'FCd',
     'S', 'COin', 'Tref',
+    # BEE-2 Indirect's "CO2 in Flue Gas" (CO2fg) has no CENPEEP-side
+    # equivalent to default from the way COfg/O2fg default from
+    # COout/O2out (CENPEEP/ASME-PTC 4.1 derive CO2 internally, they don't
+    # take it as a raw input -- see the CO2fg comment in
+    # _match_tag_patterns). On real plant workbooks the only columns that
+    # end up matching "CO2 ... outlet" wording are themselves computed/
+    # back-calculated readings on an efficiency sheet, not a genuine flue-
+    # gas analyzer reading -- with no trustworthy fallback available
+    # either way, CO2fg is left always-manual (same as COin/S/Tref above)
+    # rather than risk auto-filling it with an unreliable value.
+    'CO2fg',
     # L6 (BEE-2 Indirect — Radiation & Unaccounted Losses) carries the
     # same "MANUAL" tag on public/tab3.html that every other field in
     # this set carries on its own calculator form — it's an assumed/
@@ -307,7 +318,20 @@ LABEL_ALIASES = {
     'ambient temp': 'Tamb', 'atmospheric air temperature': 'Tamb',
     'humidity in ambient air': 'Hum', 'humidity': 'Hum',
     'ambient humidity': 'Hum', 'relative humidity': 'Hum',
-    'carbon': 'C', 'hydrogen': 'H2', 'nitrogen': 'N2', 'oxygen': 'O2f',
+    # Deliberately NOT a bare 'carbon'/'hydrogen'/'nitrogen'/'oxygen' alias:
+    # on real plant workbooks those bare labels are almost always a
+    # BACK-CALCULATED figure inside a "Boiler Efficiency Calculation"
+    # sheet (fitted to balance a loss equation, not lab-measured), not a
+    # genuine Ultimate Analysis lab-report reading. A narrow, explicit
+    # "ultimate analysis ..." phrasing is kept below since a real lab
+    # report's own heading says so; anything else falls through to the
+    # Gebhardt's-Formula derived_fallback (computed from Proximate
+    # Analysis) further down, which is the trustworthy source in the
+    # normal case where no genuine Ultimate Analysis column exists.
+    'ultimate analysis carbon': 'C', 'carbon ultimate analysis': 'C',
+    'ultimate analysis hydrogen': 'H2', 'hydrogen ultimate analysis': 'H2',
+    'ultimate analysis nitrogen': 'N2', 'nitrogen ultimate analysis': 'N2',
+    'ultimate analysis oxygen': 'O2f', 'oxygen ultimate analysis': 'O2f',
     'ash content': 'A', 'gcv of coal': 'GCV',
     'gcv of bottom ash': 'GCVba', 'gcv bottom ash': 'GCVba',
     'gcv of fly ash': 'GCVfa', 'gcv fly ash': 'GCVfa',
@@ -540,7 +564,26 @@ def _to_num(val):
 def _sym_to_field(sym):
     """Map a symbol string to a CENPEEP field id."""
     s = str(sym).strip()
-    return SYM_MAP.get(s) or SYM_MAP_LOWER.get(s.lower())
+    fid = SYM_MAP.get(s) or SYM_MAP_LOWER.get(s.lower())
+    if fid:
+        return fid
+    # Lab-report columns commonly suffix the bare symbol with its own unit
+    # sign right on the header cell (e.g. "A%", "M %", "S%") instead of
+    # putting the symbol alone in one cell and "%" in a separate UOM
+    # cell (the standard CenPeep column layout). Without this, "A%" fails
+    # the exact SYM_MAP lookup above (SYM_MAP only has bare "A"), the
+    # normalized single-letter token "a" then gets swept up by
+    # _is_bare_header_cell's _BARE_UNIT_TOKENS check (which also uses "a"
+    # for APH duct side-A/B qualifiers), and the column is silently lost —
+    # sending Ash to the 100-M-VM-FC derived_fallback even though a real
+    # lab-tested Ash% column was right there. Strip one trailing '%'
+    # (with optional whitespace before it) and retry the exact match, so
+    # "A%"/"M %"/"S%" resolve exactly like their bare-symbol counterparts.
+    if s.endswith('%'):
+        stripped = s[:-1].strip()
+        if stripped:
+            fid = SYM_MAP.get(stripped) or SYM_MAP_LOWER.get(stripped.lower())
+    return fid
 
 
 def _match_tag_patterns(norm):
@@ -819,6 +862,51 @@ TEMPERATURE_WORD_TOKENS = {'temp', 'temperature'}
 GAS_ANALYSIS_ONLY_FIELDS = {'O2in', 'O2out', 'O2fg', 'COin', 'COout', 'COfg',
                              'CO2in', 'CO2out', 'CO2fg'}
 
+# "Opacity" is a stack-dust/particulate reading (mg/Nm3), physically
+# unrelated to CO/CO2/O2 gas analysis -- but a header like "Opacity,
+# mg/nm3" shares enough incidental wording (a bare unit, no gas name) with
+# thin CO/CO2 training phrases that the ML fallback can score it onto
+# COout. Hard physical guard: any header naming opacity can never resolve
+# to a gas-analysis field, regardless of confidence.
+OPACITY_TOKENS = {'opacity'}
+
+# "Chimney"/"Stack" is the reading taken AFTER the flue gas has already
+# left the APH -- a different, further-downstream physical point than the
+# APH-duct in/out gas-analysis tags (O2in/O2out/COin/COout/CO2in/CO2out).
+# A header like "O2 AT CHIMNEY" or "CO AT CHIMNEY OUT" has no "APH"/"ECO"
+# wording at all, so it never matches the deterministic APH-duct rules in
+# _match_tag_patterns and falls to the ML fallback instead -- which then
+# scores it onto O2out/COout anyway, purely off shared incidental wording
+# ("O2"/"CO"/"AT"/"OUT") with the APH-duct training phrases (seen on a
+# real CSTPS export: "CO AT CHIMNEY OUT" -> COout at 0.75 confidence,
+# "O2 AT CHIMNEY" -> O2out at 0.565, neither mentioning APH/duct/economiser
+# at all). Because O2out/COout are MULTI_COLUMN_AVERAGE_FIELDS, this
+# silently blends a chimney-point reading (routinely thousands of ppm for
+# CO, well outside the near-zero APH-duct CO CENPEEP's formula expects)
+# into the same average as the genuine APH-A/APH-B duct sensors, which can
+# swing the computed CO/dry-gas loss -- and therefore the boiler efficiency
+# itself -- by a large, one-sided amount whenever the chimney-vs-APH-outlet
+# gap happens to differ between two periods being compared. Hard physical
+# guard, same shape as OPACITY_TOKENS: any header naming the chimney/stack
+# can never resolve to an APH-duct-specific gas-analysis field, regardless
+# of ML confidence. Deliberately scoped to ONLY the APH-duct fields, not
+# ALL of GAS_ANALYSIS_ONLY_FIELDS -- O2fg/COfg/CO2fg are BEE-2's own
+# flue-gas-at-the-final-point readings, so a chimney/stack header is
+# exactly where those SHOULD be allowed to resolve.
+CHIMNEY_TOKENS = {'chimney', 'stack'}
+APH_DUCT_GAS_ANALYSIS_FIELDS = {'O2in', 'O2out', 'COin', 'COout', 'CO2in', 'CO2out'}
+
+# Tfg (BEE-2's single Avg. Flue Gas Temperature reading) is physically the
+# boiler's overall flue-gas temperature -- not a Primary/Secondary Air
+# duct temperature (Tpai/Tpao/Tsai/Tsao). Those PA/SA columns share enough
+# incidental wording ("avg", "temp", "o/l") with Tfg's training phrases
+# that the ML fallback can score a column like "PA Avg. O/L TEMP" onto
+# Tfg. Hard physical guard: any header naming Primary/Secondary Air can
+# never resolve to Tfg, regardless of confidence -- CENPEEP's own Tgo
+# (Avg. Flue Gas Temp -- APH Out) is the correct source for Tfg anyway
+# (see the Tfg <- Tgo derived fallback further down).
+PRIMARY_SECONDARY_AIR_TOKENS = {'pa', 'primary', 'sa', 'secondary'}
+
 # Unit tokens that mark a header as a PRESSURE/DRAFT reading (mmWC =
 # millimeters water column, KSC/KG per CM2 = kg per sq cm) -- real plant
 # sheets label draft-pressure tags this way right next to genuine
@@ -835,10 +923,16 @@ def _unit_conflicts_with_field(header, fid):
     """True if header's own unit/quantity wording physically rules out fid."""
     norm = re.sub(r'[^a-z0-9 ]', '', str(header).lower())
     tokens = set(norm.split())
+    if fid == 'Tfg':
+        return bool(tokens & PRESSURE_UNIT_TOKENS) or bool(tokens & GAS_ANALYSIS_TOKENS) \
+            or bool(tokens & PRIMARY_SECONDARY_AIR_TOKENS)
     if fid in TEMPERATURE_ONLY_FIELDS:
         return bool(tokens & PRESSURE_UNIT_TOKENS) or bool(tokens & GAS_ANALYSIS_TOKENS)
     if fid in GAS_ANALYSIS_ONLY_FIELDS:
-        return bool(tokens & TEMPERATURE_WORD_TOKENS)
+        conflict = bool(tokens & TEMPERATURE_WORD_TOKENS) or bool(tokens & OPACITY_TOKENS)
+        if fid in APH_DUCT_GAS_ANALYSIS_FIELDS:
+            conflict = conflict or bool(tokens & CHIMNEY_TOKENS)
+        return conflict
     if fid == 'SP':
         # Hot/Cold Reheat pressure ("HRH STEAM PRESSURE-L", "CRH STEAM
         # PRESS-R") is a different, downstream point after the reheater --
@@ -1123,6 +1217,20 @@ def _find_header_row(sample_rows, use_ml=True):
 
 
 # ─── Column → field mapping (rule-based alias lookup + ML fallback) ──────────
+# O2fg/COfg/Tfg each already have a reliable derived_fallback (default to
+# CENPEEP's own O2out/COout/Tgo — see the fallback block below) that only
+# kicks in when the field wasn't matched some other way. That makes a
+# LOW-confidence ML guess strictly worse than just leaving the field for
+# the fallback to fill in — e.g. a cryptic, contentless tag like "BT2"
+# scored O2fg at 0.575 confidence (essentially a coin flip) and, by
+# winning the column, silently blocked the O2out fallback from ever
+# firing. Requiring a much higher bar for exactly these three fields
+# means only a genuinely confident, specific match can pre-empt the
+# fallback; anything weaker now correctly falls through to it. Every
+# other field keeps the normal DEFAULT_CONFIDENCE_THRESHOLD.
+ML_MIN_CONFIDENCE_OVERRIDE = {'O2fg': 0.85, 'COfg': 0.85, 'Tfg': 0.85}
+
+
 def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE_THRESHOLD,
                             raw_headers=None):
     """
@@ -1199,7 +1307,7 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
         for col_idx, (fid, score, matched_example) in zip(unmatched_idx, preds):
             if fid and fid not in NEVER_AUTO_DETECT and not _unit_conflicts_with_field(
                 raw_headers[col_idx], fid
-            ):
+            ) and score >= ML_MIN_CONFIDENCE_OVERRIDE.get(fid, 0.0):
                 col_map[col_idx] = fid
                 col_source[col_idx] = 'ml'
                 col_confidence[col_idx] = round(score, 3)
@@ -1842,7 +1950,13 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
 # the hottest APH-outlet duct gas, so genuine plant readings are never
 # affected — only DCS-fault-magnitude garbage gets rejected.
 PHYSICAL_RANGE_FIELDS = {
-    'O2fg': (0, 21), 'O2in': (0, 21), 'O2out': (0, 21),
+    # O2in's lower bound is intentionally > 0 (not 0): a 0% or negative O2
+    # reading is a sensor/DCS fault, not a real flue-gas oxygen level --
+    # it should be dropped from the average the same way the garbage
+    # temperature readings described above are, rather than dragging
+    # O2in's average down. O2fg/O2out keep 0 as their floor since that
+    # hasn't been reported as a live problem for them.
+    'O2fg': (0, 21), 'O2in': (0.01, 21), 'O2out': (0, 21),
     'CO2fg': (0, 21), 'CO2in': (0, 21), 'CO2out': (0, 21),
     'COfg': (0, 50000), 'COin': (0, 50000), 'COout': (0, 50000),
     'Tgi': (-50, 900), 'Tgo': (-50, 900), 'Tfg': (-50, 900),
@@ -2341,16 +2455,32 @@ def _scan_lab_sheet_for_ash(rows, sheet_name):
     matcher deliberately does NOT auto-resolve for the shared field (a bare
     percent-suffixed single letter is too easy to collide with an unrelated
     column elsewhere — see _find_header_row's own MIN_HEADER_FIELD_COUNT
-    guard against exactly that kind of coincidence). Returns the plain
-    average of that column's numeric values, or None if no such
-    sheet/column exists.
+    guard against exactly that kind of coincidence).
+
+    Returns (whole_sheet_average, dated_pairs) — dated_pairs is a list of
+    (date_iso_or_None, value) for every row, alongside the plain
+    whole-sheet average, so a person picking a start/end date on BEE-2's
+    "Add Process" feature gets Ash re-averaged over just that date range
+    too, instead of always seeing the whole file's average regardless of
+    which dates are selected (the same date-range support every other
+    field already gets via primary_dated_rows — see its comment further
+    down). Returns (None, []) if no such sheet/column exists.
     """
     if 'lab' not in str(sheet_name).lower():
-        return None
+        return None, []
     header_row_idx = _find_header_row(rows[:HEADER_SCAN_ROWS])
     if header_row_idx is None:
-        return None
+        return None, []
     header_row = rows[header_row_idx]
+    # The "Date" label itself often sits on the row ABOVE this one (a
+    # merged/stacked group-header row, e.g. "Date" | "AS DRY BASIS" |
+    # "AS FIRED BASIS" with the actual per-column sub-headers — "M%",
+    # "TM%", "A%", ... — one row below it, where col0 is blank). Check
+    # that row too, same real-sheet shape the rest of this module already
+    # handles via stacked-header stitching elsewhere.
+    date_col_idx = _find_date_col_idx(header_row)
+    if date_col_idx is None and header_row_idx > 0:
+        date_col_idx = _find_date_col_idx(rows[header_row_idx - 1])
     for col_idx, raw_hdr in enumerate(header_row):
         if raw_hdr is None:
             continue
@@ -2358,15 +2488,22 @@ def _scan_lab_sheet_for_ash(rows, sheet_name):
         if norm not in ('a', 'ash'):
             continue
         values = []
+        dated_pairs = []
         for r in rows[header_row_idx + 1:]:
             if col_idx >= len(r):
                 continue
             num = _to_num(r[col_idx])
-            if num is not None:
-                values.append(num)
+            if num is None:
+                continue
+            values.append(num)
+            row_date = None
+            if date_col_idx is not None and date_col_idx < len(r):
+                parsed = _parse_date_cell(r[date_col_idx])
+                row_date = parsed.isoformat() if parsed else None
+            dated_pairs.append((row_date, num))
         if values:
-            return sum(values) / len(values)
-    return None
+            return sum(values) / len(values), dated_pairs
+    return None, []
 
 
 def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
@@ -2445,9 +2582,18 @@ def _parse_sheet_rows(rows, sheet_name, use_ml=True, highlight_map=None):
         # BEE-2 Indirect-only Ash override — additive, see docstring. Never
         # overwrites anything in `ext2`/`extracted` above (CENPEEP/ASME-PTC
         # 4.1's own 'A' value from this or any other sheet is untouched).
-        bee_ash = _scan_lab_sheet_for_ash(rows, sheet_name)
+        bee_ash, bee_ash_dated = _scan_lab_sheet_for_ash(rows, sheet_name)
         if bee_ash is not None:
             result['beeOverrides'] = {'A': bee_ash}
+            result['beeOverridesDated'] = {'A': bee_ash_dated}
+            # Which sheet this override actually came from -- additive,
+            # separate from 'beeOverrides' itself (which script3.js reads
+            # as a flat {fid: value} map and must stay that exact shape).
+            # Lets anything reporting on the parse (see r.py) show BEE-2's
+            # REAL effective source for an overridden field instead of the
+            # CENPEEP-shared merge's source, which can differ (see
+            # _scan_lab_sheet_for_ash's docstring).
+            result['beeOverridesSource'] = {'A': sheet_name}
         return result
 
     # Strategy 4: plain label/value form layout, no header row at all -
@@ -2487,8 +2633,28 @@ def _iter_sheet_rows_streamed(ws, ext_xls=False, xlrd_sheet=None):
     xlrd sheets (legacy .xls fallback), and calamine sheets.
     """
     if ext_xls:
+        # Legacy .xls: a cell whose formula is broken (e.g. a deleted
+        # sheet/range reference left behind by copy-pasted report
+        # templates) still carries a CACHED value in the file -- but for
+        # an error cell (#REF!, #DIV/0!, #VALUE!, #NAME?, #NULL!, #NUM!,
+        # #N/A) that cached "value" is the internal BIFF error CODE
+        # (a small integer -- e.g. 23 for #REF!), not a real reading.
+        # xlrd.Cell.cell_type flags this (XL_CELL_ERROR); cell_value()
+        # alone does not distinguish it from a genuine number. Reading it
+        # as a plain number silently feeds a bogus reading (e.g. an
+        # Ash/Carbon/Hydrogen column stuck at the same "23" for every
+        # date column) straight into whatever field that column maps to.
+        # Skipped here at the source (yielded as None, same as a blank
+        # cell) so every downstream strategy/field just treats it as
+        # missing data, same as they already do for a blank cell.
         for r in range(xlrd_sheet.nrows):
-            yield [xlrd_sheet.cell_value(r, c) for c in range(xlrd_sheet.ncols)]
+            row_out = []
+            for c in range(xlrd_sheet.ncols):
+                if xlrd_sheet.cell_type(r, c) == xlrd.XL_CELL_ERROR:
+                    row_out.append(None)
+                else:
+                    row_out.append(xlrd_sheet.cell_value(r, c))
+            yield row_out
     elif HAS_CALAMINE and isinstance(ws, python_calamine.CalamineSheet):
         for row in ws.iter_rows():
             yield row
@@ -3023,6 +3189,26 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         calculated_reference_sheets, key=lambda sr: len(sr.get('extracted', {})), reverse=True
     )
 
+    # Field ids that must NEVER be sourced from a Symbol-column
+    # ("generic_row_layout"/"generic_row_layout_calculated") sheet -- e.g.
+    # an "EFF" Boiler-Efficiency-Calculation tab. Ash (A) is the case that
+    # actually shows up in practice: such a sheet's own Ultimate Analysis
+    # block routinely has a bare Symbol-column cell of exactly "A", which
+    # LOOKS like a legitimate, high-confidence, rule-matched reading (it's
+    # matched via a literal "Symbol" header, the strongest signal this
+    # parser has) and so wins the sheet-ranking merge below outright --
+    # producing a "Detected From" of e.g. "EFF: A" -- even when a genuine
+    # lab-tested Ash% sits right there on another (lab-named) sheet. But
+    # that EFF-sheet "A" is never an independent lab reading; it's a
+    # derived/summary figure tied to whatever scenario the sheet's author
+    # was calculating. So Ash is excluded from this sheet type completely
+    # -- not sourced from it here, and (per the fill-only fallback further
+    # below) not backfilled from its M/VM/FC either once a real Ash value
+    # exists. It can still fall back to the M/VM/FC identity as an
+    # absolute last resort if truly no sheet anywhere has a real Ash
+    # reading.
+    NEVER_SOURCE_FROM_SYMBOL_COLUMN_SHEET = {'A'}
+
     best_generic_sheet = None
     for sr in ranked_sheets:
         if not sr['extracted']:
@@ -3030,11 +3216,16 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         sr_rows = sr.get('dataRowCount', 0)
         if best_generic_sheet is None:
             best_generic_sheet = sr
+        is_symbol_column_sheet = sr.get('strategy') in (
+            'generic_row_layout', 'generic_row_layout_calculated'
+        )
         field_details = _sheet_field_details(sr)
         # Take every field this sheet has, but only if the field hasn't
         # already been filled by a higher-ranked (more date rows) sheet.
         for fid, val in sr['extracted'].items():
             if fid in merged_extracted:
+                continue
+            if is_symbol_column_sheet and fid in NEVER_SOURCE_FROM_SYMBOL_COLUMN_SHEET:
                 continue
             merged_extracted[fid] = val
             merged_field_source[fid] = (sr['sheetName'], sr_rows)
@@ -3157,6 +3348,151 @@ def parse_workbook(file_bytes, filename, use_ml=True):
             'confidence': detail.get('confidence', 1.0),
         }
 
+    # Fallback: BEE-2's "Avg. Flue Gas Temperature" (Tfg) is, physically,
+    # the same APH-outlet flue-gas temperature CENPEEP/ASME-PTC 4.1 already
+    # call Tgo (Avg. Flue Gas Temp -- APH Out) -- BEE-2's own form just
+    # doesn't split it by APH in/out the way CENPEEP's does (same reason
+    # COfg/O2fg default from COout/O2out above). "Ambient Temperature"
+    # (Tamb) has no reliable column of its own on most plant sheets, so
+    # when it's missing, the Primary Air inlet reading (Tpai) is the
+    # standard stand-in for ambient combustion-air temperature. Tfg only
+    # exists on BEE-2's form, and Tamb only feeds BEE-2's L2 loss, so
+    # neither default can affect CENPEEP/ASME-PTC 4.1. Only fires when the
+    # field wasn't already found under its own name/wording -- never
+    # overrides an actually-detected value.
+    for bee_fid, source_fid in (('Tfg', 'Tgo'), ('Tamb', 'Tpai')):
+        if bee_fid in merged_extracted or source_fid not in merged_extracted:
+            continue
+        merged_extracted[bee_fid] = merged_extracted[source_fid]
+        src = merged_field_source.get(source_fid)
+        if src:
+            merged_field_source[bee_fid] = src
+        detail = merged_field_detail.get(source_fid, {})
+        merged_field_detail[bee_fid] = {
+            'sheet': detail.get('sheet'),
+            'label': FIELD_LABELS.get(bee_fid, bee_fid),
+            'header': f"defaulted = {FIELD_LABELS.get(source_fid, source_fid)} ({detail.get('header') or source_fid})",
+            'source': 'derived_fallback',
+            'confidence': detail.get('confidence', 1.0),
+        }
+
+    # Fallback: Ash (A) -- unconditionally computed from the Proximate
+    # Analysis closure A = 100 - M - VM - FC, the same way a lab report's
+    # own Ash% is always derived (Moisture/Ash/VM/FC sum to exactly 100 by
+    # definition -- Ash is never an independent reading alongside the other
+    # three, it's whatever's left over). Added because a bare "Ash"/"A"
+    # label or symbol on a real workbook essentially never sits next to a
+    # genuine independent measurement -- in practice it's almost always a
+    # figure quoted on a "Boiler Efficiency Calculation" / results sheet
+    # (e.g. an "EFF" tab's Ultimate Analysis block, which itself has a
+    # bare SYMBOL cell of exactly "A"), which:
+    #   (a) won't exist at all in a real raw-only workbook (per the report
+    #       tabs it's summarising), so relying on it is a dead end there, and
+    #   (b) when it DOES exist, is a derived/summary number tied to
+    #       whichever scenario the sheet's author was calculating (e.g. a
+    #       "With/Without THERMACT" comparison column) -- not a raw,
+    #       date-varying reading -- so a column-averaging pass can end up
+    #       blending unrelated scenario columns into one meaningless
+    #       constant, and that same constant then gets reused for every
+    #       date range because it never appears in any per-row time series.
+    # Computing A directly from the already-reliably-detected M/VM/FC is a
+    # useful LAST-RESORT fallback when no sheet has a genuine Ash reading
+    # at all. But it must NOT override a real Ash value that was already
+    # extracted (e.g. from a sheet whose name contains "lab") -- M/VM/FC
+    # commonly come from a different, higher-ranked sheet (e.g. an "EFF"/
+    # Boiler-Efficiency-Calculation tab matched via its Symbol-column
+    # layout -- see the sheet-ranking comment above), and that sheet's own
+    # Ash figure, when it has one, is a derived/summary number tied to
+    # whatever scenario it was calculating -- not the plant's actual
+    # lab-tested Ash%. So: fill-only, same as every other fallback in this
+    # module -- only fires when 'A' hasn't already been found anywhere.
+    if 'A' not in merged_extracted and all(f in merged_extracted for f in ('M', 'VM', 'FC')):
+        _M, _VM, _FC = merged_extracted['M'], merged_extracted['VM'], merged_extracted['FC']
+        merged_extracted['A'] = round(100 - _M - _VM - _FC, 4)
+        merged_field_detail['A'] = {
+            'sheet': None,
+            'label': FIELD_LABELS.get('A', 'A'),
+            'header': "calculated from Proximate Analysis (100 - Moisture - VM - FC)",
+            'source': 'derived_fallback',
+            'confidence': 1.0,
+        }
+        # Ash sourced this way is tied to whichever sheet M/VM/FC came from
+        # (they're always the same sheet -- see the sibling-field grouping
+        # logic above), so point fieldSource at that sheet too instead of
+        # leaving A pointing at whatever sheet it happened to match on
+        # before -- keeps "Detected From" honest for the report/summary UI.
+        m_source = merged_field_source.get('M')
+        if m_source:
+            merged_field_source['A'] = m_source
+
+    # Fallback: BEE-2 Indirect's Ultimate Analysis inputs (Carbon/Hydrogen/
+    # Nitrogen/Oxygen -- C/H2/N2/O2f) are almost never present anywhere as
+    # genuine lab-certificate columns on a real plant workbook. What DOES
+    # show up under labels like bare "Carbon"/"Nitrogen" is typically a
+    # BACK-CALCULATED figure sitting inside a "Boiler Efficiency
+    # Calculation" sheet (fitted to balance a loss equation, not measured),
+    # or a "...Content Of Coal (+)" helper column that is itself already
+    # computed from Proximate Analysis by the same formula used here. Since
+    # neither is a trustworthy independent reading, C/H2/N2/O2f are instead
+    # computed directly from the already-reliably-detected Proximate
+    # Analysis (M, A, VM, FC) using the CENPEEP dry-ash-free correlation
+    # (FcDc/VmDf/Cdf/Hdf/Ndf/k) -- the exact same formula-for-formula
+    # derivation the CENPEEP Basic sheet (rows 41-52) and
+    # public/script.js's computeDerivedInputs() already use, so this
+    # backend-computed fallback reconciles with the calculator/workbook
+    # instead of producing different numbers for the same inputs (a
+    # previous version of this fallback used Gebhardt's Formula, an
+    # unrelated empirical correlation, which is why results didn't match).
+    # Sulphur isn't independently available at parse time (see
+    # NEVER_AUTO_DETECT), so the Oxygen-by-difference step defaults it to
+    # 0.3%, mirroring script.js's own `S=gv('S') || 0.3` fallback.
+    # Fires whenever M/A/VM/FC are all present -- and, deliberately,
+    # UNCONDITIONALLY OVERRIDES any value C/H2/N2/O2f already picked up
+    # some other way (unlike every other fallback in this module, which
+    # only fills in a gap). That's because a real plant workbook's "C"/
+    # "N" SYMBOL cell (or a bare "Carbon"/"Nitrogen" label) essentially
+    # never sits next to a genuine independent lab measurement here -- in
+    # every real sheet seen so far it's a back-calculated figure fitted
+    # to balance a "Boiler Efficiency Calculation" sheet's loss equation,
+    # not measured coal composition -- so a symbol/label match for these
+    # four fields specifically is worth LESS than computing them the
+    # standard way, not more.
+    if all(f in merged_extracted for f in ('M', 'A', 'VM', 'FC')):
+        M, A, VM, FC = (merged_extracted['M'], merged_extracted['A'],
+                         merged_extracted['VM'], merged_extracted['FC'])
+        # Sulphur is manual-entry-only (see NEVER_AUTO_DETECT) and may not be
+        # present at parse time; the CENPEEP workbook itself fixes Sulphur at
+        # 0.3% in that case (see script.js's identical `S=gv('S') || 0.3`), so
+        # mirror that default here rather than dropping S from the Oxygen
+        # difference.
+        S_for_O = merged_extracted.get('S', 0.3)
+        # Same "dry-ash-free" (FcDc/VmDf/Cdf/Hdf/Ndf/k) derivation as the
+        # CENPEEP Basic sheet (rows 41-52) and public/script.js's
+        # computeDerivedInputs() — kept formula-for-formula identical so this
+        # backend fallback reconciles with the rest of the app instead of
+        # diverging (previously used Gebhardt's Formula, which is a
+        # different empirical correlation and produced mismatched numbers).
+        FcDc = FC / (1 - (1.1 * A / 100) - (M / 100))
+        VmDf = 100 - FcDc
+        Cdf = FcDc + 0.9 * (VmDf - 14)
+        Hdf = VmDf * ((7.35 / (VmDf + 10)) - 0.013)
+        Ndf = 2.1 - (0.012 * VmDf)
+        k = (VM + FC) / (VmDf + FcDc)
+        cenpeep_C = Cdf * k
+        cenpeep_H = Hdf * k
+        cenpeep_N = Ndf * k
+        cenpeep_O = 100 - cenpeep_C - S_for_O - cenpeep_H - M - cenpeep_N - A
+        for bee_fid, computed in (('C', cenpeep_C), ('H2', cenpeep_H),
+                                   ('N2', cenpeep_N), ('O2f', cenpeep_O)):
+            merged_extracted[bee_fid] = round(computed, 4)
+            merged_field_detail[bee_fid] = {
+                'sheet': None,
+                'label': FIELD_LABELS.get(bee_fid, bee_fid),
+                'header': "calculated from Proximate Analysis (M, A, VM, FC) via CENPEEP dry-ash-free (FcDc/VmDf/k) formula",
+                'source': 'derived_fallback',
+                'confidence': 1.0,
+            }
+
     missing_fields = [
         {'id': fid, 'label': FIELD_LABELS.get(fid, fid)}
         for fid in REQUIRED_FIELDS if fid not in merged_extracted
@@ -3167,10 +3503,25 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     # affected. Sheets are walked in the same priority order as the main
     # merge above; first sheet to offer an override for a field wins.
     bee_overrides = {}
+    bee_overrides_dated = {}
+    bee_overrides_source = {}
     for sr in sheet_results:
         for fid, val in sr.get('beeOverrides', {}).items():
             if fid not in bee_overrides:
                 bee_overrides[fid] = val
+        for fid, sheet_name_ in sr.get('beeOverridesSource', {}).items():
+            if fid not in bee_overrides_source:
+                bee_overrides_source[fid] = sheet_name_
+        for fid, pairs in sr.get('beeOverridesDated', {}).items():
+            if fid not in bee_overrides_dated:
+                # Same shape as primary_dated_rows below (list of
+                # {date, values}) so the frontend's existing per-date
+                # summing logic can treat this exactly like any other
+                # dated row, without a separate special case — see the
+                # 'beeOverridesDated' comment in the return dict.
+                bee_overrides_dated[fid] = [
+                    {'date': d, 'values': {fid: val}} for d, val in pairs if d
+                ]
 
     # ─── Date-wise process support ────────────────────────────────────────
     # Per-row dated snapshots must come from EVERY sheet that actually
@@ -3231,6 +3582,20 @@ def parse_workbook(file_bytes, filename, use_ml=True):
                     continue
                 primary_dated_rows.append({'date': row_date, 'values': row_vals})
 
+    # Ash (A) is computed (not column-matched — see the derived_fallback
+    # block above), so it never comes out of a sheet's own `datedRows` and
+    # the loop above can never pick it up. Derive it into every dated row
+    # that has that row's own M/VM/FC too, so a date-range "process" (e.g.
+    # BEE-2's Add Process, or CENPEEP's before/after comparison) re-derives
+    # Ash from THAT range's own Moisture/VM/FC instead of silently reusing
+    # the whole-file constant above for every date range regardless of
+    # which one is selected — the same date-sensitivity every other
+    # proximate field (M, VM, FC) already gets.
+    for _row in primary_dated_rows:
+        _vals = _row.get('values') or {}
+        if all(f in _vals for f in ('M', 'VM', 'FC')):
+            _vals['A'] = round(100 - _vals['M'] - _vals['VM'] - _vals['FC'], 4)
+
     # CenPeep-column layout is a single authoritative value per field, not
     # a time series, so there's no meaningful date range to slice it by —
     # matches the previous behavior for that case (primary_dated_rows stays
@@ -3284,6 +3649,19 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         # — additive only. CENPEEP/ASME-PTC 4.1/BS-2885's own frontends
         # never read this key, so they're byte-for-byte unaffected by it.
         'beeOverrides': bee_overrides,
+        # Per-date breakdown of the above (currently just Ash), same
+        # {date, values} shape as 'datedRows' — lets BEE-2's own "Add
+        # Process" date-range feature re-average Ash over just the
+        # selected dates too, instead of always showing the whole LAB
+        # sheet's average regardless of which range is picked. Additive
+        # only, same as 'beeOverrides' — no other tab reads this key.
+        'beeOverridesDated': bee_overrides_dated,
+        # Which sheet each 'beeOverrides' value actually came from —
+        # additive, so reporting tools (see r.py) can show BEE-2's real
+        # effective source for an overridden field, instead of the
+        # CENPEEP-shared merge's source shown by 'fieldSource'/
+        # 'fieldDetail', which can differ (see _scan_lab_sheet_for_ash).
+        'beeOverridesSource': bee_overrides_source,
     }
 
 

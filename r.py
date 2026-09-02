@@ -47,7 +47,7 @@ import os
 # 'fieldDetail' (per-field: which sheet/header/method/confidence) and
 # 'missingFields' (required fields not found anywhere) — this script just
 # renders that straight into a document.
-from routes.upload import parse_workbook
+from routes.upload import parse_workbook, FIELD_LABELS
 
 
 # ── Step 1: run the real pipeline ───────────────────────────────────────────
@@ -88,22 +88,44 @@ def build_report(result, output_path):
         "rule": "D9EAD3",
         "ml": "D6E4F0",
         "derived_fallback": "FCE5CD",
+        "bee_override": "FFF2CC",
     }
     method_labels = {
         "cenpeep_column": "CenPeep layout (exact)",
         "rule": "Exact alias/symbol match",
         "ml": "AI (ML) match",
         "derived_fallback": "Defaulted from another field",
+        "bee_override": "BEE-2 override (lab-tested reading)",
     }
 
     primary_sheet = result.get("primarySheet", "")
     field_detail = result.get("fieldDetail", {})
     missing_fields = result.get("missingFields", [])
     extracted = result.get("extracted", {})
+    # BEE-2 Indirect's own field-source overrides (see 'beeOverrides' /
+    # 'beeOverridesSource' in routes/upload.py) — a field can have a
+    # DIFFERENT real source/value for BEE-2 than the CENPEEP-shared merge
+    # field_detail/extracted show above (currently just Ash: BEE-2 wants
+    # it from the LAB sheet's lab-tested reading, CENPEEP doesn't). This
+    # report is scoped to BEE-2, so it shows that overridden source/value
+    # instead of the CENPEEP one wherever an override exists — otherwise
+    # the report would say "EFF: A" for a field the calculator itself
+    # actually fills in from the LAB sheet.
+    bee_overrides = result.get("beeOverrides", {})
+    bee_overrides_source = result.get("beeOverridesSource", {})
 
     doc.add_heading(primary_sheet or "No sheet selected", level=2)
 
-    if not field_detail:
+    # Union of every field CENPEEP's merge found AND every field BEE-2
+    # overrides — a field could in principle only exist via the override
+    # (not the shared merge), so relying on field_detail's keys alone
+    # would silently omit it.
+    all_field_ids = sorted(
+        set(field_detail) | set(bee_overrides),
+        key=lambda f: (field_detail.get(f) or {}).get("label") or FIELD_LABELS.get(f, f),
+    )
+
+    if not all_field_ids:
         doc.add_paragraph("No fields could be detected on the selected sheet.")
     else:
         table = doc.add_table(rows=1, cols=5)
@@ -114,17 +136,31 @@ def build_report(result, output_path):
             hdr_cells[i].text = txt
             hdr_cells[i].paragraphs[0].runs[0].bold = True
 
-        for fid in sorted(field_detail.keys(), key=lambda f: field_detail[f].get("label", f)):
-            d = field_detail[fid]
+        for fid in all_field_ids:
+            d = field_detail.get(fid, {})
             row = table.add_row().cells
-            row[0].text = d.get("label") or fid
-            row[1].text = d.get("header") or "—"
-            method = d.get("source", "rule")
-            row[2].text = method_labels.get(method, method)
-            conf = d.get("confidence")
-            row[3].text = f"{conf:.2f}" if conf is not None else "—"
-            val = extracted.get(fid)
-            row[4].text = f"{val:.4g}" if isinstance(val, (int, float)) else str(val or "—")
+            row[0].text = d.get("label") or FIELD_LABELS.get(fid, fid)
+            if fid in bee_overrides:
+                # BEE-2's real effective source wins the display — this is
+                # what the calculator's BEE-2 tab actually uses, even
+                # though field_detail/extracted above (CENPEEP's merge)
+                # may show a different sheet/value for the same field id.
+                sheet_name = bee_overrides_source.get(fid)
+                row[1].text = f"{sheet_name}: {fid}% column (lab-tested reading)" if sheet_name \
+                    else "Lab-tested reading"
+                method = "bee_override"
+                row[2].text = method_labels[method]
+                row[3].text = "—"
+                val = bee_overrides[fid]
+                row[4].text = f"{val:.4g}" if isinstance(val, (int, float)) else str(val or "—")
+            else:
+                row[1].text = d.get("header") or "—"
+                method = d.get("source", "rule")
+                row[2].text = method_labels.get(method, method)
+                conf = d.get("confidence")
+                row[3].text = f"{conf:.2f}" if conf is not None else "—"
+                val = extracted.get(fid)
+                row[4].text = f"{val:.4g}" if isinstance(val, (int, float)) else str(val or "—")
             fill = method_colors.get(method, "FFFFFF")
             for cell in row:
                 shade_cell(cell, fill)

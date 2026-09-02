@@ -142,16 +142,31 @@ function setProcessDate(id, which, iso) {
 }
 
 // Rows from the uploaded file's dated log that fall inside [start, end]
-// (inclusive; an unset bound is open-ended on that side).
-function _rowsInRange(start, end) {
-  const rows = (window._uploadData && window._uploadData.datedRows) || [];
+// (inclusive; an unset bound is open-ended on that side). `extra` is an
+// optional second list of rows to fold in alongside the main dated log —
+// used for beeOverridesDated (e.g. Ash from the LAB sheet), which is a
+// separate per-field series from the main sheet's datedRows (see the
+// beeOverridesDated comment in routes/upload.py).
+function _rowsInRange(start, end, extra) {
+  const rows = ((window._uploadData && window._uploadData.datedRows) || [])
+    .concat(extra || []);
   return rows.filter(r => r.date
     && (!start || r.date >= start)
     && (!end   || r.date <= end));
 }
 
 function _averageFieldsInRange(start, end) {
-  const rows = _rowsInRange(start, end);
+  // beeOverridesDated fields (currently just Ash) are a separate per-date
+  // series from the main sheet's datedRows — e.g. Ash comes from a once-
+  // a-day LAB sheet while the rest of the log is hourly readings from a
+  // different sheet. Folding every field's series into one flat list
+  // before filtering means Ash gets re-averaged over the SAME chosen
+  // date range as everything else, instead of always showing the whole
+  // LAB sheet's average regardless of which dates are picked.
+  const extraRows = Object.values(
+    (window._uploadData && window._uploadData.beeOverridesDated) || {}
+  ).flat();
+  const rows = _rowsInRange(start, end, extraRows);
   const sums = {}, counts = {};
   rows.forEach(r => Object.entries(r.values).forEach(([fid, val]) => {
     sums[fid]   = (sums[fid]   || 0) + val;
@@ -159,7 +174,9 @@ function _averageFieldsInRange(start, end) {
   }));
   const avg = {};
   Object.keys(sums).forEach(fid => { avg[fid] = sums[fid] / counts[fid]; });
-  return { avg, rowCount: rows.length };
+  // rowCount reflects the main dated log only (not the extra per-field
+  // series folded in above), same as before this change.
+  return { avg, rowCount: _rowsInRange(start, end).length };
 }
 
 function renderProcessList() {
