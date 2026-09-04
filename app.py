@@ -8,11 +8,20 @@ load_dotenv()
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 CORS(app)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB (was 50MB — some real
+app.config['MAX_CONTENT_LENGTH'] = 250 * 1024 * 1024  # 250 MB (was 100MB — some real
                                                         # plant workbooks with many
                                                         # months of hourly tag data
                                                         # across several sheets can
-                                                        # approach this size)
+                                                        # approach this size; raised
+                                                        # again to comfortably clear
+                                                        # ~150-200MB .xlsm exports
+                                                        # without changing anything
+                                                        # about how they're parsed —
+                                                        # the chunked/streamed reader
+                                                        # in routes/upload.py already
+                                                        # handles files of this size
+                                                        # at the same speed regardless
+                                                        # of this ceiling)
 
 # MongoDB connection
 MONGO_URI = os.getenv('MONGODB_URI', '')

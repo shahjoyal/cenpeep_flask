@@ -336,6 +336,15 @@ TRAINING_EXAMPLES = [
     ("FLUE GAS TEMP AFTER APH", "Tgo"), ("FLUE GAS TEMP AFTER APH LHS", "Tgo"),
     ("FLUE GAS TEMP AFTER APH RHS", "Tgo"), ("FLUE GAS TEMP AFTER APH LEFT", "Tgo"),
     ("FLUE GAS TEMP AFTER APH RIGHT", "Tgo"),
+    # "ITS ... FG Temp" -- real header shape from a 5-min DCS export, where
+    # "ITS" names a duct/probe location (not a steam-path abbreviation)
+    # and "FG Temp" makes explicit this is a flue-GAS reading, not a
+    # steam-side one. Added as explicit anchors because the OUT_OF_SCOPE
+    # "ITS IN/Out Steam Temp -A/-B" entries above (a real but different
+    # column family on the same sheet) share enough of the "ITS ... Temp"
+    # substring to otherwise pull this genuine Tgi/Tgo reading down below
+    # the confidence threshold on pure char n-gram overlap.
+    ("ITS IN FG Temp", "Tgi"), ("ITS Out FG Temp", "Tgo"),
 
     # ── Boiler outlet main steam temp has no dedicated CENPEEP symbol in
     #    this field set — it stays unmatched by design (see OUT_OF_SCOPE
@@ -871,6 +880,97 @@ OUT_OF_SCOPE_EXAMPLES = [
     "TDBFP A I/L TEMP", "TDBFP B I/L TEMP", "TDBFP C I/L TEMP",
     "TD BFP-A I/L TEMP", "TD BFP-B I/L TEMP", "TD BFP-C I/L TEMP",
     "TDBFP A I/L PRESS", "TDBFP B I/L PRESS", "TDBFP C I/L PRESS",
+
+    # Coal-ash mineral (oxide) composition -- a real column family on Ash
+    # Fusion / XRF / mineral-analysis lab sheets (reported alongside GCV/
+    # Moisture/Ash/VM/FC on the same sheet, e.g. "COSA" -- Coal & Ash
+    # Analysis -- sheets). None of these individual oxide percentages is a
+    # CENPEEP field, but several drift onto a real field purely on "(%)"/
+    # short-token character-n-gram overlap: "Mn3O4 (%)" was scoring Ffw
+    # (Steam Flow) at 0.60 confidence, and "BaO (ppm)" was scoring COfg
+    # (Flue Gas CO) at 0.92 -- high enough to clear even COfg's raised
+    # 0.85 override bar -- silently overwriting a real flue-gas-CO reading
+    # with a barium-oxide percentage from an unrelated lab sheet. The rest
+    # (SiO2/Al2O3/Fe2O3/CaO/MgO/Na2O/K2O/TiO2/SO3/P2O5/"Undetermined") were
+    # scoring O2fg (Flue Gas O2) in the 0.3-0.66 range on the same "(%)"
+    # overlap; several already sit below O2fg's 0.85 override, but are
+    # added here anyway so they can't tip over as training data grows, and
+    # so ordinary (non-overridden) fields aren't put at risk either.
+    "SiO2 (%)", "Al2O3 (%)", "Fe2O3 (%)", "CaO (%)", "MgO (%)",
+    "Na2O (%)", "K2O (%)", "TiO2 (%)", "Mn3O4 (%)", "SO3 (%)", "P2O5 (%)",
+    "BaO (ppm)", "BaO (%)", "Undetermined (%)",
+
+    # Coal/ash quality ratios and indices -- derived figures reported on
+    # the same Ash Fusion / Coal Analysis sheets as the mineral oxides
+    # above, not raw sensor/lab readings and not any CENPEEP field.
+    # "Fuel Ratio (FC/VM)" was drifting onto O2f (Oxygen % ultimate
+    # analysis) at 0.55 purely via the shared "%"/short-token pattern with
+    # "O2 % Fuel"; "SilicaAluminium Ratio" and "BaseAcid Ratio" were
+    # drifting onto Pfa (% Fly Ash of Total Ash) at 0.70-0.77 via the
+    # shared word "Ratio". HGI (Hardgrove Grindability Index) is a coal
+    # hardness number, not a load/generation reading, despite sharing
+    # letters with "Load"-family training text on char n-grams.
+    "Fuel Ratio (FC/VM)", "Fuel Ratio", "SilicaAluminium Ratio",
+    "Silica Aluminium Ratio", "BaseAcid Ratio", "Base Acid Ratio",
+    "Slagging Factor", "Fouling Factor", "HGI",
+
+    # Ash Fusion Temperature readings (Initial Deformation, Hemispherical,
+    # Flow temperatures, in both Reducing and Oxidising atmospheres) --
+    # real lab figures on the same sheet family, each a specific named
+    # ash-melting-behaviour temperature with no CENPEEP field of its own.
+    # "Flow (°C) Red." was drifting onto Fpa (Primary Air Flow) at 0.51
+    # purely because it contains the word "Flow" -- despite being an ash
+    # fusion temperature (measured in °C), not an air-flow rate.
+    "Initial Deformation (°C)", "Initial Deformation (°C) Red.",
+    "Initial Deformation (°C) Oxi.", "IDT (Reducing)", "IDT (Oxidising)",
+    "IDT (Oxidising) Initial Deform. (°C)",
+    "IDT (Reducing) Initial Deform. (°C)",
+    "Hemispherical (°C)", "Hemispherical (°C) Red.", "Hemispherical (°C) Oxi.",
+    "Flow (°C)", "Flow (°C) Red.", "Flow (°C) Oxi.", "Ash Fusion Flow Temperature",
+    "Softening Temperature (°C)", "Spon Comb (O/C)",
+
+    # Coal grain-size distribution ("sieve analysis") -- a real column
+    # family on the same lab sheets, reported as size-fraction
+    # percentages (e.g. "> 50mm retained", "< 3mm passing"). Already below
+    # O2fg's 0.85 override bar today, but added here so it can't tip over
+    # later, since it shares the same "(%)" pattern as the O2 examples.
+    ">50mm (%)", "<3mm (%)", "<0.5mm (%)", ">50mm", "<3mm", "<0.5mm",
+
+    # Superheater/Reheater/Turbine-bypass and intermediate-stage steam
+    # TEMPERATURE readings on real 5-minute DCS exports -- these are all
+    # temperatures at various points along the steam path (bypass valves,
+    # LP/HP turbine sections, low/high temperature superheater/reheater
+    # stages), NOT the boiler's main steam flow, and CENPEEP has no field
+    # for any of them individually. Because they all contain the word
+    # "Steam" (and several also say "Superheater"/"Turbine"), they drift
+    # onto Ffw (Steam Flow, 0.49-0.71 confidence) or SP (Steam Pressure,
+    # 0.71 confidence) purely on that shared vocabulary -- e.g.
+    # "Superheater HP Bypass Temp -A" was confidently (0.71) overwriting
+    # the real Superheater-outlet SP reading with a bypass-valve
+    # temperature in real production output on a live upload.
+    "Superheater HP Bypass Temp", "Superheater HP Bypass Temp -A",
+    "Superheater HP Bypass Temp -B", "Superheater LP Bypass Temp",
+    "LTSH Out Steam Temp", "LTSH Out Steam Temp -A", "LTSH Out Steam Temp -B",
+    "ITS IN Steam Temp", "ITS IN Steam Temp -A", "ITS IN Steam Temp -B",
+    "ITS Out Steam Temp", "ITS Out Steam Temp -A", "ITS Out Steam Temp -B",
+    "HTS IN Steam Temp", "HTS IN Steam Temp -A", "HTS IN Steam Temp -B",
+    "HTS Out Steam Temp", "HTS Out Steam Temp -A", "HTS Out Steam Temp -B",
+    "LTR IN Steam Temp", "LTR IN Steam Temp -A", "LTR IN Steam Temp -B",
+    "LTR Out Steam Temp", "LTR Out Steam Temp -A", "LTR Out Steam Temp -B",
+    "HTR Out Steam Temp", "HTR Out Steam Temp -A", "HTR Out Steam Temp -B",
+    "HP Turbine CRH Steam Temp", "HP Turbine CRH Steam Temp-A",
+    "HP Turbine CRH Steam Temp-B", "HP Turbine CRH Steam Press",
+    "HTS Out Steam Press", "LTR IN Steam Press", "LTS TUBE MET",
+    "ITS TUBE MET", "HTS TUBE MET", "LTR TUBE MET", "HTR TUBE MET",
+
+    # Flue Gas Recirculation (FGR) flow -- a real, separate gas stream
+    # (recirculated flue gas fed back into the furnace/windbox) measured
+    # on its own DCS tag, not Primary Air. "FGR FLOW" was drifting onto
+    # Fpa (Primary Air Flow, 0.79 confidence) purely via the shared word
+    # "Flow" with the real "PA Flow" training examples, which would
+    # silently blend a flue-gas-recirculation reading into the primary-air
+    # flow average.
+    "FGR FLOW", "FGR Flow", "Flue Gas Recirculation Flow", "FGR TEMP", "FGR Temp",
 ]
 
 def get_training_data():
