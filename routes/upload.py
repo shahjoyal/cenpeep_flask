@@ -49,6 +49,7 @@ import os
 import re
 import time
 import datetime
+import random
 import statistics
 from flask import Blueprint, request, jsonify
 
@@ -411,6 +412,22 @@ def _is_highlighted_fill(cell):
         return False
 
 
+# A themed/banded header-row style (cosmetic table formatting applied to
+# an ENTIRE header row) is indistinguishable, cell-by-cell, from a person
+# deliberately highlighting a column — _is_highlighted_fill just sees a
+# non-white solid fill either way. The two cases differ at the ROW level,
+# though: a deliberate highlight marks a small minority of that row's
+# populated header cells (an engineer pointing at the handful of columns
+# that matter), while a themed style covers all or nearly all of them.
+# Only trust a row's highlighted-cell set as a genuine signal when it's a
+# minority by this ratio; otherwise treat the whole row as unhighlighted
+# rather than let a cosmetic style masquerade as a human pointing at every
+# column. This is what makes it safe to re-enable highlight-based
+# detection (see parse_workbook) after it was previously disabled outright
+# for exactly the themed-whole-row failure mode this guards against.
+MAX_HIGHLIGHT_FRACTION = 0.5
+
+
 def _scan_header_highlights(file_bytes):
     """
     Returns {sheetName: {rowIdx: {colIdx, ...}}} - for each sheet, the set
@@ -423,6 +440,10 @@ def _scan_header_highlights(file_bytes):
     Returns {} (feature silently disabled) if openpyxl isn't available or
     the file can't be opened a second time this way - highlight detection
     is a bonus signal, never a requirement for a successful parse.
+
+    A row where the highlighted cells are NOT a small minority of that
+    row's populated cells (see MAX_HIGHLIGHT_FRACTION) is dropped entirely
+    for that row — see the constant's docstring for why.
     """
     if not HAS_OPENPYXL:
         return {}
@@ -442,9 +463,18 @@ def _scan_header_highlights(file_bytes):
                 for r_idx, row in enumerate(
                     ws.iter_rows(min_row=1, max_row=HIGHLIGHT_SCAN_ROWS)
                 ):
+                    populated = sum(
+                        1 for cell in row
+                        if cell.value is not None and str(cell.value).strip()
+                    )
                     cols = {c_idx for c_idx, cell in enumerate(row) if _is_highlighted_fill(cell)}
-                    if cols:
-                        sheet_map[r_idx] = cols
+                    if not cols:
+                        continue
+                    if populated and len(cols) > MAX_HIGHLIGHT_FRACTION * populated:
+                        # Looks like a themed/banded row style, not a
+                        # deliberate highlight — ignore it for this row.
+                        continue
+                    sheet_map[r_idx] = cols
             except Exception:
                 # A malformed row/style shouldn't take down highlight
                 # detection for the rest of the sheet or other sheets.
@@ -1230,9 +1260,16 @@ def _find_header_row(sample_rows, use_ml=True):
 # other field keeps the normal DEFAULT_CONFIDENCE_THRESHOLD.
 ML_MIN_CONFIDENCE_OVERRIDE = {'O2fg': 0.85, 'COfg': 0.85, 'Tfg': 0.85}
 
+# How many of a sheet's actual data rows to sample when checking whether a
+# candidate column is genuinely populated (see _col_has_any_data). A small
+# sample is enough — a column that's part of a real data feed has a value
+# within its first few rows; a blank template/reference column stays blank
+# for all of them. Kept small so this stays cheap even on a huge sheet.
+DEDUPE_DATA_SAMPLE_ROWS = 30
+
 
 def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE_THRESHOLD,
-                            raw_headers=None):
+                            raw_headers=None, sample_rows=None):
     """
     Given a list of header strings (one per column), returns:
       col_map: {col_idx: field_id}
@@ -1258,6 +1295,12 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
     literal stitched-alias lookup just stays unmatched rather than risking
     a wrong-field match — consistent with the rest of this module always
     preferring "leave it for the person to fill in" over guessing wrong.
+
+    `sample_rows`, if given, is a small sample of the sheet's actual data
+    rows (list of row lists, same column indices as `headers`) — passed
+    straight through to _dedupe_columns_per_field so a completely blank
+    column can never win a field over a populated one, regardless of
+    header-text confidence. See _col_has_any_data / _dedupe_columns_per_field.
     """
     if raw_headers is None:
         raw_headers = headers
@@ -1313,7 +1356,7 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
                 col_confidence[col_idx] = round(score, 3)
 
     col_map, col_source, col_confidence = _dedupe_columns_per_field(
-        col_map, col_source, col_confidence, headers
+        col_map, col_source, col_confidence, headers, sample_rows=sample_rows
     )
 
     return col_map, col_source, col_confidence
@@ -1400,6 +1443,27 @@ _SIBLING_TOKEN_OVERLAP_THRESHOLD = 0.5
 # columns (e.g. "Total PA FLOW") rather than one more sibling reading
 # alongside them (e.g. "PA FLOW TO MILL-A"). See _groups_are_siblings.
 _TOTAL_INDICATOR_TOKENS = {'total', 'overall', 'aggregate', 'sum'}
+
+# Bare tokens used across real plant tag-naming (and already anchored
+# throughout ml/training_data.py, e.g. "AH A PA I/L TEMP", "GAH I/L O2",
+# "APH-A I/L GAS TEMP") for the air/gas preheater itself, as opposed to a
+# DIFFERENT piece of equipment upstream/downstream of it (an economiser,
+# an "ITS" duct, a furnace-exit probe) whose reading is only ever used as
+# a fallback PROXY for the real APH-side reading when no APH-tagged column
+# exists at all. When a real plant sheet has BOTH a proxy column and a
+# genuine APH-tagged column for the same MULTI_COLUMN_AVERAGE_FIELDS field
+# (e.g. both "ITS IN FG Temp" and "AH-A/AH-B IN FG Temp"), the APH-tagged
+# one(s) should always win the top group ahead of the proxy, rather than
+# the proxy winning on a coincidental confidence/index tiebreak and then
+# using up the sibling-group cap before the genuine APH pair even gets
+# considered — see _group_has_equipment_anchor / group_rank below.
+_APH_EQUIPMENT_TOKENS = {'ah', 'aph', 'gah'}
+
+
+def _group_has_equipment_anchor(base_tag_key):
+    """True if a _base_tag_key(...) string names the APH/air-heater itself
+    (see _APH_EQUIPMENT_TOKENS) rather than only a proxy/upstream location."""
+    return bool(_core_token_set(base_tag_key) & _APH_EQUIPMENT_TOKENS)
 
 
 def _core_token_set(base_tag_key):
@@ -1505,7 +1569,32 @@ def _base_tag_key(header):
     return stripped or norm
 
 
-def _dedupe_columns_per_field(col_map, col_source, col_confidence, headers=None):
+def _col_has_any_data(col_idx, sample_rows):
+    """
+    True if at least one row in `sample_rows` has a real (non-blank) value
+    at `col_idx`. Used only as a tiebreaker in _dedupe_columns_per_field —
+    see the "empty column" note there for why this matters: a column whose
+    header text happens to score a fraction higher on confidence/exactness
+    can otherwise beat a column that is the sheet's actual populated data
+    source, if the higher-scoring one turns out to be a blank
+    template/reference column (e.g. an unused "Conversion adb→arb" section
+    that repeats a field's name but was never filled in). 0/0.0 counts as
+    real data; only None and blank/whitespace-only strings don't.
+    """
+    for row in sample_rows:
+        if col_idx >= len(row):
+            continue
+        val = row[col_idx]
+        if val is None:
+            continue
+        if isinstance(val, str) and not val.strip():
+            continue
+        return True
+    return False
+
+
+def _dedupe_columns_per_field(col_map, col_source, col_confidence, headers=None,
+                               sample_rows=None):
     """
     Keeps only the SINGLE best column for each field id, instead of letting
     every column that happens to map to the same field survive together —
@@ -1528,6 +1617,14 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence, headers=None)
     Selection rule per field id, in order (fields in
     MULTI_COLUMN_AVERAGE_FIELDS skip this and instead run the grouped
     selection below):
+      0. If `sample_rows` was given: a column with at least one real value
+         always beats one that is entirely blank in the sample. A blank
+         column can never be a legitimate source no matter how well its
+         header text matches, so this is checked before source/confidence
+         (e.g. an unused "Conversion adb->arb" template column named just
+         "Ash (adb)" can score a near-perfect ML match on header text alone
+         and still be completely empty for every row — that shouldn't be
+         allowed to beat the real, populated "Ash (%) arb" column).
       1. An exact rule match always beats an ML (fuzzy) match.
       2. Among same-source matches, higher confidence wins.
       3. Ties broken by earliest column index, for determinism.
@@ -1555,11 +1652,15 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence, headers=None)
         by_field.setdefault(fid, []).append(col_idx)
 
     def rank(col_idx):
-        # Lower is better: rule (0) beats ml (1); within a tier, higher
+        # Lower is better: has-data (0) beats blank (1) when sample_rows is
+        # available; then rule (0) beats ml (1); within a tier, higher
         # confidence is better (negated so sort ascending = best first);
         # earliest column index is the final tiebreaker.
+        blank_rank = 0
+        if sample_rows is not None:
+            blank_rank = 0 if _col_has_any_data(col_idx, sample_rows) else 1
         source_rank = 0 if col_source[col_idx] == 'rule' else 1
-        return (source_rank, -col_confidence[col_idx], col_idx)
+        return (blank_rank, source_rank, -col_confidence[col_idx], col_idx)
 
     new_map, new_source, new_confidence = {}, {}, {}
     for fid, cols in by_field.items():
@@ -1587,8 +1688,15 @@ def _dedupe_columns_per_field(col_map, col_source, col_confidence, headers=None)
                     # to outrank and bump a real 2-sensor A-side/B-side pair
                     # out of the top two.
                     best = min(group, key=rank)
-                    source_rank, neg_conf, idx = rank(best)
-                    return (source_rank, -len(group), neg_conf, idx)
+                    blank_rank, source_rank, neg_conf, idx = rank(best)
+                    # A group anchored to the APH/air-heater itself always
+                    # outranks one that isn't (see _group_has_equipment_anchor)
+                    # -- derived from the group's own best-member header,
+                    # since every member of a group shares the same base tag
+                    # apart from side letter.
+                    best_hdr = headers[best] if best < len(headers) else ''
+                    equip_rank = 0 if _group_has_equipment_anchor(_base_tag_key(best_hdr)) else 1
+                    return (blank_rank, source_rank, equip_rank, -len(group), neg_conf, idx)
 
                 ranked_groups = sorted(groups.values(), key=group_rank)
                 ranked_keys = sorted(groups.keys(), key=lambda k: group_rank(groups[k]))
@@ -1648,6 +1756,38 @@ _EXCEL_EPOCH = datetime.datetime(1899, 12, 30)
 # every real CENPEEP hourly/15-min log seen in practice (a few thousand
 # rows at most for a multi-month period) stays far under this.
 MAX_DATED_ROWS_PER_SHEET = 20000
+
+
+def _reservoir_add(reservoir, item, cap, seen_count):
+    """
+    Classic reservoir sampling (Algorithm R): maintains a uniform random
+    sample of up to `cap` items out of a stream of unknown/unbounded
+    length, without ever holding more than `cap` items in memory.
+    `seen_count` is the 1-indexed count of qualifying items seen so far,
+    INCLUDING this one (i.e. call this once per qualifying item, in order,
+    with seen_count = 1, 2, 3, ...).
+
+    This replaces the old "keep the first `cap` items, silently drop
+    everything after" behavior. That was fine as long as no real sheet
+    ever had more than `cap` dated rows (see the comment above this
+    constant) — but a sheet logged at finer granularity than assumed (e.g.
+    5-minute rather than 15-minute/hourly intervals) over a multi-month
+    span can exceed it, and because rows are read in chronological order,
+    "keep the first `cap`, drop the rest" means every row kept comes from
+    the START of the sheet: everything after whatever date the cap was
+    hit at — potentially a whole trailing month or more — silently
+    vanishes from the date-range feature, even though the underlying data
+    is genuinely there. Reservoir sampling instead keeps a representative,
+    uniformly-distributed spread across the ENTIRE stream, so every date
+    in the sheet still has some rows behind it even when the sheet is
+    larger than the cap.
+    """
+    if seen_count <= cap:
+        reservoir.append(item)
+        return
+    j = random.randint(0, seen_count - 1)
+    if j < cap:
+        reservoir[j] = item
 
 
 def _parse_date_cell(val):
@@ -1835,7 +1975,8 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
     data_rows = rows[header_row_idx + 1:]
 
     col_map, col_source, col_confidence = _map_columns_to_fields(
-        headers, use_ml=use_ml, raw_headers=raw_headers
+        headers, use_ml=use_ml, raw_headers=raw_headers,
+        sample_rows=data_rows[:DEDUPE_DATA_SAMPLE_ROWS]
     )
 
     highlighted_cols = (highlight_map or {}).get(header_row_idx, set())
@@ -1870,6 +2011,7 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
     # can't be placed into any date-range bucket).
     field_values = {fid: [] for fid in col_map.values()}
     dated_rows = []
+    dated_rows_seen = 0
     for row in data_rows:
         row_vals = {}
         row_sums = {}
@@ -1900,14 +2042,15 @@ def _parse_raw_layout(rows, use_ml=True, highlight_map=None):
                 field_values[fid].append(total)
             else:
                 row_vals[fid] = total / row_counts[fid]
-        if row_vals and len(dated_rows) < MAX_DATED_ROWS_PER_SHEET:
+        if row_vals:
             row_date = None
             if date_col_idx is not None and date_col_idx < len(row):
                 row_date = _parse_date_cell(row[date_col_idx])
-            dated_rows.append({
+            dated_rows_seen += 1
+            _reservoir_add(dated_rows, {
                 'date': row_date.isoformat() if row_date else None,
                 'values': row_vals,
-            })
+            }, MAX_DATED_ROWS_PER_SHEET, dated_rows_seen)
 
     extracted, raw_rows, sheet_summary = _finalize_field_values(field_values)
     col_meta = {
@@ -2691,6 +2834,7 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
     data_row_count = 0
     unmatched_hi = []
     dated_rows = []
+    dated_rows_seen = [0]
 
     for row in row_iter:
         row_count += 1
@@ -2711,7 +2855,8 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
                         raw_headers,
                     )
                     col_map, col_source, col_confidence = _map_columns_to_fields(
-                        headers, use_ml=use_ml, raw_headers=raw_headers
+                        headers, use_ml=use_ml, raw_headers=raw_headers,
+                        sample_rows=chunk[header_row_idx + 1:][:DEDUPE_DATA_SAMPLE_ROWS]
                     )
                     highlighted_cols = (highlight_map or {}).get(header_row_idx, set())
                     col_map, col_source, col_confidence, _, unmatched_hi = (
@@ -2723,7 +2868,8 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
                     # Process any data rows already buffered after the header
                     for data_row in chunk[header_row_idx + 1:]:
                         _accumulate_row(data_row, col_map, field_values,
-                                         date_col_idx=date_col_idx, dated_rows=dated_rows)
+                                         date_col_idx=date_col_idx, dated_rows=dated_rows,
+                                         dated_rows_seen=dated_rows_seen)
                         if _row_has_data(data_row, date_col_idx, col_map):
                             data_row_count += 1
                     chunk = []
@@ -2735,7 +2881,8 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
 
         # Header already known — accumulate this row directly, no buffering
         _accumulate_row(row, col_map, field_values,
-                         date_col_idx=date_col_idx, dated_rows=dated_rows)
+                         date_col_idx=date_col_idx, dated_rows=dated_rows,
+                         dated_rows_seen=dated_rows_seen)
         if _row_has_data(row, date_col_idx, col_map):
             data_row_count += 1
 
@@ -2849,14 +2996,21 @@ def _parse_sheet_chunked(row_iter, sheet_name, use_ml=True, highlight_map=None):
     }
 
 
-def _accumulate_row(row, col_map, field_values, date_col_idx=None, dated_rows=None):
+def _accumulate_row(row, col_map, field_values, date_col_idx=None, dated_rows=None,
+                     dated_rows_seen=None):
     """
     Pull numeric values for mapped columns out of one data row. If
-    `dated_rows` is given (a list), also append this row's dated snapshot
-    to it — same shape/purpose as in _parse_raw_layout, capped at
-    MAX_DATED_ROWS_PER_SHEET — so the chunked/streamed path (the one large,
-    real hourly-log workbooks actually go through) supports the date-range
-    feature too, not just the small-sheet path.
+    `dated_rows` is given (a list), also add this row's dated snapshot to
+    it via reservoir sampling — same purpose as in _parse_raw_layout,
+    capped at MAX_DATED_ROWS_PER_SHEET — so the chunked/streamed path (the
+    one large, real hourly-log workbooks actually go through) supports
+    the date-range feature too, not just the small-sheet path.
+    `dated_rows_seen`, if given, is a single-element list used as a
+    mutable running counter (`[0]` to start) shared across every call for
+    the same sheet — required by _reservoir_add to know each qualifying
+    row's position in the overall stream. If omitted, falls back to the
+    old first-`cap`-only behavior (kept only so any other/older caller of
+    this function keeps working unchanged).
     """
     row_vals = {}
     row_sums = {}
@@ -2889,14 +3043,19 @@ def _accumulate_row(row, col_map, field_values, date_col_idx=None, dated_rows=No
             field_values.setdefault(fid, []).append(total)
         else:
             row_vals[fid] = total / row_counts[fid]
-    if dated_rows is not None and row_vals and len(dated_rows) < MAX_DATED_ROWS_PER_SHEET:
+    if dated_rows is not None and row_vals:
         row_date = None
         if date_col_idx is not None and date_col_idx < len(row):
             row_date = _parse_date_cell(row[date_col_idx])
-        dated_rows.append({
+        item = {
             'date': row_date.isoformat() if row_date else None,
             'values': row_vals,
-        })
+        }
+        if dated_rows_seen is not None:
+            dated_rows_seen[0] += 1
+            _reservoir_add(dated_rows, item, MAX_DATED_ROWS_PER_SHEET, dated_rows_seen[0])
+        elif len(dated_rows) < MAX_DATED_ROWS_PER_SHEET:
+            dated_rows.append(item)
 
 
 def _is_readable_worksheet(ws):
@@ -3048,23 +3207,22 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     sheet_results = []
 
-    # Highlight-based detection is intentionally DISABLED — field detection
-    # must come from header-text matching (rule + ML) alone, never from a
-    # cell's fill color. Real-world workbooks routinely apply a themed
-    # header-row style (banded/table header formatting) across an ENTIRE
-    # header row for purely cosmetic reasons; _is_highlighted_fill() can't
-    # tell that apart from an engineer deliberately marking one column, so
-    # every column on such a sheet was being treated as "human-flagged" —
-    # e.g. this caused a sheet with both an "IM %" and a "T.M. %" column to
-    # have BOTH pulled into the Moisture field (their headers joined as
-    # "IM % + T.M. %") instead of just the correct T.M. one, purely because
-    # the sheet's header row happened to use a themed cell style.
-    # _scan_header_highlights / _apply_highlight_signal are left in place
-    # below (harmless, unused) rather than deleted, in case this needs a
-    # narrower, more reliable re-enable later — but they are never invoked
-    # from here, so highlight_map is always empty and every "highlighted"
-    # code path downstream is a permanent no-op.
-    highlight_map = {}
+    # Highlight-based detection: a human-highlighted column (e.g. an
+    # engineer marking the handful of columns that matter, out of a much
+    # wider sheet) is a stronger signal than header-text matching alone,
+    # and is used to prefer/recover the highlighted column on a field
+    # conflict — see _apply_highlight_signal. This was previously disabled
+    # outright because a themed/banded header-row style (cosmetic table
+    # formatting applied across an ENTIRE header row) is indistinguishable,
+    # cell-by-cell, from a deliberate highlight, and every column on such a
+    # sheet was being treated as "human-flagged" — e.g. this caused a sheet
+    # with both an "IM %" and a "T.M. %" column to have BOTH pulled into
+    # the Moisture field (their headers joined as "IM % + T.M. %") instead
+    # of just the correct T.M. one. _scan_header_highlights now guards
+    # against exactly that (see MAX_HIGHLIGHT_FRACTION) by only trusting a
+    # row's highlighted cells when they're a small minority of that row's
+    # populated cells, which a themed whole-row style never is.
+    highlight_map = _scan_header_highlights(file_bytes)
 
     use_calamine = HAS_CALAMINE
     if use_calamine:
@@ -3344,6 +3502,31 @@ def parse_workbook(file_bytes, filename, use_ml=True):
             'sheet': detail.get('sheet'),
             'label': FIELD_LABELS.get(bee_fid, bee_fid),
             'header': f"defaulted = {FIELD_LABELS.get(cenpeep_fid, cenpeep_fid)} ({detail.get('header') or cenpeep_fid})",
+            'source': 'derived_fallback',
+            'confidence': detail.get('confidence', 1.0),
+        }
+
+    # Reverse direction of the fallback just above: a sheet can just as
+    # easily have a bare "Flue Gas CO"/"O2 in Flue Gas"-style column that
+    # only the (bare, unsplit) BEE-2 alias 'flue gas co'/'flue gas o2' ->
+    # COfg/O2fg catches (see LABEL_ALIASES), with no separate APH-in/out
+    # split column for CENPEEP's own COout/O2out to match on its own. Since
+    # it's the same physical AH/APH-outlet reading either way, CENPEEP's
+    # COout/O2out should default from COfg/O2fg exactly the same way BEE-2
+    # defaults from CENPEEP above — only fires when COout/O2out weren't
+    # already found under their own wording, never overrides a real match.
+    for cenpeep_fid, bee_fid in (('COout', 'COfg'), ('O2out', 'O2fg')):
+        if cenpeep_fid in merged_extracted or bee_fid not in merged_extracted:
+            continue
+        merged_extracted[cenpeep_fid] = merged_extracted[bee_fid]
+        src = merged_field_source.get(bee_fid)
+        if src:
+            merged_field_source[cenpeep_fid] = src
+        detail = merged_field_detail.get(bee_fid, {})
+        merged_field_detail[cenpeep_fid] = {
+            'sheet': detail.get('sheet'),
+            'label': FIELD_LABELS.get(cenpeep_fid, cenpeep_fid),
+            'header': f"defaulted = {FIELD_LABELS.get(bee_fid, bee_fid)} ({detail.get('header') or bee_fid})",
             'source': 'derived_fallback',
             'confidence': detail.get('confidence', 1.0),
         }

@@ -181,6 +181,16 @@ TRAINING_EXAMPLES = [
     ("O2 AT ECO OUTLET", "O2in"), ("O2 AT ECO OUTLET LHS", "O2in"),
     ("O2 AT ECO OUTLET RHS", "O2in"), ("O2 AT OUTLET", "O2in"),
     ("O2 AT OUTLET LHS", "O2in"), ("O2 AT OUTLET RHS", "O2in"),
+    # "AH-A/AH-B IN FG O2" -- dedicated per-side APH-inlet O2 sensor, in the
+    # "AH-A"/"AH-B ... IN FG O2" word order (mirrors the Tgi "AH A/B IN FG
+    # Temp" anchors above). Without this, the closest match was the Tgo
+    # temperature examples ("FG TEMP AH O/L" etc.), since char n-grams don't
+    # distinguish "O2" (a reading) from "IN"/"Out" (a direction) the way a
+    # person would -- this header was being detected as a temperature
+    # instead of an O2 reading.
+    ("AH A IN FG O2", "O2in"), ("AH B IN FG O2", "O2in"),
+    ("AH-A IN FG O2", "O2in"), ("AH-B IN FG O2", "O2in"),
+    ("AH A IN FG O2 average", "O2in"), ("AH B IN FG O2 average", "O2in"),
 
     # ── CO2in — CO2 APH In ──────────────────────────────────────────────────
     ("CO2 at APH Inlet", "CO2in"), ("CO2 APH In", "CO2in"), ("CO2 Air Preheater Inlet", "CO2in"),
@@ -197,6 +207,15 @@ TRAINING_EXAMPLES = [
     # Real DCS tag phrasing seen on "dayly data" / "Hourly data" exports —
     # aggregated column and raw per-side columns for the same reading.
     ("O2 APH O/L", "O2out"), ("APH A OUTL GAS O2 CT", "O2out"), ("APH B OUTL GAS O2 CT", "O2out"),
+    # "AH-A/AH-B Out Gas O2" -- same dedicated per-side APH-outlet O2 sensor
+    # as above, but in the "AH-A"/"AH-B ... Out Gas O2" word order (mirrors
+    # the Tgo "AH A/B Out Gas Temp" anchors). Previously only scored ~0.57
+    # via the loosely-related "APH A OUTL GAS O2 CT" example — a genuine but
+    # weak match; a direct anchor makes this a confident match instead of a
+    # near-miss.
+    ("AH A Out Gas O2", "O2out"), ("AH B Out Gas O2", "O2out"),
+    ("AH-A Out Gas O2", "O2out"), ("AH-B Out Gas O2", "O2out"),
+    ("AH A Out Gas O2 average", "O2out"), ("AH B Out Gas O2 average", "O2out"),
 
     # ── CO2out — CO2 APH Out ─────────────────────────────────────────────────
     ("CO2 at APH Outlet", "CO2out"), ("CO2 APH Out", "CO2out"), ("CO2 Air Preheater Outlet", "CO2out"),
@@ -276,6 +295,19 @@ TRAINING_EXAMPLES = [
     ("APH-A I/L GAS TEMP", "Tgi"), ("APH-B I/L GAS TEMP", "Tgi"),
     ("APH I/L GAS TEMP", "Tgi"), ("APH-A INLET GAS TEMP", "Tgi"),
     ("APH-B INLET GAS TEMP", "Tgi"), ("APH INLET GAS TEMPERATURE", "Tgi"),
+    # "AH-A/AH-B IN FG Temp" -- same dedicated per-side APH-inlet sensor as
+    # the "APH-A/B I/L GAS TEMP" examples just above, but using the DCS
+    # tag's own word order ("IN" before "FG Temp", not "I/L GAS TEMP") and
+    # the "AH-A"/"AH-B" side-letter form already used for this plant's PA/SA
+    # temp tags (see "AH A PA I/L TEMP" etc. below). Without this exact
+    # word-order anchor, "AH-A IN FG Temp" scored closer to the (unrelated)
+    # "FG TEMP AH O/L" Tgo example than to any Tgi one, since char n-grams
+    # don't care about IN-vs-OUT meaning, only shared substrings -- and
+    # every existing Tgi anchor used "I/L"/"BEFORE"/"After Eco" phrasing
+    # instead of bare "IN FG Temp".
+    ("AH A IN FG Temp", "Tgi"), ("AH B IN FG Temp", "Tgi"),
+    ("AH-A IN FG Temp", "Tgi"), ("AH-B IN FG Temp", "Tgi"),
+    ("AH A IN FG Temp average", "Tgi"), ("AH B IN FG Temp average", "Tgi"),
     # Bare "FLUE GAS TEMP BEFORE APH" (LHS/RHS split, real CSTPS hourly-log
     # header) -- plain-English "before APH" wording with no APH-I/L/AH-tag
     # abbreviation at all. Without a direct anchor, this drifted hard onto
@@ -325,6 +357,13 @@ TRAINING_EXAMPLES = [
     ("FG GAS TEMP AH O/L", "Tgo"), ("FG GAS TEMP AH O/L (L)", "Tgo"),
     ("FG GAS TEMP AH O/L (R)", "Tgo"), ("FG GAS TEMP AH O/L Left", "Tgo"),
     ("FG GAS TEMP AH O/L Right", "Tgo"), ("FG TEMP AH O/L", "Tgo"),
+    # "AH-A/AH-B Out Gas Temp" -- same dedicated per-side APH-outlet sensor
+    # as "FG GAS TEMP AH O/L" just above, but in the "AH-A"/"AH-B ... Out
+    # Gas Temp" word order (measurement word last), mirroring the "AH A/B
+    # IN FG Temp" Tgi anchors added above.
+    ("AH A Out Gas Temp", "Tgo"), ("AH B Out Gas Temp", "Tgo"),
+    ("AH-A Out Gas Temp", "Tgo"), ("AH-B Out Gas Temp", "Tgo"),
+    ("AH A Out Gas Temp average", "Tgo"), ("AH B Out Gas Temp average", "Tgo"),
     ("FG TEMP AH O/L (R)", "Tgo"), ("FG TEMP AH O/L (L)", "Tgo"),
     ("FG TEMP AH OUTLET", "Tgo"), ("FG GAS TEMP AH Outlet", "Tgo"),
     # Bare "FLUE GAS TEMP AFTER APH" (LHS/RHS split) -- same real CSTPS
