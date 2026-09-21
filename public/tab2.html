@@ -150,16 +150,13 @@
 
 <script src="particles.js"></script>
 <script src="boiler-badge.js"></script>
+<script src="auth.js"></script>
 <script src="boiler-gate.js"></script>
 <script src="script2.js"></script>
 <script>
-if (!sessionStorage.getItem('loggedIn')) {
-  window.location.href = 'index.html';
-}
+Auth.requireAuth();
 function logout() {
-  sessionStorage.removeItem('loggedIn');
-  sessionStorage.removeItem('boilerType');
-  window.location.href = 'index.html';
+  Auth.logout();
 }
 function toggleSection(header) {
   var targetId = header.getAttribute('data-target');

@@ -1,1016 +1,2921 @@
 """
-training_data.py — Labeled training examples for the CENPEEP field classifier
+training_data.py — Matrix-generated training examples for the CENPEEP field
+classifier
 ================================================================================
-Each entry maps a *header phrase a real plant sheet might use* to the CENPEEP
-field id it represents. This is intentionally generous with variants — the
-TF-IDF classifier learns which words/n-grams correlate with which field, so
-more (realistic) phrasings per field = better generalization.
+EVERY row in this file (both the real CENPEEP fields and the OUT_OF_SCOPE
+negative class) is produced by combinatorial generation: a small set of
+"axes" (equipment names, directions, sides, measurement words, unit
+suffixes, prefixes, etc.) are crossed with itertools.product() to produce
+every phrase a real plant sheet might plausibly use for that quantity.
 
-This file is the "training data" the user asked for. It's plain Python data,
-easy to hand-edit/extend later (that's the point — basic now, refine over
-time). To add a new field or new plant-specific phrasing, just append rows.
+This replaces the previous hand-curated-example-per-bug approach. That
+trades away some things:
+  - Per-entry provenance/comments explaining which specific real-world
+    header previously caused a misclassification are gone.
+  - Some generated phrases are combinations that may never appear on any
+    actual plant sheet ("noise") — accepted as a tradeoff for a file that
+    is trivially extensible by editing an axis list instead of hand-typing
+    new rows one at a time.
+  - The axes below were reverse-engineered from the vocabulary that
+    appeared in the previous hand-curated file, so real-world coverage
+    should be broadly similar even though individual sentences differ.
 
-Format: list of (text, field_id) tuples.
+Format: get_training_data() -> (texts, labels) parallel lists, same
+contract as before. get_field_ids() and the exclusion helpers are also
+unchanged in behavior.
+
+--------------------------------------------------------------------------
+2026-09 update: a real plant sheet (CSTPS Unit-9, "U_9__Q8_CSTPS.xls" —
+10 sheets: OPN PARA, PARA AVG, LOAD BAND, LAB, GUHR Direct, EFF, CBA,
+GIST, July-Aug, May & June) was used to audit this file's coverage
+against actual production headers. That audit found real headers in the
+file that no generator produced (false negatives) and a few OOS-class
+headers that were likely to be pulled onto the wrong field by similarity
+because no negative example anchored them (false positive risk). The
+"REAL-WORLD COVERAGE FIXES" section near the bottom adds the missing
+axes/patterns; search there for details on each gap.
+--------------------------------------------------------------------------
+
+2026-09 merge: an earlier, hand-curated + partially-matrixed version of
+this file (built before the full matrix rewrite above) was diffed against
+this one. Every row from that file whose exact text didn't already appear
+here was folded in as a flat "MERGED SUPPLEMENTAL EXAMPLES" block near the
+bottom, EXCEPT for 7 rows where the two files disagreed on the label for
+the identical text -- those were dropped in favor of this file's audited
+answer:
+  - "CO" / "CO mg/Nm3"                         -> COfg (not COout)
+  - "Ambient Temperature"/"Ambient Temp"/
+    "Atmospheric Temp"                          -> Tamb (not Tref)
+  - "Bottom Ash %" / "Fly Ash %"                -> Cba/Cfa (not Pba/Pfa)
+The last one surfaced a real, structural limitation worth knowing about:
+the classifier's TfidfVectorizer uses analyzer="char_wb", which extracts
+character n-grams independently *within* each whitespace-delimited word.
+That means it is blind to word ORDER -- "% Fly Ash" and "Fly Ash %"
+produce mathematically identical similarity neighborhoods regardless of
+which field each is assigned to. Pba/Pfa vs Cba/Cfa (and similar pairs)
+can only be disambiguated by picking non-overlapping phrasing (as this
+file already does -- Pba/Pfa always use a "%"/word PREFIX, Cba/Cfa always
+use a bare SUFFIX or a dedicated word like "UBC"), never by word-order
+alone. If a future edit gives Pba/Pfa a bare "<ash> %" suffix form (or
+gives Cba/Cfa a "% <ash>" prefix form), it will silently collide with the
+other field's examples. This isn't fixable in training data -- it would
+need a different vectorizer/analyzer in field_classifier.py.
+--------------------------------------------------------------------------
 """
 
-TRAINING_EXAMPLES = [
-    # ── L — Unit Load ──────────────────────────────────────────────────────
-    ("Load", "L"), ("Unit Load", "L"), ("Load MW", "L"), ("Generation Load", "L"),
-    ("MW Load", "L"), ("Gross Load", "L"), ("Unit Load MW", "L"), ("Generation", "L"),
-    ("Power Generation", "L"), ("Load (MW)", "L"), ("GENERATION", "L"), ("Net Generation", "L"),
-    ("Total Unit Generation", "L"), ("Unit Generation", "L"), ("Total Generation", "L"),
-    # "Generator" (the equipment) is real plant-tag shorthand for the same
-    # MW reading as "Generation" — e.g. "GENERATOR MW" on DCS-style hourly
-    # exports. Without an explicit anchor, this drifted onto the unrelated
-    # OUT_OF_SCOPE example "Generator Side Condenser Vacuum" purely on
-    # "Generator" word/char overlap, since no L example previously used
-    # that spelling (only "Generation").
-    ("Generator MW", "L"), ("GENERATOR MW", "L"), ("Generator Load", "L"),
-    ("Gen MW", "L"), ("GEN MW", "L"), ("Gen-MW", "L"), ("Generator Output", "L"),
-    ("Generator Output MW", "L"),
+from itertools import product
 
-    # ── Ffw — Steam Flow / Feed water flow ────────────────────────────────
-    ("Steam Flow", "Ffw"), ("Main Steam Flow", "Ffw"), ("Feed water Flow", "Ffw"),
-    ("Feedwater Flow", "Ffw"), ("FW Flow", "Ffw"), ("MS Flow", "Ffw"),
-    ("Feed Water Flow TPH", "Ffw"), ("Boiler Feed Water Flow", "Ffw"), ("MAIN STEAM Flow", "Ffw"),
-    ("FW FLOW", "Ffw"), ("FEED WATER FLOW", "Ffw"),
-    # "STM"/"FLW" abbreviated DCS-tag spelling of "Steam"/"Flow" — e.g.
-    # "MAIN STM FLOW COMP" (main steam flow, compensated) on real hourly
-    # exports. Without a Ffw example using "STM", this drifted onto the
-    # OUT_OF_SCOPE "MAIN STM TEMP-L/-R" examples instead, since those were
-    # the closest char n-gram match on the abbreviated spelling — even
-    # though this column is a FLOW reading, not a temperature. Keep this
-    # narrowly scoped to "STM ... FLOW/FLW" so it doesn't start pulling in
-    # the (deliberately unmapped) "MAIN STM TEMP" family.
-    ("MAIN STM FLOW COMP", "Ffw"), ("MAIN STM FLOW", "Ffw"), ("MAIN STM FLW COMP", "Ffw"),
-    ("MN STM FLOW", "Ffw"), ("STM FLOW", "Ffw"), ("STM FLW", "Ffw"), ("Total STM Flow", "Ffw"),
-    # "M S FLOW" -- the exact real CSTPS header for Main Steam Flow, with a
-    # space between "M" and "S" instead of "MS". Without this, it was
-    # losing to the (wrong) Fpa/Fsa "PA Flow"/"SA Flow" training examples
-    # on char n-gram overlap -- "M S FLOW" and "PA Flow"/"SA Flow" happen
-    # to share more substring structure once there's a space in the middle
-    # than "M S FLOW" does with the correctly-spelled "MS Flow" example.
-    ("M S FLOW", "Ffw"),
+# ═══════════════════════════════════════════════════════════════════════
+# Generic matrix-generation helpers
+# ═══════════════════════════════════════════════════════════════════════
 
-    # ── Fin — Total Coal Flow ──────────────────────────────────────────────
-    ("Total Coal consumption", "Fin"), ("Coal Flow", "Fin"), ("Total Coal Flow", "Fin"),
-    ("Coal Consumption", "Fin"), ("Total Coal consumption TPH", "Fin"),
-    ("Coal Feed Rate", "Fin"), ("Fuel Flow", "Fin"), ("Total Fuel Flow", "Fin"),
-    ("Coal Rate", "Fin"), ("Total Coal Firing Rate", "Fin"), ("Feeder A Coal flow rate", "Fin"),
-    ("Feeder B Coal flow rate", "Fin"), ("Feeder C Coal flow rate", "Fin"),
-    ("Feeder D Coal flow rate", "Fin"), ("Feeder E Coal flow rate", "Fin"),
-    ("Feeder F Coal flow rate", "Fin"), ("Feeder G Coal flow rate", "Fin"),
-    # Per-mill coal flow readings (as opposed to per-feeder) are the same
-    # physical quantity — total coal input — just measured at the mill
-    # rather than the feeder. Real plant sheets report these instead of
-    # (or alongside) feeder flows, so they must feed into Fin too, not be
-    # rejected as OUT_OF_SCOPE (was previously mislabeled — see below).
-    ("Mill A Coal Flow", "Fin"), ("Mill B Coal Flow", "Fin"), ("Mill C Coal Flow", "Fin"),
-    ("Mill D Coal Flow", "Fin"), ("Mill E Coal Flow", "Fin"), ("Mill F Coal Flow", "Fin"),
-    ("Mill G Coal Flow", "Fin"), ("Mill H Coal Flow", "Fin"), ("Mill Coal Flow", "Fin"),
 
-    # ── Cba — Unburnt C Bottom Ash ────────────────────────────────────────
-    ("Unburnt Carbon Bottom Ash", "Cba"), ("Bottom Ash Unburnt Carbon", "Cba"),
-    ("Unburnt carbon in Bottom Ash", "Cba"), ("Bottom Ash UBC", "Cba"),
-    ("Bottom Ash (%) Unburnt Carbon", "Cba"), ("LOI Bottom Ash", "Cba"),
-    ("UBC IN BOTTOM ASH", "Cba"), ("UBC Bottom Ash", "Cba"),
-    # Bare "Bottom Ash (%)" / "Bottom Ash %" and "Unburnts in Bottom ash" —
-    # real header text as seen on Lab Report / Previous LOI / Boiler
-    # Efficiency sheets, where this column IS the loss-on-ignition /
-    # unburnt-carbon reading, not the ash-split percentage (see the
-    # LABEL_ALIASES note in routes/upload.py for the Cba/Pba ambiguity this
-    # was previously losing to).
-    ("Bottom Ash (%)", "Cba"), ("Bottom Ash %", "Cba"), ("Bottom Ash", "Cba"),
-    ("Unburnts in Bottom ash", "Cba"), ("Unburnts in Bottom Ash", "Cba"),
-    ("Unburnt in Bottom Ash", "Cba"),
 
-    # ── Cfa — Unburnt C Fly Ash ────────────────────────────────────────────
-    ("Unburnt Carbon Fly Ash", "Cfa"), ("Fly Ash Unburnt Carbon", "Cfa"),
-    ("Unburnt carbon in Fly Ash ESP", "Cfa"), ("Fly Ash UBC", "Cfa"),
-    ("Fly Ash - ESP (%)", "Cfa"), ("LOI Fly Ash", "Cfa"), ("Economizer Unburnt Carbon", "Cfa"),
-    ("UBC IN FLY ASH", "Cfa"), ("UBC Fly Ash", "Cfa"),
-    # Bare "Fly Ash (%)" / "Fly Ash %" and "Unburnts in Fly ash" — same
-    # reasoning as the bare Bottom Ash entries above.
-    ("Fly Ash (%)", "Cfa"), ("Fly Ash %", "Cfa"), ("Fly Ash", "Cfa"),
-    ("Unburnts in Fly ash", "Cfa"), ("Unburnts in Fly Ash", "Cfa"),
-    ("Unburnt in Fly Ash", "Cfa"),
 
-    # ── Pfa — % Fly Ash (of TOTAL ash — distinct from the Cfa unburnt-
-    #    carbon reading above; always explicitly qualified with "total"
-    #    in real sheets so it isn't confused with bare "Fly Ash %") ───────
-    ("% Fly Ash", "Pfa"), ("Fly Ash Percentage", "Pfa"), ("Fly Ash Fraction", "Pfa"),
-    ("Fly Ash Ratio", "Pfa"), ("Percent Fly Ash", "Pfa"),
-    ("% of Fly Ash in Total Ash", "Pfa"), ("Fly Ash in Total Ash", "Pfa"),
-    ("Fly Ash % of Total Ash", "Pfa"),
 
-    # ── Pba — % Bottom Ash (of TOTAL ash) ───────────────────────────────────
-    ("% Bottom Ash", "Pba"), ("Bottom Ash Percentage", "Pba"), ("Bottom Ash Fraction", "Pba"),
-    ("Bottom Ash Ratio", "Pba"), ("Percent Bottom Ash", "Pba"),
-    ("% of Bottom Ash in Total Ash", "Pba"), ("Bottom Ash in Total Ash", "Pba"),
-    ("Bottom Ash % of Total Ash", "Pba"),
 
-    # ── M — Moisture (coal proximate, "as fired") ─────────────────────────
-    # CENPEEP's "M" field is specifically TOTAL Moisture (TM) — the figure
-    # the boiler-efficiency formula actually uses. Inherent Moisture (IM)
-    # is a DIFFERENT lab quantity (moisture retained inside the coal
-    # matrix itself, always smaller than TM) reported alongside TM on the
-    # same Coal Analysis sheet — not interchangeable with it. "IM %" /
-    # "Inherent Moisture" used to be listed here as if they were the same
-    # field, so a sheet with BOTH columns matched "IM %" as well as
-    # "T.M. %" for M, and both survived into the result (their headers
-    # got joined together in the "detected from" display, e.g.
-    # "IM % + T.M. %") instead of TM alone. See the explicit IM rejection
-    # in OUT_OF_SCOPE_EXAMPLES below.
-    ("Moisture", "M"), ("Moisture %", "M"),
-    ("Total Moisture", "M"), ("TM %", "M"), ("Moisture As Received", "M"),
-    ("Coal Moisture", "M"), ("M %", "M"), ("T.M. %", "M"), ("TM%", "M"),
-    ("% Moist ( TM)", "M"), ("% Moist (TM)", "M"), ("Percent Moisture TM", "M"),
+#changes to do
+#sa flow to check with column names which are columns bp+bq
 
-    # ── A — Ash ──────────────────────────────────────────────────────────────
-    ("Ash", "A"), ("Ash %", "A"), ("Ash Content", "A"), ("ASH  %", "A"),
-    ("Coal Ash Percentage", "A"), ("Ash as Fired", "A"),
 
-    # ── VM — Volatile Matter ───────────────────────────────────────────────
-    ("Volatile Matter", "VM"), ("Volatile Matter %", "VM"), ("VM %", "VM"),
-    ("VOLATILE MATTER  %", "VM"), ("Volatiles", "VM"),
 
-    # ── FC — Fixed Carbon ────────────────────────────────────────────────────
-    ("Fixed Carbon", "FC"), ("Fixed Carbon %", "FC"), ("FC %", "FC"),
-    ("FIXED CARBON  %", "FC"),
 
-    # ── GCV — Gross Calorific Value (as fired) ────────────────────────────
-    ("GCV", "GCV"), ("Gross Calorific Value", "GCV"), ("GCV kcal/kg", "GCV"),
-    ("G.C.V. (KCal/Kg)", "GCV"), ("Calorific Value", "GCV"), ("GCV As Received", "GCV"),
-    ("Coal GCV", "GCV"), ("G.C.V. (KCal/Kg)", "GCV"),
+def _clean(s):
+    """Collapse whitespace produced by empty axis slots."""
+    return " ".join(str(s).split())
 
-    # ── S — Sulfur ────────────────────────────────────────────────────────────
-    ("Sulfur", "S"), ("Sulphur", "S"), ("Sulfur %", "S"), ("S %", "S"),
-    ("Total Sulphur", "S"),
 
-    # ── O2in — O2 APH In ────────────────────────────────────────────────────
-    ("O2 at APH Inlet", "O2in"), ("O2 APH In", "O2in"), ("O2 at APH I/L Left", "O2in"),
-    ("O2 at APH I/L Right", "O2in"), ("O2 APH Inlet %", "O2in"), ("Oxygen APH Inlet", "O2in"),
-    ("O2 Air Preheater Inlet", "O2in"), ("O2 IN FG BEFORE APH", "O2in"), 
-    ("O2 BEFORE APH", "O2in"), ("O2 IN FG BEFORE  APH", "O2in"),
-    # "GAH" = Gas Air Heater, this is simply an alternate plant naming for
-    # the air preheater (APH) — same physical equipment, different acronym.
-    ("GAH I/L O2 Left", "O2in"), ("GAH I/L O2 Right", "O2in"), ("GAH Inlet O2", "O2in"),
-    ("GAH I/L O2", "O2in"), ("GAH I/L O2 average", "O2in"),
-    # Real DCS-tag ordering puts "GAS" between the APH side and "O2%"
-    # ("APH-A I/L GAS O2%") rather than "O2 ... APH Inlet". Without an
-    # example in this exact word order, this was losing on char n-gram
-    # overlap to the Tgi ("...GAS TEMP AH I/L...") examples below, which
-    # share "GAS"/"APH"/"I/L" with this header but are a totally different
-    # reading (temperature, not O2) — it was being detected as flue gas
-    # temperature instead of O2.
-    ("APH-A I/L GAS O2%", "O2in"), ("APH-B I/L GAS O2%", "O2in"),
-    ("APH I/L GAS O2%", "O2in"), ("APH-A INLET GAS O2", "O2in"),
-    ("APH-B INLET GAS O2", "O2in"), ("APH INLET GAS O2 PERCENT", "O2in"),
-    # "O2 AT ECO OUTLET" / "O2 AT OUTLET" (LHS/RHS split) -- real CSTPS
-    # hourly-log headers. Same reasoning as the "FG Temp After Eco" -> Tgi
-    # entries above: on this plant's gas path the economizer sits directly
-    # upstream of the APH with nothing in between, so the O2 reading at the
-    # ECO OUTLET is physically the same point as the APH-inlet O2 reading
-    # CENPEEP wants -- it's just named for where the gas is leaving (the
-    # economizer) rather than where it's arriving (the APH). "O2 AT OUTLET"
-    # (no "ECO") is the same tag with the middle word dropped, seen on a
-    # sibling unit's sheet from the same plant. Previously this drifted
-    # onto O2out instead (via "O2 at APH Outlet", sharing the word
-    # "OUTLET"), which is backwards: an ECO-outlet reading is UPSTREAM of
-    # the APH, i.e. the inlet side, not the outlet side.
-    ("O2 AT ECO OUTLET", "O2in"), ("O2 AT ECO OUTLET LHS", "O2in"),
-    ("O2 AT ECO OUTLET RHS", "O2in"), ("O2 AT OUTLET", "O2in"),
-    ("O2 AT OUTLET LHS", "O2in"), ("O2 AT OUTLET RHS", "O2in"),
-    # "AH-A/AH-B IN FG O2" -- dedicated per-side APH-inlet O2 sensor, in the
-    # "AH-A"/"AH-B ... IN FG O2" word order (mirrors the Tgi "AH A/B IN FG
-    # Temp" anchors above). Without this, the closest match was the Tgo
-    # temperature examples ("FG TEMP AH O/L" etc.), since char n-grams don't
-    # distinguish "O2" (a reading) from "IN"/"Out" (a direction) the way a
-    # person would -- this header was being detected as a temperature
-    # instead of an O2 reading.
-    ("AH A IN FG O2", "O2in"), ("AH B IN FG O2", "O2in"),
-    ("AH-A IN FG O2", "O2in"), ("AH-B IN FG O2", "O2in"),
-    ("AH A IN FG O2 average", "O2in"), ("AH B IN FG O2 average", "O2in"),
+def gen(field_id, *axes):
+    """Cartesian product of every axis (each axis is a list of strings,
+    empty string "" is a valid 'skip this slot' value), joined with
+    spaces, whitespace-normalized, de-duplicated. Returns (text, field_id)
+    tuples ready to append to TRAINING_EXAMPLES."""
+    rows = []
+    seen = set()
+    for combo in product(*axes):
+        text = _clean(" ".join(p for p in combo if p))
+        if text and text not in seen:
+            seen.add(text)
+            rows.append((text, field_id))
+    return rows
 
-    # ── CO2in — CO2 APH In ──────────────────────────────────────────────────
-    ("CO2 at APH Inlet", "CO2in"), ("CO2 APH In", "CO2in"), ("CO2 Air Preheater Inlet", "CO2in"),
 
-    # ── COin — CO APH In ──────────────────────────────────────────────────────
-    ("CO at APH Inlet", "COin"), ("CO APH In", "COin"), ("CO Air Preheater Inlet ppm", "COin"),
+def gen_join(field_id, axes, sep=""):
+    """Like gen(), but joins axis slots with `sep` instead of a space —
+    used for merged-word DCS-tag forms like 'FGTEMPAFTERECO'."""
+    rows = []
+    seen = set()
+    for combo in product(*axes):
+        text = _clean(sep.join(p for p in combo if p))
+        if text and text not in seen:
+            seen.add(text)
+            rows.append((text, field_id))
+    return rows
 
-    # ── O2out — O2 APH Out ───────────────────────────────────────────────────
-    ("O2 at APH Outlet", "O2out"), ("O2 APH Out", "O2out"), ("O2 at APH O/L Left", "O2out"),
-    ("O2 at APH O/L Right", "O2out"), ("O2 APH Outlet %", "O2out"), ("Oxygen APH Outlet", "O2out"),
-    ("O2 Air Preheater Outlet", "O2out"),
-    ("GAH O/L O2 Left", "O2out"), ("GAH O/L O2 Right", "O2out"), ("GAH Outlet O2", "O2out"),
-    ("GAH O/L O2", "O2out"),
-    # Real DCS tag phrasing seen on "dayly data" / "Hourly data" exports —
-    # aggregated column and raw per-side columns for the same reading.
-    ("O2 APH O/L", "O2out"), ("APH A OUTL GAS O2 CT", "O2out"), ("APH B OUTL GAS O2 CT", "O2out"),
-    # "AH-A/AH-B Out Gas O2" -- same dedicated per-side APH-outlet O2 sensor
-    # as above, but in the "AH-A"/"AH-B ... Out Gas O2" word order (mirrors
-    # the Tgo "AH A/B Out Gas Temp" anchors). Previously only scored ~0.57
-    # via the loosely-related "APH A OUTL GAS O2 CT" example — a genuine but
-    # weak match; a direct anchor makes this a confident match instead of a
-    # near-miss.
-    ("AH A Out Gas O2", "O2out"), ("AH B Out Gas O2", "O2out"),
-    ("AH-A Out Gas O2", "O2out"), ("AH-B Out Gas O2", "O2out"),
-    ("AH A Out Gas O2 average", "O2out"), ("AH B Out Gas O2 average", "O2out"),
 
-    # ── CO2out — CO2 APH Out ─────────────────────────────────────────────────
-    ("CO2 at APH Outlet", "CO2out"), ("CO2 APH Out", "CO2out"), ("CO2 Air Preheater Outlet", "CO2out"),
+def oos(*axes, sep=" "):
+    """Same generation as gen(), but for the OUT_OF_SCOPE bucket — returns
+    plain strings (no field id) since OOS is a single flat class."""
+    rows = []
+    seen = set()
+    for combo in product(*axes):
+        text = _clean(sep.join(p for p in combo if p))
+        if text and text not in seen:
+            seen.add(text)
+            rows.append(text)
+    return rows
 
-    # ── COout — CO APH Out ───────────────────────────────────────────────────
-    ("CO at APH Outlet", "COout"), ("CO APH Out", "COout"), ("CO", "COout"),
-    ("CO mg/Nm3", "COout"), ("CO Emission", "COout"),
 
-    # ── Tgi — FG Temp APH In ─────────────────────────────────────────────────
-    # Note: deliberately restricted to phrasing that explicitly says
-    # "APH" inlet/in. "Furnace exit" and "Economizer/ECO outlet" gas temps
-    # are real readings but are a DIFFERENT, upstream point in the gas path
-    # — they are not interchangeable with the APH-inlet reading CENPEEP
-    # expects, so they're listed under OUT_OF_SCOPE instead of mapped here.
-    ("Flue Gas Temp APH Inlet", "Tgi"), ("FG Temp APH In", "Tgi"),
-    ("Primary APH I/L FG Temp", "Tgi"),
-    ("Secondary APH I/L FG Temp", "Tgi"),
-    ("APH I/L FG Temp", "Tgi"), ("Air Preheater Inlet Gas Temp", "Tgi"),
-    ("Secondary Air Preheater Inlet Flue Gas Temp", "Tgi"),
-    ("Secondary APH Inlet FG Temp Left", "Tgi"), ("Secondary APH Inlet FG Temp Right", "Tgi"),
-    ("APH I/L FG Temp 1 Left", "Tgi"), ("APH I/L FG Temp 1 Right", "Tgi"),
-    ("APH I/L FG Temp 2 Left", "Tgi"), ("APH I/L FG Temp 2 Right", "Tgi"),
-    ("APH Inlet FG Temperature Left side", "Tgi"), ("APH Inlet FG Temperature Right side", "Tgi"),
-    ("Primary APH I/L FG Temp (L)", "Tgi"), ("Primary APH I/L FG Temp (R)", "Tgi"),
-    # Full-word "(left)"/"(Right)" parenthetical forms, mirroring the ones
-    # already present for Tgo below. Without these, a header like "Primary
-    # APH I/L FG Temp (left)" was landing on Tgo instead of Tgi: the only
-    # near-identical training example with that exact "(left)"/"(Right)"
-    # wording was the Tgo one differing by a single I/O character, so it
-    # won on char n-gram similarity over the abbreviated Tgi "(L)"/"(R)" forms.
-    ("Primary APH I/L FG Temp (left)", "Tgi"), ("Primary APH I/L FG Temp (Right)", "Tgi"),
-    ("Secondry APH I/L FG Temp (Left)", "Tgi"), ("Secondry APH I/L FG Temp (Right)", "Tgi"),
-    ("Secondry APH I/L FG Temp  (Left)", "Tgi"), ("Secondry APH I/L FG Temp  (Right)", "Tgi"),
-    ("GAH I/L Temp (left)", "Tgi"), ("GAH I/L Temp (Right)", "Tgi"), ("GAH Inlet FG Temp", "Tgi"),
-    ("GAH I/L Temp", "Tgi"), ("GAH I/L Temp average", "Tgi"),
-    # "FG temp after economiser/ECO" — on this plant's gas path the economizer
-    # is immediately upstream of the APH (nothing else in between), so this
-    # reading IS the APH-inlet flue-gas temp, just named for where the gas is
-    # coming FROM instead of where it's arriving TO. Confirmed against a real
-    # plant report that labels this exact header pair "Flue gas temperature
-    # at APH I/L". Includes the merged-word DCS-export form ("TEMPAFTERECO")
-    # seen on real sheets, with and without a space before "AFTERECO".
-    ("FG Temp After Eco", "Tgi"), ("FG Temp After Eco Left", "Tgi"),
-    ("FG Temp After Eco Right", "Tgi"), ("FG TEMPAFTERECO- L", "Tgi"),
-    ("FG TEMP AFTERECO- R", "Tgi"), ("FG TEMPAFTERECO L", "Tgi"),
-    ("FG TEMPAFTERECO R", "Tgi"), ("FG Temp After Economiser", "Tgi"),
-    ("FG Temp After Economiser Left", "Tgi"), ("FG Temp After Economiser Right", "Tgi"),
-    ("Flue Gas Temp After Economiser", "Tgi"), ("Flue Gas Temperature After Economiser", "Tgi"),
-    ("ECO Outlet FG Temp", "Tgi"), ("ECO O/L FG Temp", "Tgi"),
-    ("ECO O/L FG Temp Left", "Tgi"), ("ECO O/L FG Temp Right", "Tgi"),
-    ("Economizer Outlet Gas Temp", "Tgi"), ("Economizer Outlet Flue Gas Temperature", "Tgi"),
-    ("Economizer exit temperature", "Tgi"),
-    ("GAS ECO O/L Temp average", "Tgi"), ("GAS ECO O/L Temp (Left)", "Tgi"),
-    ("GAS ECO O/L Temp (Right)", "Tgi"),
-    # "FG GAS TEMP AH I/L" -- real DCS-tag form using bare "AH" (Air Heater)
-    # instead of "APH"/"GAH", plus the redundant "FG GAS" wording seen on
-    # real hourly exports. Without an explicit anchor here, this drifted
-    # onto Tsai (Secondary Air Temp In) instead: the existing Tsai examples
-    # "AH A SA I/L TEMP" etc. share the same "AH I/L TEMP" tail, and with
-    # no Tgi example using bare "AH", those won on char n-gram overlap --
-    # even though this is a FLUE GAS reading, not an air reading. Keep the
-    # "FG"/"GAS" word present so it doesn't start competing with the real
-    # (air-side) "AH I/L TEMP" columns.
-    ("FG GAS TEMP AH I/L", "Tgi"), ("FG GAS TEMP AH I/L (L)", "Tgi"),
-    ("FG GAS TEMP AH I/L (R)", "Tgi"), ("FG GAS TEMP AH I/L Left", "Tgi"),
-    ("FG GAS TEMP AH I/L Right", "Tgi"), ("FG TEMP AH I/L", "Tgi"),
-    ("FG TEMP AH INLET", "Tgi"), ("FG GAS TEMP AH Inlet", "Tgi"),
-    # A dedicated "APH-<side> I/L GAS TEMP" sensor tag (side spelled out as
-    # A/B rather than Left/Right, "GAS TEMP" instead of "FG Temp") is a
-    # DIRECT APH-inlet reading — the most on-the-nose Tgi wording there is,
-    # and should win over the (intentionally looser) economiser-outlet
-    # proxy examples above whenever a real plant has both. Previously the
-    # closest match here was the generic "FG GAS TEMP AH I/L" example,
-    # scoring lower than "ECO O/L FG Temp" on a real plant sheet that had
-    # both an economiser-outlet AND a dedicated APH-inlet column — so the
-    # proxy reading was selected over the direct one.
-    ("APH-A I/L GAS TEMP", "Tgi"), ("APH-B I/L GAS TEMP", "Tgi"),
-    ("APH I/L GAS TEMP", "Tgi"), ("APH-A INLET GAS TEMP", "Tgi"),
-    ("APH-B INLET GAS TEMP", "Tgi"), ("APH INLET GAS TEMPERATURE", "Tgi"),
-    # "AH-A/AH-B IN FG Temp" -- same dedicated per-side APH-inlet sensor as
-    # the "APH-A/B I/L GAS TEMP" examples just above, but using the DCS
-    # tag's own word order ("IN" before "FG Temp", not "I/L GAS TEMP") and
-    # the "AH-A"/"AH-B" side-letter form already used for this plant's PA/SA
-    # temp tags (see "AH A PA I/L TEMP" etc. below). Without this exact
-    # word-order anchor, "AH-A IN FG Temp" scored closer to the (unrelated)
-    # "FG TEMP AH O/L" Tgo example than to any Tgi one, since char n-grams
-    # don't care about IN-vs-OUT meaning, only shared substrings -- and
-    # every existing Tgi anchor used "I/L"/"BEFORE"/"After Eco" phrasing
-    # instead of bare "IN FG Temp".
-    ("AH A IN FG Temp", "Tgi"), ("AH B IN FG Temp", "Tgi"),
-    ("AH-A IN FG Temp", "Tgi"), ("AH-B IN FG Temp", "Tgi"),
-    ("AH A IN FG Temp average", "Tgi"), ("AH B IN FG Temp average", "Tgi"),
-    # Bare "FLUE GAS TEMP BEFORE APH" (LHS/RHS split, real CSTPS hourly-log
-    # header) -- plain-English "before APH" wording with no APH-I/L/AH-tag
-    # abbreviation at all. Without a direct anchor, this drifted hard onto
-    # O2in via the "O2 BEFORE APH" example (cosine ~0.65): both share the
-    # long literal substring " BEFORE APH", and since the model scores
-    # char n-grams only, that shared tail dominated over the fact that
-    # "FLUE GAS TEMP" vs "O2" are completely different physical quantities.
-    # Anchoring the exact real phrasing here (rather than relying on the
-    # existing "APH I/L"-style examples) is what actually wins the match.
-    ("FLUE GAS TEMP BEFORE APH", "Tgi"), ("FLUE GAS TEMP BEFORE APH LHS", "Tgi"),
-    ("FLUE GAS TEMP BEFORE APH RHS", "Tgi"), ("FLUE GAS TEMP BEFORE APH LEFT", "Tgi"),
-    ("FLUE GAS TEMP BEFORE APH RIGHT", "Tgi"),
+# ═══════════════════════════════════════════════════════════════════════
+# Shared vocabulary axes
+# ═══════════════════════════════════════════════════════════════════════
 
-    # ── Tgo — FG Temp APH Out ────────────────────────────────────────────────
-    ("Flue Gas Temp APH Outlet", "Tgo"), ("FG Temp APH Out", "Tgo"),
-    ("APH O/L FG Temp", "Tgo"), ("Primary APH O/L FG Temp", "Tgo"),
-    ("Secondary APH O/L FG Temp", "Tgo"), ("Air Preheater Outlet Gas Temperature", "Tgo"),
-    ("Secondary Air Preheater Outlet Flue Gas Temp", "Tgo"),
-    ("Secondary APH Outlet FG Temp Left", "Tgo"), ("Secondary APH Outlet FG Temp Right", "Tgo"),
-    ("APH Outlet Flue Gas Temperature Left", "Tgo"), ("APH Outlet Flue Gas Temperature Right", "Tgo"),
-    ("APH O/L FG Temp 1 Left", "Tgo"), ("APH O/L FG Temp 1 Right", "Tgo"),
-    ("APH O/L FG Temp 2 Left", "Tgo"), ("APH O/L FG Temp 2 Right", "Tgo"),
-    ("APH O/L FG Temp 3 Left", "Tgo"), ("APH O/L FG Temp 3 Right", "Tgo"),
-    ("APH Outlet FG Temperature Left side", "Tgo"), ("APH Outlet FG Temperature Right side", "Tgo"),
-    ("Primary APH O/L FG Temp (left)", "Tgo"), ("Primary APH O/L FG Temp (Right)", "Tgo"),
-    ("Secondry APH O/L FG Temp  (Left)", "Tgo"), ("Secondry APH O/L FG Temp  (Right)", "Tgo"),
-    # "GAH" = Gas Air Heater (this plant's alternate name for APH). Multiple
-    # numbered probes per side (1/2/3) are all the same physical outlet
-    # reading — averaged in the same way the Left/Right pairs already are.
-    ("GAH O/L Temp 1 (Left)", "Tgo"), ("GAH O/L Temp 2 (Left)", "Tgo"), ("GAH O/L Temp 3 (Left)", "Tgo"),
-    ("GAH O/L Temp 1 (Right)", "Tgo"), ("GAH O/L Temp 2 (Right)", "Tgo"), ("GAH O/L Temp 3 (Right)", "Tgo"),
-    ("GAH O/L Temp average", "Tgo"), ("GAH Outlet FG Temp", "Tgo"), ("GAH O/L Temp", "Tgo"),
-    # "FG temp after APH" — the merged-word DCS-export counterpart to the
-    # "FG temp after ECO" Tgi examples above. Needed as an explicit anchor:
-    # "AFTERECO" and "AFTERAPH" differ by only a few characters, so without
-    # a close Tgo match of its own, this header drifts onto Tgi purely on
-    # char n-gram overlap with the "after ECO" wording.
-    ("FG Temp After APH", "Tgo"), ("FG Temp After APH Left", "Tgo"),
-    ("FG Temp After APH Right", "Tgo"), ("FG TEMP AFTERAPH - L", "Tgo"),
-    ("FG TEMP AFTERAPH - R", "Tgo"), ("FG TEMPAFTERAPH- L", "Tgo"),
-    ("FG TEMPAFTERAPH- R", "Tgo"),
-    # "FG GAS TEMP AH O/L" -- bare-"AH" DCS-tag counterpart to the Tgi "AH
-    # I/L" fix above, for the outlet side. Was drifting onto Tsao
-    # (Secondary Air Temp Out) via the near-identical "AH O/L TEMP" tail
-    # shared with Tsao's "AH A SA O/L TEMP" examples -- same root cause,
-    # mirrored for the hot/outlet side.
-    ("FG GAS TEMP AH O/L", "Tgo"), ("FG GAS TEMP AH O/L (L)", "Tgo"),
-    ("FG GAS TEMP AH O/L (R)", "Tgo"), ("FG GAS TEMP AH O/L Left", "Tgo"),
-    ("FG GAS TEMP AH O/L Right", "Tgo"), ("FG TEMP AH O/L", "Tgo"),
-    # "AH-A/AH-B Out Gas Temp" -- same dedicated per-side APH-outlet sensor
-    # as "FG GAS TEMP AH O/L" just above, but in the "AH-A"/"AH-B ... Out
-    # Gas Temp" word order (measurement word last), mirroring the "AH A/B
-    # IN FG Temp" Tgi anchors added above.
-    ("AH A Out Gas Temp", "Tgo"), ("AH B Out Gas Temp", "Tgo"),
-    ("AH-A Out Gas Temp", "Tgo"), ("AH-B Out Gas Temp", "Tgo"),
-    ("AH A Out Gas Temp average", "Tgo"), ("AH B Out Gas Temp average", "Tgo"),
-    ("FG TEMP AH O/L (R)", "Tgo"), ("FG TEMP AH O/L (L)", "Tgo"),
-    ("FG TEMP AH OUTLET", "Tgo"), ("FG GAS TEMP AH Outlet", "Tgo"),
-    # Bare "FLUE GAS TEMP AFTER APH" (LHS/RHS split) -- same real CSTPS
-    # header pattern as the Tgi "BEFORE APH" fix above, mirrored for the
-    # outlet/hot side. Was previously landing on Tgi itself (via "Flue Gas
-    # Temp APH Inlet") or on Tpao (via "FG Temp After APH", which shares
-    # "TEMP AFTER APH" with this but is a Primary-Air example) -- direct
-    # anchor removes the ambiguity.
-    ("FLUE GAS TEMP AFTER APH", "Tgo"), ("FLUE GAS TEMP AFTER APH LHS", "Tgo"),
-    ("FLUE GAS TEMP AFTER APH RHS", "Tgo"), ("FLUE GAS TEMP AFTER APH LEFT", "Tgo"),
-    ("FLUE GAS TEMP AFTER APH RIGHT", "Tgo"),
-    # "ITS ... FG Temp" -- real header shape from a 5-min DCS export, where
-    # "ITS" names a duct/probe location (not a steam-path abbreviation)
-    # and "FG Temp" makes explicit this is a flue-GAS reading, not a
-    # steam-side one. Added as explicit anchors because the OUT_OF_SCOPE
-    # "ITS IN/Out Steam Temp -A/-B" entries above (a real but different
-    # column family on the same sheet) share enough of the "ITS ... Temp"
-    # substring to otherwise pull this genuine Tgi/Tgo reading down below
-    # the confidence threshold on pure char n-gram overlap.
-    ("ITS IN FG Temp", "Tgi"), ("ITS Out FG Temp", "Tgo"),
+BLANK = [""]
 
-    # ── Boiler outlet main steam temp has no dedicated CENPEEP symbol in
-    #    this field set — it stays unmatched by design (see OUT_OF_SCOPE
-    #    examples below, which actively teach the model to reject it
-    #    rather than guess Ffw/Tgo just because words overlap).
+# -- equipment / stream / direction (APH gas & air path) -----------------
+APH = ["APH", "Air Preheater", "Air Pre Heater", "A/H", "AH", "GAH"]
+# NEW: "APH-A"/"APH-B" as a single fused token — real sheets frequently
+# write the side glued onto APH ("FG TEMP APH-A I/L") rather than as a
+# separate word, which is a different bigram than "APH" + "A".
+APH_SIDED = ["APH-A", "APH-B", "APH A", "APH B", "APH-A ", "APH-B "]
+FLUE_GAS = ["Flue Gas", "Flue G", "FG Gas", "FG G", "F Gas", "F G", "FG", "Gas"]
+PA_STREAM = ["PA", "Primary Air", "Prim Air", "Primary", "Pri Air", "Pri"]
+SA_STREAM = ["SA", "Secondary Air", "Sec Air", "Secondry Air", "Secondary"]
 
-    # ── Tpai — PA Temp In (APH inlet / fan-outlet side, COLD) ───────────────
-    ("Primary Air Temp In", "Tpai"), ("PA Temp In", "Tpai"),
-    ("Primary Air APH Temp I/L A", "Tpai"), ("Primary Air APH Temp I/L B", "Tpai"),
-    ("Coal Mill PA Temp", "Tpai"),
-    ("Primary Air Inlet Temperature", "Tpai"), ("Coal Mill Outlet Temp PA In", "Tpai"),
-    # NOTE: in some plant DCS naming, "PAF O/L PA Temp" (Primary Air Fan
-    # outlet) is the COLD/pre-APH reading — confirmed against real plant
-    # data where this column reads ~30-40°C vs ~380°C for the windbox side.
-    ("PAF-A O/L PA Temp", "Tpai"), ("PAF O/L PA Temp", "Tpai"),
-    ("Primary Air Fan Outlet Temperature", "Tpai"), ("AH A PA I/L TEMP", "Tpai"),
-    ("AH B PA I/L TEMP", "Tpai"), ("AH A PA I/L Temp", "Tpai"), ("AH B PA I/L Temp", "Tpai"),
-    # A bare "Primary Air Temp" column (no explicit in/out qualifier) paired
-    # with separate "APH A/B O/L PA Air Temp" columns for the hot side means
-    # the bare column is the cold, pre-APH reading — confirmed against real
-    # plant data (~30-40°C vs ~350-500°C for the APH-outlet columns).
-    ("Primary Air Temp", "Tpai"), ("GAH I/L Prim Air Temp", "Tpai"),
-    # "APH. <side> INLET PA. TMP" — this plant's own DCS-tag wording
-    # ("PA." abbreviated with a trailing period, "TMP" instead of "Temp").
-    # Without a direct match here, this drifted onto O2in: the abbreviated
-    # "INLET"/"APH" overlap with "O2 APH Inlet %" scored higher than any
-    # existing Tpai example, even though this is a TEMPERATURE reading.
-    ("APH. A INLET PA. TMP", "Tpai"), ("APH. B INLET PA. TMP", "Tpai"),
-    ("APH A INLET PA TMP", "Tpai"), ("APH B INLET PA TMP", "Tpai"),
-    ("APH INLET PA TMP", "Tpai"),
-    # Bare "PA TEMP BEFORE APH" (no L/R split -- a single shared cold-side
-    # PA temp reading, as seen on real CSTPS hourly-log sheets). This was
-    # previously the single worst mismatch found in practice: it matched
-    # O2in via "O2 BEFORE APH" at cosine ~0.89 (higher than almost any
-    # correct match anywhere else in the model), purely because "TEMP
-    # BEFORE APH" and "BEFORE APH" share such a long character run that it
-    # swamped the completely different leading quantity words ("PA" vs
-    # "O2"). A temperature column was silently feeding a flue-gas-O2 input.
-    ("PA TEMP BEFORE APH", "Tpai"),
+DIR_IN = ["Inlet", "In", "I/L", "IN"]
+DIR_OUT = ["Outlet", "Out", "O/L", "OUT"]
+BEFORE = ["Before", "BEFORE"]
+AFTER = ["After", "AFTER"]
 
-    # ── Tpao — PA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
-    ("Primary Air Temp Out", "Tpao"), ("PA Temp Out", "Tpao"),
-    ("Primary Air APH Temp O/L A", "Tpao"), ("Primary Air APH Temp O/L B", "Tpao"),
-    ("Primary Air Outlet Temperature", "Tpao"),
-    # NOTE: "Boiler side PA Temp" is the HOT/post-APH reading in real plant
-    # data (~380°C, entering the mills/furnace) — confirmed against sample data.
-    ("Boiler side A PA Temp", "Tpao"), ("Boiler side B PA Temp", "Tpao"),
-    ("Boiler side PA Temperature", "Tpao"), ("AH A PA O/L TEMP", "Tpao"),
-    ("AH B PA O/L TEMP", "Tpao"), ("AH A PA O/L Temp", "Tpao"),
-    ("AH B PA O/L Temp", "Tpao"),
-    ("APH A O/L PA AIR TEMP", "Tpao"), ("APH B O/L PA AIR TEMP", "Tpao"),
-    # This plant calls the hot, post-APH primary air reading "<side> SIDE
-    # HOT PA. TMP." — no explicit "APH"/"O/L" wording at all, just "HOT PA
-    # TMP", which previously had no anchor and fell through to Tgi (flue
-    # gas temp) at just-above-threshold confidence purely via generic
-    # "side"/"temp" overlap.
-    ("LEFT SIDE HOT PA. TMP.", "Tpao"), ("RIGHT SIDE HOT PA. TMP.", "Tpao"),
-    ("LEFT SIDE HOT PA TMP", "Tpao"), ("RIGHT SIDE HOT PA TMP", "Tpao"),
-    ("HOT PA TMP", "Tpao"), ("HOT PRIMARY AIR TEMP", "Tpao"),
-    # Bare "PA TEMP AFTER APH" (LHS/RHS split) -- real CSTPS header,
-    # mirrors the "PA TEMP BEFORE APH" -> Tpai fix above for the hot/
-    # outlet side. Was previously landing on Tgo via "FG Temp After APH"
-    # (shared "TEMP AFTER APH" tail) -- a Primary Air temperature reading
-    # was being used as the flue-gas-outlet temperature.
-    ("PA TEMP AFTER APH", "Tpao"), ("PA TEMP AFTER APH LHS", "Tpao"),
-    ("PA TEMP AFTER APH RHS", "Tpao"), ("PA TEMP AFTER APH LEFT", "Tpao"),
-    ("PA TEMP AFTER APH RIGHT", "Tpao"),
+SIDE = ["", "Left", "Right", "A", "B", "LHS", "RHS", "(Left)", "(Right)",
+        "1", "2", "average"]
+SIDE_DASH = ["", "-A", "-B", " A", " B"]
 
-    # ── Tsai — SA Temp In (APH inlet / fan-outlet side, COLD) ────────────────
-    ("Secondary Air Temp In", "Tsai"), ("SA Temp In", "Tsai"),
-    ("Secondary Air APH Temp I/L A", "Tsai"), ("Secondary Air APH Temp I/L B", "Tsai"),
-    ("Secondary Air Inlet Temperature", "Tsai"),
-    # NOTE: "FDF O/L SA Temp" (Forced Draft Fan outlet) is the COLD/pre-APH
-    # reading in real plant data (~30°C) — confirmed against sample data.
-    ("FDF-A O/L SA Temp", "Tsai"), ("FDF O/L SA Temp", "Tsai"),
-    ("Forced Draft Fan Outlet Temperature", "Tsai"), ("AH A SA I/L TEMP", "Tsai"),
-    ("AH B SA I/L TEMP", "Tsai"), ("AH A SA I/L Temp", "Tsai"), ("AH B SA I/L Temp", "Tsai"),
-    # Same logic as the bare "Primary Air Temp" case above.
-    ("Secondary Air Temp", "Tsai"), ("GAH I/L Sec Air Temp", "Tsai"),
-    # "Secondry" (misspelling of "Secondary") plant-tag variant. Without this,
-    # a header like "Secondry Air APH Temp I/L A" lost to the Tgi training
-    # example "Secondry APH I/L FG Temp (Left)" — both share the same
-    # "Secondry" typo, so char n-grams favored that over the correctly
-    # spelled "Secondary Air APH Temp I/L A" Tsai example — even though this
-    # column is an air temperature, not a flue-gas temperature.
-    ("Secondry Air APH Temp I/L A", "Tsai"), ("Secondry Air APH Temp I/L B", "Tsai"),
-    # Bare "AIR TEMP AH I/L" (no PA/SA qualifier, bare "AH" abbreviation) --
-    # real plant tag naming with the qualifier dropped. Explicit anchor so
-    # this doesn't get pulled toward the new Tgi "FG TEMP AH I/L" examples
-    # above (which share the same "TEMP AH I/L" tail, differing only in
-    # "AIR" vs "FG"/"GAS") -- this is still an AIR reading, not flue gas.
-    ("AIR TEMP AH I/L", "Tsai"), ("AIR TEMP AH I/L (L)", "Tsai"), ("AIR TEMP AH I/L (R)", "Tsai"),
-    # This plant's own DCS-tag wording: "APH. <side> INLET SEC AIR TMP. <n>"
-    # (numbered probes 1/3 at the same reading point). Without a direct
-    # match, this form was drifting onto O2in (shared abbreviated
-    # "APH ... INLET" wording).
-    ("APH. A INLET SEC AIR TMP.", "Tsai"), ("APH. B INLET SEC AIR TMP.", "Tsai"),
-    ("APH A INLET SEC AIR TMP", "Tsai"), ("APH B INLET SEC AIR TMP", "Tsai"),
-    ("APH INLET SEC AIR TMP", "Tsai"),
-    ("SEC AIR BOX INLET TEMP", "Tsai"), ("SECONDARY AIR BOX INLET TEMP", "Tsai"),
-    # Bare "SA TEMP BEFORE APH" -- same real CSTPS header pattern as "PA
-    # TEMP BEFORE APH" above, for Secondary Air. Same failure mode: was
-    # matching O2in via "O2 BEFORE APH" at cosine ~0.88.
-    ("SA TEMP BEFORE APH", "Tsai"),
+# -- measurement words -----------------------------------------------------
+TEMP_WORD = ["Temp", "Temperature", "TMP", "Temp."]
+O2_WORD = ["O2", "Oxygen"]
+CO2_WORD = ["CO2", "Carbon Dioxide"]
+CO_WORD = ["CO", "Carbon Monoxide"]
 
-    # ── Tsao — SA Temp Out (APH outlet / boiler windbox side, HOT) ──────────
-    ("Secondary Air Temp Out", "Tsao"), ("SA Temp Out", "Tsao"),
-    ("Secondary Air APH Temp O/L A", "Tsao"), ("Secondary Air APH Temp O/L B", "Tsao"),
-    ("Secondary Air Outlet Temperature", "Tsao"),
-    # NOTE: "Boiler side SA Temp" is the HOT/post-APH reading in real plant
-    # data (~370°C, entering the windbox) — confirmed against sample data.
-    ("Boiler side A SA Temp", "Tsao"), ("Boiler side B SA Temp", "Tsao"),
-    ("Boiler side SA Temperature", "Tsao"), ("AH A SA O/L TEMP", "Tsao"),
-    ("AH B SA O/L TEMP", "Tsao"), ("AH A SA O/L Temp", "Tsao"),
-    ("AH B SA O/L Temp", "Tsao"),
-    ("APH A O/L SA AIR TEMP", "Tsao"), ("APH B O/L SA AIR TEMP", "Tsao"),
-    # "Secondry" typo variant -- same reasoning as the Tsai fix above, for
-    # the outlet/hot side.
-    ("Secondry Air APH Temp O/L A", "Tsao"), ("Secondry Air APH Temp O/L B", "Tsao"),
-    # Real plant tag naming this from the FURNACE's point of view instead
-    # of the APH's — "secondary air arriving at the furnace inlet" is the
-    # same physical hot/post-APH reading, just named for where it lands
-    # rather than where it left.
-    ("FURNACE L_SIDE INL SA T", "Tsao"), ("FURNACE R_SIDE INL SA T", "Tsao"),
-    ("Furnace L Side Inlet SA Temp", "Tsao"), ("Furnace R Side Inlet SA Temp", "Tsao"),
-    # This plant's own DCS-tag wording for the same "air arriving at the
-    # furnace/boiler after the APH" reading as the FURNACE examples just
-    # above: "BLR <side> SEC AR BX ILT 2 AR TEMP <n>" ("boiler <side>
-    # secondary air box inlet, level 2, air temp" -- numbered probes 1/2 at
-    # the same reading point). This was previously mislabeled as Tsai
-    # (cold/pre-APH side) purely because it shares "SEC AIR"/"INLET"
-    # wording with the Tsai APH-inlet tags -- but "SEC AR BX ILT" is the
-    # boiler's windbox inlet, i.e. hot secondary air that has ALREADY
-    # passed through the APH on its way to the furnace, same as
-    # "FURNACE L_SIDE INL SA T" above. Confirmed against real plant data.
-    ("BLR LS SEC AR BX ILT 2 AR TEMP", "Tsao"), ("BLR RS SEC AR BX ILT 2 AR TEMP", "Tsao"),
-    # "APH O/L SEC AIR TEMPERATURE" -- explicit "O/L" (outlet) direction
-    # with the fuller "SEC AIR"/"TEMPERATURE" spelling. Was previously
-    # drifting onto Tsai (the INLET/cold-side field) purely because "SEC
-    # AIR TEMPERATURE" as a phrase is more common among Tsai's training
-    # examples than Tsao's -- the "O/L" direction marker was losing that
-    # tug-of-war. Anchoring it here fixes the direction.
-    ("APH O/L SEC AIR TEMPERATURE", "Tsao"), ("APH O/L SEC AIR TEMPERATURE RHS", "Tsao"),
-    ("APH O/L SEC AIR TEMPERATURE LHS", "Tsao"),
-    # Bare "SA TEMP AFTER APH" (LHS/RHS split) -- real CSTPS header,
-    # mirrors the "PA TEMP AFTER APH" -> Tpao fix above for Secondary Air.
-    # Was previously landing on Tgo via "FG Temp After APH".
-    ("SA TEMP AFTER APH", "Tsao"), ("SA TEMP AFTER APH LHS", "Tsao"),
-    ("SA TEMP AFTER APH RHS", "Tsao"), ("SA TEMP AFTER APH LEFT", "Tsao"),
-    ("SA TEMP AFTER APH RIGHT", "Tsao"),
+PCT_SUFFIX = ["", "%", " %", " (%)"]
+PPM_SUFFIX = ["", "ppm", " ppm", "mg/Nm3"]
 
-    # ── Fsa — SA Flow ──────────────────────────────────────────────────────────
-    ("Secondary Air Flow", "Fsa"), ("SA Flow", "Fsa"), ("SA air flow", "Fsa"),
-    ("Boiler side A SA flow", "Fsa"), ("Boiler side B SA flow", "Fsa"),
-    ("Total Secondary Air Flow", "Fsa"), ("SA FLOW TO FURNACE - L", "Fsa"),
-    ("SA FLOW TO FURNACE - R", "Fsa"), ("SA FLOW TO FURNACE", "Fsa"),
-    # "SEC" abbreviation for "Secondary" -- real hourly-export header form.
-    # Without an explicit example, "TOTAL SEC AIR FLOW" was scoring higher
-    # char n-gram similarity against the OUT_OF_SCOPE "Total Air Flow"/
-    # "TOTAL AIR FLOW" examples above (shares "TOTAL ... AIR FLOW") than
-    # against any real Fsa example, since none of the existing Fsa examples
-    # use the "SEC" abbreviation or the "TOTAL ... FLOW" word order together
-    # -- so it was landing as unmapped/out-of-scope instead of Fsa.
-    ("TOTAL SEC AIR FLOW", "Fsa"), ("SEC AIR FLOW", "Fsa"), ("TOT SEC AIR FLOW", "Fsa"),
-    # "SA ... FLOW COMP" (compensated flow reading) -- real DCS-tag form.
-    # Explicit anchor needed: after adding the new Ffw "MAIN STM FLOW COMP"
-    # examples (for the "STM"-abbreviation fix), this started drifting onto
-    # Ffw purely via the shared "FLOW COMP" tail -- even though it's a
-    # Secondary Air flow reading, not steam/feedwater flow.
-    ("SA (L) FLOW COMP", "Fsa"), ("SA (R) FLOW COMP", "Fsa"), ("SA FLOW COMP", "Fsa"),
+ECONOMISER = ["Economiser", "Economizer", "ECO", "Eco", "Economizer Outlet",
+              "Economiser Outlet"]
 
-    # ── Fpa — PA Flow ──────────────────────────────────────────────────────────
-    ("Primary Air Flow", "Fpa"), ("PA Flow", "Fpa"), ("PA air flow", "Fpa"),
-    ("Coal Mill A PA Flow", "Fpa"), ("Coal Mill PA Flow", "Fpa"),
-    ("Total Primary Air Flow", "Fpa"), ("TOTAL PA FLOW", "Fpa"),
-    ("Total PA Flow", "Fpa"),
-    # Same "... FLOW COMP" fix as SA above, for Primary Air.
-    ("PA-A FLOW COMP", "Fpa"), ("PA-B FLOW COMP", "Fpa"), ("PA FLOW COMP", "Fpa"),
 
-    # ── Tref — Ambient / Reference Temp ─────────────────────────────────────
-    ("Ambient Temperature", "Tref"), ("Reference Temperature", "Tref"),
-    ("Ambient Temp", "Tref"), ("Atmospheric Temp", "Tref"),
+# ═══════════════════════════════════════════════════════════════════════
+# TRAINING_EXAMPLES — built entirely from gen() calls
+# ═══════════════════════════════════════════════════════════════════════
+TRAINING_EXAMPLES = []
 
-    # ── Design proximate: Md, Ad, VMd, FCd ──────────────────────────────────
-    ("Design Moisture", "Md"), ("Moisture Design", "Md"), ("Design Coal Moisture", "Md"),
-    ("Design Ash", "Ad"), ("Ash Design", "Ad"), ("Design Coal Ash", "Ad"),
-    ("Design Volatile Matter", "VMd"), ("VM Design", "VMd"),
-    ("Design Fixed Carbon", "FCd"), ("FC Design", "FCd"),
 
-    # ── Design ultimate: Cd, Sd, Hd, Md2, Nd, Od, Ad2, GCVd, Trad, Mwvd ────
-    ("Design Carbon", "Cd"), ("Carbon Design", "Cd"), ("Design Carbon Ultimate", "Cd"),
-    ("Design Sulfur", "Sd"), ("Sulfur Design", "Sd"), ("Design Sulphur Ultimate", "Sd"),
-    ("Design Hydrogen", "Hd"), ("Hydrogen Design", "Hd"), ("Design Hydrogen Ultimate", "Hd"),
-    ("Design Moisture Ultimate", "Md2"), ("Moisture Design Ultimate", "Md2"),
-    ("Design Nitrogen", "Nd"), ("Nitrogen Design", "Nd"),
-    ("Design Oxygen", "Od"), ("Oxygen Design", "Od"),
-    ("Design Ash Ultimate", "Ad2"), ("Ash Design Ultimate", "Ad2"),
-    ("Design GCV", "GCVd"), ("GCV Design", "GCVd"), ("Design Calorific Value", "GCVd"),
-    ("Design Reference Air Temp", "Trad"), ("Ref Air Temp Design", "Trad"),
-    ("Design Moisture in Air", "Mwvd"), ("Moisture in Air Design", "Mwvd"),
+def add(rows):
+    TRAINING_EXAMPLES.extend(rows)
 
-    # ══ BEE (BEE-2 Indirect / heat-loss method) — public/tab3.html +
-    #    script3.js. M/A/GCV/Cba/Cfa are the SAME quantities CENPEEP
-    #    already trains above (coal moisture/ash/GCV, unburnt carbon in
-    #    bottom/fly ash) so they aren't repeated here — only the field ids
-    #    that don't already exist get their own examples. ══════════════
 
-    # ── O2fg — O2 in Flue Gas ───────────────────────────────────────────────
-    ("O2 in Flue Gas", "O2fg"), ("Oxygen in Flue Gas", "O2fg"),
-    ("O2 in Flue Gas %", "O2fg"), ("Flue Gas O2", "O2fg"), ("Flue Gas O2 %", "O2fg"),
-    ("O2 %", "O2fg"), ("O2 Percentage", "O2fg"), ("Excess O2", "O2fg"),
-    ("O2 in Flue Gas (%)", "O2fg"),
+# ── L — Unit Load ─────────────────────────────────────────────────────
+L_PREFIX = ["", "Unit ", "Gross ", "Net ", "Total ", "Total Unit "]
+L_CORE = ["Load", "Generation", "Generator", "Gen", "GEN", "Power Generation"]
+L_SUFFIX = ["", "MW", " MW", " (MW)", " Output", " Output MW"]
+add(gen("L", L_PREFIX, L_CORE, L_SUFFIX))
 
-    # ── COfg — CO in Flue Gas ───────────────────────────────────────────────
-    ("CO in Flue Gas", "COfg"), ("Carbon Monoxide in Flue Gas", "COfg"),
-    ("Flue Gas CO", "COfg"), ("Flue Gas CO ppm", "COfg"), ("CO ppm", "COfg"),
-    ("CO in Flue Gas (ppm)", "COfg"), ("CO Content", "COfg"),
+# ── Ffw — Steam Flow / Feedwater Flow ────────────────────────────────
+FFW_PREFIX = ["", "Main ", "Total ", "Boiler "]
+FFW_CORE = ["Steam Flow", "Feed water Flow", "Feedwater Flow", "FW Flow",
+            "MS Flow", "STM Flow", "STM FLW", "M S FLOW"]
+FFW_SUFFIX = ["", " TPH", " COMP"]
+add(gen("Ffw", FFW_PREFIX, FFW_CORE, FFW_SUFFIX))
 
-    # ── CO2fg — CO2 in Flue Gas ─────────────────────────────────────────────
-    ("CO2 in Flue Gas", "CO2fg"), ("Carbon Dioxide in Flue Gas", "CO2fg"),
-    ("Flue Gas CO2", "CO2fg"), ("Flue Gas CO2 %", "CO2fg"), ("CO2 %", "CO2fg"),
-    ("CO2 in Flue Gas (%)", "CO2fg"), ("CO2 Content", "CO2fg"),
+# ── Fin — Total Coal Flow (+ per-feeder / per-mill readings) ────────────
+FIN_PREFIX = ["", "Total "]
+FIN_CORE = ["Coal Flow", "Coal Consumption", "Fuel Flow", "Coal Rate",
+            "Coal Feed Rate", "Coal Firing Rate"]
+add(gen("Fin", FIN_PREFIX, FIN_CORE, [""]))
+FEEDER_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"]
+add(gen("Fin", ["Feeder"], FEEDER_LETTERS, ["Coal flow rate", "coal flow"]))
+add(gen("Fin", ["Mill"], FEEDER_LETTERS, ["Coal Flow"]))
 
-    # ── Tfg — Average Flue Gas Temperature ──────────────────────────────────
-    ("Average Flue Gas Temperature", "Tfg"), ("Avg Flue Gas Temperature", "Tfg"),
-    ("Flue Gas Temperature", "Tfg"), ("Flue Gas Temp", "Tfg"), ("FG Outlet Temp", "Tfg"),
-    ("Exit Flue Gas Temperature", "Tfg"), ("Boiler Exit Gas Temperature", "Tfg"),
-    ("Avg. Flue Gas Temperature", "Tfg"),
+# ── Cba / Cfa — Unburnt Carbon in Bottom / Fly Ash ─────────────────────
+UBC_STREAM = {"Cba": "Bottom Ash", "Cfa": "Fly Ash"}
+for fid, stream in UBC_STREAM.items():
+    add(gen(fid, ["Unburnt Carbon", "Unburnt", "Unburnts in", "UBC"], [stream], [""]))
+    add(gen(fid, [stream], ["Unburnt Carbon", "UBC"], [""]))
+    add(gen(fid, [stream], PCT_SUFFIX))
+    add(gen(fid, ["LOI"], [stream], [""]))
+    # NEW: "Unburnt in <stream>" (GIST sheet: "UNBURNT IN FLY ASH" /
+    # "UNBURNT IN BOTTOM ASH") — previous phrasing was "Unburnts in
+    # <stream>" with a trailing s, this exact singular form was missing.
+    add(gen(fid, ["Unburnt in", "Unburnt C in"], [stream], [""]))
 
-    # ── Tamb — Ambient Temperature (BEE's own field; distinct from
-    #    CENPEEP's manual/design-only Tref above, so no shared example text
-    #    is used here — see LABEL_ALIASES for the exact-phrase rule match) ──
-    ("Atmospheric Temperature", "Tamb"), ("Ambient Temp", "Tamb"),
-    ("Site Ambient Temperature", "Tamb"), ("Amb Temp", "Tamb"),
-    ("Air Temperature", "Tamb"), ("Outside Air Temperature", "Tamb"),
+# ── Pfa / Pba — % Fly Ash / % Bottom Ash (of TOTAL ash) ─────────────────
+POT_STREAM = {"Pfa": "Fly Ash", "Pba": "Bottom Ash"}
+for fid, stream in POT_STREAM.items():
+    add(gen(fid, ["%", "Percent"], [stream], [""]))
+    add(gen(fid, [stream], ["Percentage", "Fraction", "Ratio"]))
+    add(gen(fid, ["%", ""], ["of"], [stream], ["in Total Ash"]))
+    add(gen(fid, [stream], ["in Total Ash", "% of Total Ash"]))
 
-    # ── Hum — Humidity in Ambient Air ───────────────────────────────────────
-    ("Humidity in Ambient Air", "Hum"), ("Humidity", "Hum"),
-    ("Relative Humidity", "Hum"), ("Ambient Humidity", "Hum"),
-    ("Humidity kg per kg dry air", "Hum"), ("Moisture in Air", "Hum"),
-    ("Specific Humidity", "Hum"),
+# ── M — Moisture (Total Moisture, as fired) ─────────────────────────────
+add(gen("M", ["", "Total ", "Coal "], ["Moisture"], PCT_SUFFIX))
+add(gen("M", ["TM", "T.M.", "M"], PCT_SUFFIX))
+add(gen("M", ["Moisture As Received", "% Moist (TM)", "% Moist ( TM)",
+              "Percent Moisture TM"], [""]))
 
-    # ── C — Carbon (ultimate analysis, as-fired) ────────────────────────────
-    ("Carbon", "C"), ("Carbon %", "C"), ("Carbon Content", "C"),
-    ("Ultimate Carbon", "C"), ("Fixed Carbon Ultimate", "C"), ("C %", "C"),
+# ── A — Ash ───────────────────────────────────────────────────────────
+add(gen("A", ["", "Coal "], ["Ash"], PCT_SUFFIX))
+add(gen("A", ["Ash Content", "Ash as Fired"], [""]))
 
-    # ── H2 — Hydrogen ────────────────────────────────────────────────────────
-    ("Hydrogen", "H2"), ("Hydrogen %", "H2"), ("H2 %", "H2"),
-    ("Ultimate Hydrogen", "H2"),
+# ── VM — Volatile Matter ─────────────────────────────────────────────
+add(gen("VM", ["", "Coal "], ["Volatile Matter", "VM", "Volatiles"], PCT_SUFFIX))
 
-    # ── N2 — Nitrogen ────────────────────────────────────────────────────────
-    ("Nitrogen", "N2"), ("Nitrogen %", "N2"), ("N2 %", "N2"),
-    ("Ultimate Nitrogen", "N2"),
+# ── FC — Fixed Carbon ──────────────────────────────────────────────────
+add(gen("FC", ["", "Coal "], ["Fixed Carbon", "FC"], PCT_SUFFIX))
 
-    # ── O2f — Oxygen (fuel ultimate analysis, distinct from O2fg's flue-gas
-    #    excess-air reading — the ML classifier already sees O2fg's very
-    #    different phrasing above, so bare "Oxygen %" here is unambiguous) ──
-    ("Oxygen", "O2f"), ("Oxygen %", "O2f"), ("O2 %  Fuel", "O2f"),
-    ("Ultimate Oxygen", "O2f"), ("Fuel Oxygen", "O2f"),
+# ── GCV — Gross Calorific Value (as fired) ───────────────────────────
+add(gen("GCV", ["", "Coal ", "Gross "], ["Calorific Value", "GCV", "G.C.V."],
+        ["", " kcal/kg", " (KCal/Kg)", " As Received"]))
 
-    # ── GCVba — GCV of Bottom Ash ───────────────────────────────────────────
-    ("GCV of Bottom Ash", "GCVba"), ("GCV Bottom Ash", "GCVba"),
-    ("Bottom Ash GCV", "GCVba"), ("Calorific Value of Bottom Ash", "GCVba"),
+# ── S — Sulfur ────────────────────────────────────────────────────────
+add(gen("S", ["", "Total "], ["Sulfur", "Sulphur", "S"], PCT_SUFFIX))
 
-    # ── GCVfa — GCV of Fly Ash ──────────────────────────────────────────────
-    ("GCV of Fly Ash", "GCVfa"), ("GCV Fly Ash", "GCVfa"),
-    ("Fly Ash GCV", "GCVfa"), ("Calorific Value of Fly Ash", "GCVfa"),
 
-    # ── BL — Boiler Load (info-only) ────────────────────────────────────────
-    ("Boiler Load", "BL"), ("Boiler Load TPH", "BL"), ("Load TPH", "BL"),
+# ═══════════════════════════════════════════════════════════════════════
+# APH gas-composition fields: O2in/O2out, CO2in/CO2out, COin/COout
+# ═══════════════════════════════════════════════════════════════════════
+def aph_gas_field(field_id, measure_words, unit_suffix, direction_words):
+    rows = []
+    # "<measure> <equip> <dir> <stream>"           e.g. "O2 APH Inlet FG"
+    rows += gen(field_id, measure_words, APH, direction_words, FLUE_GAS)
+    # "<equip> <dir> <measure><unit>"               e.g. "APH Inlet O2 %"
+    rows += gen(field_id, APH, direction_words, measure_words, unit_suffix)
+    # "<measure> at <equip> <dir>"                  e.g. "O2 at APH Outlet"
+    rows += gen(field_id, measure_words, ["at"], APH, direction_words)
+    # "<equip>-<side> <dir> Gas <measure><unit>"    e.g. "APH-A I/L GAS O2%"
+    rows += gen(field_id, APH, SIDE_DASH, direction_words, ["Gas", "FG"],
+                measure_words, unit_suffix)
+    # "AH <side> <dir> FG <measure>"                e.g. "AH A IN FG O2"
+    rows += gen(field_id, ["AH"], ["A", "B"], direction_words, ["FG"], measure_words)
+    # NEW: "<measure> <equip-side> <dir>" with no stream/unit word at all
+    # e.g. LAB sheet: "O2 AT APH-A O/L", "O2 APH-B O/L"
+    rows += gen(field_id, measure_words, ["", "AT"], APH_SIDED, direction_words)
+    # NEW: "Avg. Flue Gas <measure> - APH <dir> (Optional)" — the whole
+    # "Avg. Flue Gas X - APH dir" construction used throughout the LAB
+    # sheet's BEE-2 Indirect block.
+    rows += gen(field_id, ["Avg.", "Avg", "Average"], FLUE_GAS, measure_words,
+                ["-", "–"], ["APH"], direction_words, ["", " (Optional)"])
+    return rows
 
-    # ── SP — Steam Pressure (info-only) ─────────────────────────────────────
-    ("Steam Pressure", "SP"), ("Main Steam Pressure", "SP"), ("SP kg per cm2", "SP"),
-    # Real-plant superheater-outlet wording -- the actual physical point
-    # "Steam Pressure" means (main steam as it leaves the superheater,
-    # before the turbine), as opposed to the Hot/Cold Reheat pressure
-    # readings ("HRH STEAM PRESSURE", "CRH STEAM PRESS") which are a
-    # different, downstream point after the reheater -- see the OUT_OF_
-    # SCOPE HRH/CRH entries below and the 'SP' guard in
-    # _unit_conflicts_with_field, both of which keep those from being
-    # mistaken for this reading despite sharing "STEAM"/"PRESSURE" wording.
-    ("SH O/L MS Pressure", "SP"), ("SH Outlet MS Pressure", "SP"),
-    ("Superheater Outlet Steam Pressure", "SP"), ("SH O/L Steam Pressure", "SP"),
+
+add(aph_gas_field("O2in", O2_WORD, PCT_SUFFIX, DIR_IN))
+add(aph_gas_field("O2out", O2_WORD, PCT_SUFFIX, DIR_OUT))
+add(aph_gas_field("CO2in", CO2_WORD, PCT_SUFFIX, DIR_IN))
+add(aph_gas_field("CO2out", CO2_WORD, PCT_SUFFIX, DIR_OUT))
+add(aph_gas_field("COin", CO_WORD, PPM_SUFFIX, DIR_IN))
+add(aph_gas_field("COout", CO_WORD, PPM_SUFFIX, DIR_OUT))
+# O2-at-economiser-outlet is physically the APH-inlet point on plants
+# where the economiser sits directly upstream of the APH.
+add(gen("O2in", O2_WORD, ["at"], ["ECO Outlet", "Outlet"], ["", " LHS", " RHS"]))
+# NEW: "PCR O2" — the LAB sheet's own column grouping shows this term
+# is the umbrella header for the "O2 AT APH-A O/L" / "O2 APH-B O/L"
+# sub-columns, i.e. the panel-read APH-outlet O2, not the BEE-indirect
+# flue-gas O2 (O2fg). Mapped to O2out on that evidence rather than guessed.
+add(gen("O2out", ["PCR O2", "AVG O2 at PCR", "AVG O2 at pcr", "AVG O2 OUTLET"], [""]))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Flue-gas temperature at APH: Tgi / Tgo
+# ═══════════════════════════════════════════════════════════════════════
+def aph_temp_field(field_id, direction_words):
+    rows = []
+    rows += gen(field_id, ["Flue Gas", "FG", "Air Preheater"], TEMP_WORD, APH, direction_words)
+    rows += gen(field_id, APH, direction_words, ["FG", "Flue Gas"], TEMP_WORD)
+    rows += gen(field_id, ["Primary", "Secondary", "Secondry", ""], APH,
+                direction_words, ["FG"], TEMP_WORD, ["", " Left", " Right", " (Left)", " (Right)"])
+    rows += gen(field_id, ["GAH"], direction_words, ["Temp"],
+                ["", " (Left)", " (Right)", " average"])
+    rows += gen(field_id, ["AH"], ["A", "B"], direction_words, ["FG Temp", "Gas Temp"],
+                ["", " average"])
+    rows += gen(field_id, ["APH", "APH-A", "APH-B"], SIDE, direction_words,
+                ["Gas Temp", "GAS TEMPERATURE"])
+    rows += gen(field_id, ["FG", "FG GAS"], TEMP_WORD, ["AH"], direction_words,
+                ["", " (L)", " (R)", " Left", " Right"])
+    # NEW: measure-word-first order with the side fused onto APH —
+    # e.g. "FG TEMP APH-A I/L, DEG C", "FLUE GAS TEMP APH-A O/L"
+    rows += gen(field_id, ["FG", "Flue Gas", "Flue Gas Temp"], TEMP_WORD, APH_SIDED,
+                direction_words)
+    # NEW: "FG TEMP AT APH<side> <dir>" / "... AVG." — GIST sheet style,
+    # including the plain (non-sided) averaged column.
+    rows += gen(field_id, ["FG TEMP AT", "FG Temp At", "Flue Gas Temp At"],
+                APH_SIDED + ["APH"], direction_words,
+                ["", " AVG.", " AVG", " Avg."])
+    # NEW: "Avg. Flue Gas Temp. - APH <dir>" (LAB sheet BEE-2 block)
+    rows += gen(field_id, ["Avg.", "Avg", "Average"], ["Flue Gas Temp.", "Flue Gas Temp",
+                "Fuel Gas Temp.", "Fuel Gas Temp"], ["-", "–"], ["APH"], direction_words,
+                ["", "."])
+    return rows
+
+
+add(aph_temp_field("Tgi", DIR_IN))
+add(aph_temp_field("Tgo", DIR_OUT))
+# Before/after-APH and after/before-economiser phrasing (economiser
+# outlet == APH inlet on plants with no intermediate equipment).
+add(gen("Tgi", ["FG", "Flue Gas", "Flue Gas Temperature"], TEMP_WORD, BEFORE, ["APH"],
+        ["", " Left", " Right", " LHS", " RHS", "- L", "- R"]))
+add(gen("Tgi", ["FG"], TEMP_WORD, AFTER, ECONOMISER,
+        ["", " Left", " Right"]))
+add(gen_join("Tgi", [["FG"], ["TEMPAFTERECO"], ["- L", "- R", " L", " R"]], sep=""))
+add(gen("Tgo", ["FG", "Flue Gas", "Flue Gas Temperature"], TEMP_WORD, AFTER, ["APH"],
+        ["", " Left", " Right", " LHS", " RHS", "- L", "- R"]))
+add(gen_join("Tgo", [["FG"], ["TEMPAFTERAPH"], ["- L", "- R", " L", " R"]], sep=""))
+add(gen("Tgi", ["ITS"], ["IN"], ["FG Temp"]))
+add(gen("Tgo", ["ITS"], ["Out"], ["FG Temp"]))
+# NEW: "APH Common Outlet FGT" — abbreviated common-header wording for the
+# averaged/common APH outlet gas temperature (GIST sheet).
+add(gen("Tgo", ["APH"], ["Common"], ["Outlet"], ["FGT", "FG Temp", "Gas Temp"]))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Primary / Secondary Air temperature at APH: Tpai/Tpao, Tsai/Tsao
+# ═══════════════════════════════════════════════════════════════════════
+def air_temp_field(field_id, stream_words, direction_words, hot):
+    rows = []
+    rows += gen(field_id, stream_words, TEMP_WORD, direction_words)
+    rows += gen(field_id, stream_words, ["APH"], TEMP_WORD, direction_words,
+                ["", " A", " B"])
+    rows += gen(field_id, ["APH", "GAH"], direction_words, stream_words, TEMP_WORD)
+    rows += gen(field_id, ["AH"], ["A", "B"], stream_words[:1], direction_words, ["TEMP", "Temp"])
+    rows += gen(field_id, ["APH.", "APH"], ["A", "B", ""], direction_words,
+                stream_words[:1] + [f"{w}." for w in stream_words[:1]],
+                ["TMP.", "TMP", "TMP."])
+    # NEW: "<stream> <dir> TEMP" — no equipment token at all, direction
+    # comes right after the stream abbreviation. e.g. "PA I/L TEMP",
+    # "SA I/L TEMP" (OPN PARA sheet).
+    rows += gen(field_id, stream_words[:1], direction_words, ["TEMP", "Temp"])
+    # NEW: "<stream>-<side> <dir> TEMP" — e.g. "PA-A O/L TEMP",
+    # "SA-B O/L TEMP" (OPN PARA sheet).
+    rows += gen(field_id, stream_words[:1], SIDE_DASH, direction_words, ["TEMP", "Temp"])
+    # NEW: "<stream> to APH Temp <dir>" — e.g. "Primary Air to APH Temp
+    # in", "Secondary Air to APH Temp Out" (LAB sheet BEE-2 block).
+    rows += gen(field_id, stream_words, ["to APH Temp"], direction_words)
+    if hot:
+        # "boiler side"/"windbox"/"hot" wording for the post-APH hot side
+        rows += gen(field_id, ["Boiler side"], ["A", "B"], stream_words[:1], TEMP_WORD)
+        rows += gen(field_id, ["", "LEFT SIDE ", "RIGHT SIDE "], ["HOT"], stream_words[:1],
+                    ["TMP.", "TMP", "TEMP"])
+        rows += gen(field_id, stream_words[:1], TEMP_WORD, AFTER, ["APH"],
+                    ["", " LHS", " RHS", " LEFT", " RIGHT"])
+    else:
+        # fan-outlet (pre-APH, cold) wording
+        fan = {"Primary Air": "PAF", "PA": "PAF", "Secondary Air": "FDF", "SA": "FDF"}
+        fan_tag = fan.get(stream_words[0], "FAN")
+        rows += gen(field_id, [fan_tag], ["", "-A"], ["O/L"], stream_words[:1], TEMP_WORD)
+        rows += gen(field_id, stream_words[:1], TEMP_WORD, BEFORE, ["APH"],
+                    ["", " LHS", " RHS", " LEFT", " RIGHT"])
+    return rows
+
+
+add(air_temp_field("Tpai", PA_STREAM, DIR_IN, hot=False))
+add(air_temp_field("Tpao", PA_STREAM, DIR_OUT, hot=True))
+add(air_temp_field("Tsai", SA_STREAM, DIR_IN, hot=False))
+add(air_temp_field("Tsao", SA_STREAM, DIR_OUT, hot=True))
+# Furnace/windbox-side hot secondary-air wording (post-APH, named from the
+# furnace's point of view rather than the APH's).
+add(gen("Tsao", ["FURNACE", "Furnace"], ["L", "R", "LHS", "RHS"],
+        ["SIDE", "Side"], ["INL", "Inlet"], ["SA T", "SA Temp"]))
+add(gen("Tsao", ["APH"], ["O/L"], ["SEC AIR"], ["TEMPERATURE"], ["", " LHS", " RHS"]))
+
+# ── Fsa / Fpa — Secondary / Primary Air Flow ────────────────────────────
+add(gen("Fsa", ["", "Total ", "Sec "], ["Secondary Air Flow", "SA Flow", "SA air flow",
+                                         "SEC AIR FLOW"], ["", " COMP"]))
+add(gen("Fsa", ["SA"], ["", "-A", "-B", " (L)", " (R)"], ["Flow", "FLOW COMP"]))
+add(gen("Fsa", ["SA FLOW TO FURNACE"], ["", " - L", " - R"]))
+add(gen("Fpa", ["", "Total ", "Total "], ["Primary Air Flow", "PA Flow", "PA air flow",
+                                 "TOTAL PA FLOW", "PRI AIR FLOW", "Pri Air Flow"], ["", " COMP"]))
+add(gen("Fpa", ["PA"], ["", "-A", "-B"], ["Flow", "FLOW COMP"]))
+add(gen("Fpa", ["Coal Mill"], FEEDER_LETTERS[:2], ["PA Flow"]))
+
+# ── Tref — Reference Temp (design/manual context; kept distinct from
+#    Tamb's site-ambient BEE reading below — no shared phrasing) ───────
+add(gen("Tref", ["Reference", "Design Reference"], ["Temperature", "Temp"]))
+
+# ── Design proximate & ultimate analysis ────────────────────────────────
+DESIGN_MAP = {
+    "Md": "Moisture", "Ad": "Ash", "VMd": "Volatile Matter", "FCd": "Fixed Carbon",
+    "Cd": "Carbon", "Sd": "Sulfur", "Hd": "Hydrogen", "Md2": "Moisture",
+    "Nd": "Nitrogen", "Od": "Oxygen", "Ad2": "Ash", "GCVd": "GCV",
+}
+for fid, concept in DESIGN_MAP.items():
+    suffix = " Ultimate" if fid in ("Md2", "Ad2") else ""
+    add(gen(fid, ["Design"], [concept], [suffix]))
+    add(gen(fid, [concept], ["Design"], [suffix]))
+add(gen("GCVd", ["Design"], ["Calorific Value"]))
+add(gen("Trad", ["Design"], ["Reference Air Temp"]))
+add(gen("Trad", ["Ref Air Temp"], ["Design"]))
+add(gen("Mwvd", ["Design"], ["Moisture in Air"]))
+add(gen("Mwvd", ["Moisture in Air"], ["Design"]))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# BEE-2 Indirect fields
+# ═══════════════════════════════════════════════════════════════════════
+add(gen("O2fg", ["O2", "Oxygen"], ["in Flue Gas"], PCT_SUFFIX))
+add(gen("O2fg", ["O2"], PCT_SUFFIX))
+add(gen("O2fg", ["Flue Gas O2", "Excess O2"], PCT_SUFFIX))
+add(gen("COfg", ["CO", "Carbon Monoxide"], ["in Flue Gas", ""], PPM_SUFFIX))
+add(gen("COfg", ["Flue Gas CO", "CO Content"], PPM_SUFFIX))
+add(gen("CO2fg", ["CO2", "Carbon Dioxide"], ["in Flue Gas", ""], PCT_SUFFIX))
+add(gen("CO2fg", ["Flue Gas CO2", "CO2 Content"], PCT_SUFFIX))
+add(gen("Tfg", ["", "Average ", "Avg ", "Exit ", "Boiler Exit "],
+        ["Flue Gas Temperature", "Flue Gas Temp", "Gas Temperature"]))
+add(gen("Tamb", ["Atmospheric", "Ambient", "Site Ambient", "Amb", "Outside Air"],
+        ["Temperature", "Temp"]))
+add(gen("Hum", ["", "Relative ", "Ambient ", "Specific "], ["Humidity"]))
+add(gen("Hum", ["Humidity in Ambient Air", "Moisture in Air", "Humidity kg per kg dry air"], [""]))
+add(gen("C", ["", "Ultimate "], ["Carbon"], PCT_SUFFIX))
+add(gen("H2", ["", "Ultimate "], ["Hydrogen", "H2"], PCT_SUFFIX))
+add(gen("N2", ["", "Ultimate "], ["Nitrogen", "N2"], PCT_SUFFIX))
+add(gen("O2f", ["", "Ultimate ", "Fuel "], ["Oxygen"], PCT_SUFFIX))
+add(gen("GCVba", ["GCV of Bottom Ash", "GCV Bottom Ash", "Bottom Ash GCV",
+                  "Calorific Value of Bottom Ash"], [""]))
+add(gen("GCVfa", ["GCV of Fly Ash", "GCV Fly Ash", "Fly Ash GCV",
+                  "Calorific Value of Fly Ash"], [""]))
+add(gen("BL", ["Boiler Load"], ["", " TPH"]))
+add(gen("BL", ["Load TPH"], [""]))
+add(gen("SP", ["", "Main "], ["Steam Pressure"], ["", " kg per cm2"]))
+add(gen("SP", ["SH", "Superheater"], ["O/L", "Outlet"], ["MS Pressure", "Steam Pressure"]))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# OUT_OF_SCOPE — real plant readings with no CENPEEP field, generated
+# the same way: axis combinations of equipment × direction × stream ×
+# measurement for each *category* of non-field reading.
+# ═══════════════════════════════════════════════════════════════════════
+OUT_OF_SCOPE_EXAMPLES = []
+
+
+def add_oos(rows):
+    OUT_OF_SCOPE_EXAMPLES.extend(rows)
+
+
+STEAM_STAGE = ["MS", "CRH", "HRH", "HPT Exhaust", "LTSH Out", "ITS IN", "ITS Out",
+               "HTS IN", "HTS Out", "LTR IN", "LTR Out", "HTR Out"]
+STEAM_MEASURE = ["Temp", "Temperature", "Press", "Pressure"]
+add_oos(oos(STEAM_STAGE, ["Steam"], STEAM_MEASURE, ["", "-L", "-R", " Left", " Right"]))
+# NEW: bare "<stage> <measure>" without the redundant "Steam" word —
+# e.g. "MS TEMP", "MS PRESSURE" (OPN PARA sheet — plants often drop
+# "Steam" since MS/CRH/HRH already imply it).
+add_oos(oos(STEAM_STAGE, STEAM_MEASURE, ["", "-L", "-R", " Left", " Right"]))
+add_oos(oos(["Superheater HP Bypass", "Superheater LP Bypass"], ["Temp"], ["", " -A", " -B"]))
+add_oos(oos(["Primary SH", "Divi SH", "PLN SH"], ["O/L", "Inlet"], ["Steam Temp", "Steam Press"],
+            ["", " Left", " Right"]))
+
+# spray / attemperation flows
+add_oos(oos(["SH", "RH"], ["Spray", "ATT. WATER", "ATT WATER", "ATTAMP", "ATTEM"],
+            ["Flow"], ["", " (LHS)", " (RHS)", " LHS", " RHS"]))
+add_oos(oos(["Total SH Spray", "Total RH Spray", "RH ATTEM TEMP"], [""]))
+# NEW: attemperation TEMP (not flow) — e.g. "S/H ATTEMPERATION TEMP",
+# "R/H ATTEMP. TEMP" (OPN PARA sheet).
+add_oos(oos(["S/H", "SH", "R/H", "RH"], ["ATTEMPERATION", "ATTEMP.", "ATTEMP"], ["TEMP"]))
+
+# feedwater / economiser water-side temps & pressures
+add_oos(oos(["FW", "Feed water", "Feed Water", "Feedwater", ""],
+            ["Temperature Before Economiser", "Temperature After Economiser",
+             "Eco inlet temp", "Eco outlet Temp", "Eco inlet Press",
+             "ECO I/L TEMP", "ECO O/L TEMP", "ECO I/L PRESS", "ECO O/L PRESS"]))
+add_oos(oos(["ECON FD WTR INLT PRESS", "HPH I/L Feedwater Temp", "HPH O/L Feedwater Temp",
+             "Feedwater HP HTR inlet temp"]))
+
+# HPH / enthalpy / turbine-cycle misc
+add_oos(oos(["HPH Ext STM pressure", "HPH Ext STM temp", "HPH Drain Temp",
+             "Enthalpy FW HPH O/L", "Enthalpy FW HPH I/L", "Extraction Enthalpy HPH",
+             "Drip Enthalpy HPH", "Extraction Flow HPH", "MS Enthalpy", "HRH Enthalpy",
+             "CRH Enthalpy", "FW Enthalpy", "RH Flow", "Attemperation Enthalpy", "THR"]))
+add_oos(oos(["Turbine Side Condenser Vacuum", "Generator Side Condenser Vacuum",
+             "CONDENSOR VACCUM", "VACUUM"]))
+add_oos(oos(["HPH-5A EXTRACTION STEAM PRESSURE", "HPH -5A EXTRACTION STEAM TEMPERATURE"]))
+# NEW: per-heater I/L, O/L, DRAIN and EXTR readings by heater id —
+# e.g. "HPH-5A I/L TEMP", "HPH5A DRAIN OUT TEMP", "HPH-6B EXTR PRESS"
+# (OPN PARA sheet has 5A/5B/6A/6B, each with several of these).
+
+HTR_ID = ["HPH-5A", "HPH-5B", "HPH-6A", "HPH-6B", "HPH5A", "HPH5B", "HPH6A", "HPH6B",
+          "HPH 5A", "HPH 5B", "HPH 6A", "HPH 6B"]
+add_oos(oos(HTR_ID, ["I/L", "O/L"], ["TEMP"]))
+add_oos(oos(HTR_ID, ["DRAIN OUT", "DRAIN"], ["TEMP"]))
+add_oos(oos(HTR_ID, ["EXTR", "EXTRACTION"], ["TEMP", "PRESS", "PRESS.", "PRESSURE"]))
+# LP heater condensate side — e.g. "LPH-1 COND I/L TEMP",
+# "LPH-3 COND O/L TEMP" (OPN PARA sheet).
+LPH_ID = ["LPH-1", "LPH-2", "LPH-3", "LPH1", "LPH2", "LPH3", "LPH 1", "LPH 2", "LPH 3"]
+add_oos(oos(LPH_ID, ["COND"], ["I/L", "O/L"], ["TEMP"]))
+
+# soot blower / motor currents / misc electrical
+add_oos(oos(["Soot Blower Steam Flow", "Soot Blower Steam Press"]))
+add_oos(oos(["PA Fan-A", "PA Fan-B", "FDF-A", "FDF-B", "FDF A", "FDF B", "IDF A", "IDF B",
+             "PA B", "PA FAN B", "PA A"],
+            ["MTR CURRENT", "CURRENT", "COMP 2X SEL"]))
+add_oos(oos(["FEEDER"], FEEDER_LETTERS[:6], ["AMPS"]))
+add_oos(oos(["FDF Current", "IDF Current", "SSC PWR PACK PRESS", "SSC HYD PR",
+             "SSC HYD PR Hourly average", "SSC HYD PR hourly maximum", "SSC current"]))
+add_oos(oos(["WTR SEP MET TEMP", "SOFA SA CTL DMP POS", "FW SHORT SB CURR"]))
+# NEW: numbered fans ("9A"/"9B" style unit-9 tags, not just bare "A"/"B")
+# for current, discharge, and AH inlet/outlet pressure —
+# e.g. "PA FAN 9A CURRENT, AMP", "FD 9A AH INLET, MMWC",
+# "ID 9A INLET, MMWC" (OPN PARA sheet).
+FAN_NUM_ID = ["9A", "9B", "6A", "6B", "5A", "5B"]
+add_oos(oos(["PA FAN", "FD", "FD FAN", "ID", "ID FAN"], FAN_NUM_ID,
+            ["CURRENT, AMP", "CURRENT", "DISC, MMWC", "DISCH, MMWC", "DISCHARGE, MMWC",
+             "AH INLET, MMWC", "AH OUT, MMWC", "INLET, MMWC", "OUT PRESSURE, MMWC",
+             "INLET PRESSURE, MMWC"]))
+# burner tilt corners
+add_oos(oos(["BT1", "BT2", "BT3", "BT4", "BT 1", "BT 2", "BT 3", "BT 4"]))
+
+# draft / pressure readings around APH / furnace / ID fan
+add_oos(oos(["FURNACE DRAFT", "FURNACE PR", "Furnace Pr", "Furnace pressure",
+             "WINDBOX DP", "Windbox Differential Pressure", "Draft pressure",
+             "Gas side draft"]))
+add_oos(oos(["ECO", "APH"], ["inlet", "outlet", "O/L"], ["FG pressure"]))
+add_oos(oos(["APH differential pressure"]))
+add_oos(oos(["GAH"], ["inlet pressure", "O/L pressure"], ["(Left)", "(Right)"]))
+add_oos(oos(["FG PR. AT AH", "FG PR AT AH", "FG PR. AFTER AH", "FG PR AFTER AH"],
+            ["-A", "-B", ""], ["INLET", ""]))
+add_oos(oos(["DP ACROSS AH-A 1O2", "DP ACROSS AH-B 1O2"]))
+add_oos(oos(["ID A INLET DRAUGHT", "ID B INLET DRAUGHT", "ID INLET DRAUGHT"]))
+add_oos(oos(["APH-A", "APH-B"], ["I/L", "O/L HOT"], ["PRIMARY AIR", "SEC AIR"], ["PR"]))
+add_oos(oos(["BLR RHS HOT SEC AIR PR-1", "BLR RHS HOT SEC AIR PR-2",
+             "BLR LHS HOT SEC AIR PR-1", "BLR LHS HOT SEC AIR PR-2"]))
+add_oos(oos(["PA-A O/L PR", "PA-B O/L PR", "FD-A O/L PR", "FD-B O/L PR", "HOT PA HDR PRESSURE"]))
+add_oos(oos(["Furnace exit FG temp", "Furnace exit gas temperature"]))
+add_oos(oos(["GAS TEMP BEHIND FURNACE"], ["REAR", "FRONT"], ["SIDE GAS DAMPER"],
+            ["(R.W)", "(F.W)"]))
+add_oos(oos(["O2 AT ECO INLET"], ["", " LHS", " RHS"]))
+add_oos(oos(["FLUE GAS TEMP BEFORE ECO"], ["", " LHS", " RHS"]))
+# NEW: APH inlet/outlet DRAFT (pressure, not temperature — must not be
+# confused with Tgi/Tgo) — e.g. "APH A i/l draft", "APH B o/l draft"
+# (July-Aug/OPN PARA style sheets).
+add_oos(oos(["APH"], ["A", "B", "a", "b"], ["i/l", "o/l", "I/L", "O/L"], ["draft", "Draft"]))
+# NEW: readings taken at the chimney/stack — a distinct measurement point
+# from APH outlet on this plant (it has separate O2-APH-A-O/L,
+# O2-APH-B-O/L *and* O2-AT-CHIMNEY columns), so this must stay OOS rather
+# than be pulled toward O2out/COout by similarity.
+add_oos(oos(["O2", "CO", "SOx", "NOx", "Opacity"], ["AT", ""], ["CHIMNEY"],
+            ["", "OUT", "OUTLET"]))
+
+# drum
+add_oos(oos(["DRUM"], ["RHS", "LHS"], ["BOTTOM TEMP", "TOP TEMP"]))
+add_oos(oos(["DRUM PRESSURE"]))
+
+# metal/tube temps
+add_oos(oos(["FSH", "PSH", "DIVISH", "RH", "LTSH", "LTRH", "LTS", "ITS", "HTS", "LTR", "HTR",
+             "Platen"],
+            ["Metal Temp", "TUBE MET", "MTM Temp", "MTM TEMP", "Metal Temperature"]))
+# NEW: mid-boiler gas temp / draft readings at superheater/LTSH exits —
+# distinct from Tgi/Tgo (those are specifically at the APH boundary) —
+# e.g. "PSH o/l FG Temp", "RH o/l Draft", "LTSH o/l FG temp"
+# (OPN PARA sheet).
+add_oos(oos(["PSH", "RH", "LTSH"], ["o/l", "O/L"], ["FG Temp", "FG temp", "Draft"]))
+
+# lab / coal quality — ash oxides, ratios, ash fusion, sieve
+add_oos(oos(["SiO2", "Al2O3", "Fe2O3", "CaO", "MgO", "Na2O", "K2O", "TiO2", "Mn3O4",
+             "SO3", "P2O5", "BaO", "Undetermined"], ["(%)", "(ppm)"]))
+add_oos(oos(["Fuel Ratio (FC/VM)", "Fuel Ratio", "SilicaAluminium Ratio",
+             "Silica Aluminium Ratio", "BaseAcid Ratio", "Base Acid Ratio",
+             "Slagging Factor", "Fouling Factor", "HGI"]))
+add_oos(oos(["Initial Deformation", "Hemispherical", "Flow", "Softening Temperature"],
+            ["(°C)"], ["", " Red.", " Oxi."]))
+add_oos(oos(["IDT (Reducing)", "IDT (Oxidising)", "Spon Comb (O/C)"]))
+add_oos(oos([">50mm", "<3mm", "<0.5mm"], ["", " (%)"]))
+add_oos(oos(["IM", "IM%", "Inherent Moisture"], ["", " %"]))
+
+# blend / grade / text-valued columns
+add_oos(oos(["Coal blend ratio", "Coal Blend Grade", "GRADE 1", "GRADE 2"]))
+add_oos(oos(["Mill Running", "Mill Service", "Mill Combination", "Mill in Service"]))
+add_oos(oos(["Coal A", "Coal B"]))
+
+# FGR (flue gas recirculation)
+add_oos(oos(["FGR"], ["FLOW", "Flow", "TEMP", "Temp"]))
+add_oos(oos(["Flue Gas Recirculation Flow"]))
+
+# total air flow (real reading, but no dedicated field id)
+add_oos(oos(["Total Air flow", "Total Air Flow", "TOTAL AIR FLOW"]))
+
+# generic structural / non-numeric columns already covered by
+# NON_FIELD_HEADERS below are NOT repeated here — that set is checked as
+# an exact-match short-circuit before the classifier runs at all.
+add_oos(oos(["HR STM PR. BEFORE IV", "HR STM PR BEFORE IV"], ["(L)", "(R)", ""]))
+add_oos(oos(["TEM 42 MS TEMP BEFORE ESV RHS", "TEM 43 MS TEMP BEF ESV (LHS)",
+             "MS TEMP BEFORE ESV", "MS TEMP BEF ESV"]))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MERGED SUPPLEMENTAL EXAMPLES — folded in from an earlier hand-curated +
+# partially-matrixed training_data.py (see 2026-09 merge note at top).
+# These are additional phrasings that file's generators happened to cover
+# but the generators above don't (different abbreviation choices, word
+# orders, etc.) — additive only, nothing here overrides anything above.
+# ═══════════════════════════════════════════════════════════════════════
+TRAINING_EXAMPLES += [
+    ('Generation Load', 'L'),
+    ('MW Load', 'L'),
+    ('GENERATION', 'L'),
+    ('GENERATOR MW', 'L'),
+    ('Generator Load', 'L'),
+    ('Gen-MW', 'L'),
+    ('Feed Water Flow TPH', 'Ffw'),
+    ('Boiler Feed Water Flow', 'Ffw'),
+    ('MAIN STEAM Flow', 'Ffw'),
+    ('FW FLOW', 'Ffw'),
+    ('FEED WATER FLOW', 'Ffw'),
+    ('MAIN STM FLOW COMP', 'Ffw'),
+    ('MAIN STM FLOW', 'Ffw'),
+    ('MAIN STM FLW COMP', 'Ffw'),
+    ('MN STM FLOW', 'Ffw'),
+    ('STM FLOW', 'Ffw'),
+    ('Total Coal consumption', 'Fin'),
+    ('Total Coal consumption TPH', 'Fin'),
+    ('Mill Coal Flow', 'Fin'),
+    ('Unburnt carbon in Bottom Ash', 'Cba'),
+    ('Bottom Ash (%) Unburnt Carbon', 'Cba'),
+    ('UBC IN BOTTOM ASH', 'Cba'),
+    ('Unburnts in Bottom ash', 'Cba'),
+    ('Unburnt carbon in Fly Ash ESP', 'Cfa'),
+    ('Fly Ash - ESP (%)', 'Cfa'),
+    ('Economizer Unburnt Carbon', 'Cfa'),
+    ('UBC IN FLY ASH', 'Cfa'),
+    ('Unburnts in Fly ash', 'Cfa'),
+    ('TM%', 'M'),
+    ('ASH  %', 'A'),
+    ('Coal Ash Percentage', 'A'),
+    ('VOLATILE MATTER  %', 'VM'),
+    ('FIXED CARBON  %', 'FC'),
+    ('O2 APH In', 'O2in'),
+    ('O2 at APH I/L Left', 'O2in'),
+    ('O2 at APH I/L Right', 'O2in'),
+    ('O2 APH Inlet %', 'O2in'),
+    ('Oxygen APH Inlet', 'O2in'),
+    ('O2 Air Preheater Inlet', 'O2in'),
+    ('O2 IN FG BEFORE APH', 'O2in'),
+    ('O2 BEFORE APH', 'O2in'),
+    ('O2 IN FG BEFORE  APH', 'O2in'),
+    ('GAH I/L O2 Left', 'O2in'),
+    ('GAH I/L O2 Right', 'O2in'),
+    ('GAH I/L O2 average', 'O2in'),
+    ('APH-A I/L GAS O2%', 'O2in'),
+    ('APH-B I/L GAS O2%', 'O2in'),
+    ('APH I/L GAS O2%', 'O2in'),
+    ('APH-A INLET GAS O2', 'O2in'),
+    ('APH-B INLET GAS O2', 'O2in'),
+    ('APH INLET GAS O2 PERCENT', 'O2in'),
+    ('O2 AT ECO OUTLET', 'O2in'),
+    ('O2 AT ECO OUTLET LHS', 'O2in'),
+    ('O2 AT ECO OUTLET RHS', 'O2in'),
+    ('O2 AT OUTLET', 'O2in'),
+    ('O2 AT OUTLET LHS', 'O2in'),
+    ('O2 AT OUTLET RHS', 'O2in'),
+    ('AH-A IN FG O2', 'O2in'),
+    ('AH-B IN FG O2', 'O2in'),
+    ('AH A IN FG O2 average', 'O2in'),
+    ('AH B IN FG O2 average', 'O2in'),
+    ('CO2 APH In', 'CO2in'),
+    ('CO2 Air Preheater Inlet', 'CO2in'),
+    ('CO APH In', 'COin'),
+    ('CO Air Preheater Inlet ppm', 'COin'),
+    ('O2 APH Out', 'O2out'),
+    ('O2 at APH O/L Left', 'O2out'),
+    ('O2 at APH O/L Right', 'O2out'),
+    ('O2 APH Outlet %', 'O2out'),
+    ('Oxygen APH Outlet', 'O2out'),
+    ('O2 Air Preheater Outlet', 'O2out'),
+    ('GAH O/L O2 Left', 'O2out'),
+    ('GAH O/L O2 Right', 'O2out'),
+    ('O2 APH O/L', 'O2out'),
+    ('APH A OUTL GAS O2 CT', 'O2out'),
+    ('APH B OUTL GAS O2 CT', 'O2out'),
+    ('AH-A Out Gas O2', 'O2out'),
+    ('AH-B Out Gas O2', 'O2out'),
+    ('AH A Out Gas O2 average', 'O2out'),
+    ('AH B Out Gas O2 average', 'O2out'),
+    ('CO2 APH Out', 'CO2out'),
+    ('CO2 Air Preheater Outlet', 'CO2out'),
+    ('CO APH Out', 'COout'),
+    ('CO Emission', 'COout'),
+    ('Air Preheater Inlet Gas Temp', 'Tgi'),
+    ('Secondary Air Preheater Inlet Flue Gas Temp', 'Tgi'),
+    ('APH I/L FG Temp 1 Left', 'Tgi'),
+    ('APH I/L FG Temp 1 Right', 'Tgi'),
+    ('APH I/L FG Temp 2 Left', 'Tgi'),
+    ('APH I/L FG Temp 2 Right', 'Tgi'),
+    ('APH Inlet FG Temperature Left side', 'Tgi'),
+    ('APH Inlet FG Temperature Right side', 'Tgi'),
+    ('Primary APH I/L FG Temp (L)', 'Tgi'),
+    ('Primary APH I/L FG Temp (R)', 'Tgi'),
+    ('Primary APH I/L FG Temp (left)', 'Tgi'),
+    ('Secondry APH I/L FG Temp  (Left)', 'Tgi'),
+    ('Secondry APH I/L FG Temp  (Right)', 'Tgi'),
+    ('GAH I/L Temp (left)', 'Tgi'),
+    ('FG TEMPAFTERECO- L', 'Tgi'),
+    ('FG TEMP AFTERECO- R', 'Tgi'),
+    ('FG TEMPAFTERECO L', 'Tgi'),
+    ('FG TEMPAFTERECO R', 'Tgi'),
+    ('Flue Gas Temp After Economiser', 'Tgi'),
+    ('Flue Gas Temperature After Economiser', 'Tgi'),
+    ('ECO Outlet FG Temp', 'Tgi'),
+    ('ECO O/L FG Temp', 'Tgi'),
+    ('ECO O/L FG Temp Left', 'Tgi'),
+    ('ECO O/L FG Temp Right', 'Tgi'),
+    ('Economizer Outlet Gas Temp', 'Tgi'),
+    ('Economizer Outlet Flue Gas Temperature', 'Tgi'),
+    ('Economizer exit temperature', 'Tgi'),
+    ('GAS ECO O/L Temp average', 'Tgi'),
+    ('GAS ECO O/L Temp (Left)', 'Tgi'),
+    ('GAS ECO O/L Temp (Right)', 'Tgi'),
+    ('FG GAS TEMP AH I/L', 'Tgi'),
+    ('FG GAS TEMP AH I/L (L)', 'Tgi'),
+    ('FG GAS TEMP AH I/L (R)', 'Tgi'),
+    ('FG GAS TEMP AH I/L Left', 'Tgi'),
+    ('FG GAS TEMP AH I/L Right', 'Tgi'),
+    ('FG TEMP AH I/L', 'Tgi'),
+    ('FG TEMP AH INLET', 'Tgi'),
+    ('FG GAS TEMP AH Inlet', 'Tgi'),
+    ('APH-A I/L GAS TEMP', 'Tgi'),
+    ('APH-B I/L GAS TEMP', 'Tgi'),
+    ('APH I/L GAS TEMP', 'Tgi'),
+    ('APH-A INLET GAS TEMP', 'Tgi'),
+    ('APH-B INLET GAS TEMP', 'Tgi'),
+    ('APH INLET GAS TEMPERATURE', 'Tgi'),
+    ('AH-A IN FG Temp', 'Tgi'),
+    ('AH-B IN FG Temp', 'Tgi'),
+    ('FLUE GAS TEMP BEFORE APH', 'Tgi'),
+    ('FLUE GAS TEMP BEFORE APH LHS', 'Tgi'),
+    ('FLUE GAS TEMP BEFORE APH RHS', 'Tgi'),
+    ('FLUE GAS TEMP BEFORE APH LEFT', 'Tgi'),
+    ('FLUE GAS TEMP BEFORE APH RIGHT', 'Tgi'),
+    ('Air Preheater Outlet Gas Temperature', 'Tgo'),
+    ('Secondary Air Preheater Outlet Flue Gas Temp', 'Tgo'),
+    ('APH Outlet Flue Gas Temperature Left', 'Tgo'),
+    ('APH Outlet Flue Gas Temperature Right', 'Tgo'),
+    ('APH O/L FG Temp 1 Left', 'Tgo'),
+    ('APH O/L FG Temp 1 Right', 'Tgo'),
+    ('APH O/L FG Temp 2 Left', 'Tgo'),
+    ('APH O/L FG Temp 2 Right', 'Tgo'),
+    ('APH O/L FG Temp 3 Left', 'Tgo'),
+    ('APH O/L FG Temp 3 Right', 'Tgo'),
+    ('APH Outlet FG Temperature Left side', 'Tgo'),
+    ('APH Outlet FG Temperature Right side', 'Tgo'),
+    ('Primary APH O/L FG Temp (left)', 'Tgo'),
+    ('Secondry APH O/L FG Temp  (Left)', 'Tgo'),
+    ('Secondry APH O/L FG Temp  (Right)', 'Tgo'),
+    ('GAH O/L Temp 1 (Left)', 'Tgo'),
+    ('GAH O/L Temp 2 (Left)', 'Tgo'),
+    ('GAH O/L Temp 3 (Left)', 'Tgo'),
+    ('GAH O/L Temp 1 (Right)', 'Tgo'),
+    ('GAH O/L Temp 2 (Right)', 'Tgo'),
+    ('GAH O/L Temp 3 (Right)', 'Tgo'),
+    ('FG TEMP AFTERAPH - L', 'Tgo'),
+    ('FG TEMP AFTERAPH - R', 'Tgo'),
+    ('FG TEMPAFTERAPH- L', 'Tgo'),
+    ('FG TEMPAFTERAPH- R', 'Tgo'),
+    ('FG GAS TEMP AH O/L', 'Tgo'),
+    ('FG GAS TEMP AH O/L (L)', 'Tgo'),
+    ('FG GAS TEMP AH O/L (R)', 'Tgo'),
+    ('FG GAS TEMP AH O/L Left', 'Tgo'),
+    ('FG GAS TEMP AH O/L Right', 'Tgo'),
+    ('FG TEMP AH O/L', 'Tgo'),
+    ('AH-A Out Gas Temp', 'Tgo'),
+    ('AH-B Out Gas Temp', 'Tgo'),
+    ('FG TEMP AH O/L (R)', 'Tgo'),
+    ('FG TEMP AH O/L (L)', 'Tgo'),
+    ('FG TEMP AH OUTLET', 'Tgo'),
+    ('FG GAS TEMP AH Outlet', 'Tgo'),
+    ('FLUE GAS TEMP AFTER APH', 'Tgo'),
+    ('FLUE GAS TEMP AFTER APH LHS', 'Tgo'),
+    ('FLUE GAS TEMP AFTER APH RHS', 'Tgo'),
+    ('FLUE GAS TEMP AFTER APH LEFT', 'Tgo'),
+    ('FLUE GAS TEMP AFTER APH RIGHT', 'Tgo'),
+    ('Coal Mill PA Temp', 'Tpai'),
+    ('Primary Air Inlet Temperature', 'Tpai'),
+    ('Coal Mill Outlet Temp PA In', 'Tpai'),
+    ('PAF-A O/L PA Temp', 'Tpai'),
+    ('Primary Air Fan Outlet Temperature', 'Tpai'),
+    ('Primary Air Temp', 'Tpai'),
+    ('APH. A INLET PA. TMP', 'Tpai'),
+    ('APH. B INLET PA. TMP', 'Tpai'),
+    ('APH A INLET PA TMP', 'Tpai'),
+    ('APH B INLET PA TMP', 'Tpai'),
+    ('APH INLET PA TMP', 'Tpai'),
+    ('PA TEMP BEFORE APH', 'Tpai'),
+    ('Primary Air Outlet Temperature', 'Tpao'),
+    ('Boiler side PA Temperature', 'Tpao'),
+    ('APH A O/L PA AIR TEMP', 'Tpao'),
+    ('APH B O/L PA AIR TEMP', 'Tpao'),
+    ('LEFT SIDE HOT PA. TMP.', 'Tpao'),
+    ('RIGHT SIDE HOT PA. TMP.', 'Tpao'),
+    ('HOT PRIMARY AIR TEMP', 'Tpao'),
+    ('PA TEMP AFTER APH', 'Tpao'),
+    ('PA TEMP AFTER APH LHS', 'Tpao'),
+    ('PA TEMP AFTER APH RHS', 'Tpao'),
+    ('PA TEMP AFTER APH LEFT', 'Tpao'),
+    ('PA TEMP AFTER APH RIGHT', 'Tpao'),
+    ('Secondary Air Inlet Temperature', 'Tsai'),
+    ('FDF-A O/L SA Temp', 'Tsai'),
+    ('Forced Draft Fan Outlet Temperature', 'Tsai'),
+    ('Secondary Air Temp', 'Tsai'),
+    ('AIR TEMP AH I/L', 'Tsai'),
+    ('AIR TEMP AH I/L (L)', 'Tsai'),
+    ('AIR TEMP AH I/L (R)', 'Tsai'),
+    ('APH. A INLET SEC AIR TMP.', 'Tsai'),
+    ('APH. B INLET SEC AIR TMP.', 'Tsai'),
+    ('APH A INLET SEC AIR TMP', 'Tsai'),
+    ('APH B INLET SEC AIR TMP', 'Tsai'),
+    ('APH INLET SEC AIR TMP', 'Tsai'),
+    ('SEC AIR BOX INLET TEMP', 'Tsai'),
+    ('SECONDARY AIR BOX INLET TEMP', 'Tsai'),
+    ('SA TEMP BEFORE APH', 'Tsai'),
+    ('Secondary Air Outlet Temperature', 'Tsao'),
+    ('Boiler side SA Temperature', 'Tsao'),
+    ('APH A O/L SA AIR TEMP', 'Tsao'),
+    ('APH B O/L SA AIR TEMP', 'Tsao'),
+    ('FURNACE L_SIDE INL SA T', 'Tsao'),
+    ('FURNACE R_SIDE INL SA T', 'Tsao'),
+    ('BLR LS SEC AR BX ILT 2 AR TEMP', 'Tsao'),
+    ('BLR RS SEC AR BX ILT 2 AR TEMP', 'Tsao'),
+    ('SA TEMP AFTER APH', 'Tsao'),
+    ('SA TEMP AFTER APH LHS', 'Tsao'),
+    ('SA TEMP AFTER APH RHS', 'Tsao'),
+    ('SA TEMP AFTER APH LEFT', 'Tsao'),
+    ('SA TEMP AFTER APH RIGHT', 'Tsao'),
+    ('Boiler side A SA flow', 'Fsa'),
+    ('Boiler side B SA flow', 'Fsa'),
+    ('TOTAL SEC AIR FLOW', 'Fsa'),
+    ('TOT SEC AIR FLOW', 'Fsa'),
+    ('Coal Mill PA Flow', 'Fpa'),
+    ('PA-A FLOW COMP', 'Fpa'),
+    ('PA-B FLOW COMP', 'Fpa'),
+    ('Design Coal Moisture', 'Md'),
+    ('Design Coal Ash', 'Ad'),
+    ('VM Design', 'VMd'),
+    ('FC Design', 'FCd'),
+    ('Design Carbon Ultimate', 'Cd'),
+    ('Design Sulphur Ultimate', 'Sd'),
+    ('Design Hydrogen Ultimate', 'Hd'),
+    ('O2 Percentage', 'O2fg'),
+    ('CO in Flue Gas (ppm)', 'COfg'),
+    ('FG Outlet Temp', 'Tfg'),
+    ('Avg. Flue Gas Temperature', 'Tfg'),
+    ('Air Temperature', 'Tamb'),
+    ('Carbon Content', 'C'),
+    ('Fixed Carbon Ultimate', 'C'),
+    ('C %', 'C'),
+    ('O2 %  Fuel', 'O2f'),
+    ('SP kg per cm2', 'SP'),
+    ('Temp APH Inlet Flue Gas', 'Tgi'),
+    ('Temp APH Inlet Flue G', 'Tgi'),
+    ('Temp APH Inlet FG Gas', 'Tgi'),
+    ('Temp APH Inlet FG G', 'Tgi'),
+    ('Temp APH Inlet F Gas', 'Tgi'),
+    ('Temp APH Inlet F G', 'Tgi'),
+    ('Temp APH In Flue Gas', 'Tgi'),
+    ('Temp APH In Flue G', 'Tgi'),
+    ('Temp APH In FG Gas', 'Tgi'),
+    ('Temp APH In FG G', 'Tgi'),
+    ('Temp APH In F Gas', 'Tgi'),
+    ('Temp APH In F G', 'Tgi'),
+    ('Temp APH I/L Flue Gas', 'Tgi'),
+    ('Temp APH I/L Flue G', 'Tgi'),
+    ('Temp APH I/L FG Gas', 'Tgi'),
+    ('Temp APH I/L FG G', 'Tgi'),
+    ('Temp APH I/L F Gas', 'Tgi'),
+    ('Temp APH I/L F G', 'Tgi'),
+    ('Temp APH IN Flue Gas', 'Tgi'),
+    ('Temp APH IN Flue G', 'Tgi'),
+    ('Temp APH IN FG Gas', 'Tgi'),
+    ('Temp APH IN FG G', 'Tgi'),
+    ('Temp APH IN F Gas', 'Tgi'),
+    ('Temp APH IN F G', 'Tgi'),
+    ('Temp Air Preheater Inlet Flue Gas', 'Tgi'),
+    ('Temp Air Preheater Inlet Flue G', 'Tgi'),
+    ('Temp Air Preheater Inlet FG Gas', 'Tgi'),
+    ('Temp Air Preheater Inlet FG G', 'Tgi'),
+    ('Temp Air Preheater Inlet F Gas', 'Tgi'),
+    ('Temp Air Preheater Inlet F G', 'Tgi'),
+    ('Temp Air Preheater In Flue Gas', 'Tgi'),
+    ('Temp Air Preheater In Flue G', 'Tgi'),
+    ('Temp Air Preheater In FG Gas', 'Tgi'),
+    ('Temp Air Preheater In FG G', 'Tgi'),
+    ('Temp Air Preheater In F Gas', 'Tgi'),
+    ('Temp Air Preheater In F G', 'Tgi'),
+    ('Temp Air Preheater I/L Flue Gas', 'Tgi'),
+    ('Temp Air Preheater I/L Flue G', 'Tgi'),
+    ('Temp Air Preheater I/L FG Gas', 'Tgi'),
+    ('Temp Air Preheater I/L FG G', 'Tgi'),
+    ('Temp Air Preheater I/L F Gas', 'Tgi'),
+    ('Temp Air Preheater I/L F G', 'Tgi'),
+    ('Temp Air Preheater IN Flue Gas', 'Tgi'),
+    ('Temp Air Preheater IN Flue G', 'Tgi'),
+    ('Temp Air Preheater IN FG Gas', 'Tgi'),
+    ('Temp Air Preheater IN FG G', 'Tgi'),
+    ('Temp Air Preheater IN F Gas', 'Tgi'),
+    ('Temp Air Preheater IN F G', 'Tgi'),
+    ('Temp Air Pre Heater Inlet Flue Gas', 'Tgi'),
+    ('Temp Air Pre Heater Inlet Flue G', 'Tgi'),
+    ('Temp Air Pre Heater Inlet FG Gas', 'Tgi'),
+    ('Temp Air Pre Heater Inlet FG G', 'Tgi'),
+    ('Temp Air Pre Heater Inlet F Gas', 'Tgi'),
+    ('Temp Air Pre Heater Inlet F G', 'Tgi'),
+    ('Temp Air Pre Heater In Flue Gas', 'Tgi'),
+    ('Temp Air Pre Heater In Flue G', 'Tgi'),
+    ('Temp Air Pre Heater In FG Gas', 'Tgi'),
+    ('Temp Air Pre Heater In FG G', 'Tgi'),
+    ('Temp Air Pre Heater In F Gas', 'Tgi'),
+    ('Temp Air Pre Heater In F G', 'Tgi'),
+    ('Temp Air Pre Heater I/L Flue Gas', 'Tgi'),
+    ('Temp Air Pre Heater I/L Flue G', 'Tgi'),
+    ('Temp Air Pre Heater I/L FG Gas', 'Tgi'),
+    ('Temp Air Pre Heater I/L FG G', 'Tgi'),
+    ('Temp Air Pre Heater I/L F Gas', 'Tgi'),
+    ('Temp Air Pre Heater I/L F G', 'Tgi'),
+    ('Temp Air Pre Heater IN Flue Gas', 'Tgi'),
+    ('Temp Air Pre Heater IN Flue G', 'Tgi'),
+    ('Temp Air Pre Heater IN FG Gas', 'Tgi'),
+    ('Temp Air Pre Heater IN FG G', 'Tgi'),
+    ('Temp Air Pre Heater IN F Gas', 'Tgi'),
+    ('Temp Air Pre Heater IN F G', 'Tgi'),
+    ('Temp A/H Inlet Flue Gas', 'Tgi'),
+    ('Temp A/H Inlet Flue G', 'Tgi'),
+    ('Temp A/H Inlet FG Gas', 'Tgi'),
+    ('Temp A/H Inlet FG G', 'Tgi'),
+    ('Temp A/H Inlet F Gas', 'Tgi'),
+    ('Temp A/H Inlet F G', 'Tgi'),
+    ('Temp A/H In Flue Gas', 'Tgi'),
+    ('Temp A/H In Flue G', 'Tgi'),
+    ('Temp A/H In FG Gas', 'Tgi'),
+    ('Temp A/H In FG G', 'Tgi'),
+    ('Temp A/H In F Gas', 'Tgi'),
+    ('Temp A/H In F G', 'Tgi'),
+    ('Temp A/H I/L Flue Gas', 'Tgi'),
+    ('Temp A/H I/L Flue G', 'Tgi'),
+    ('Temp A/H I/L FG Gas', 'Tgi'),
+    ('Temp A/H I/L FG G', 'Tgi'),
+    ('Temp A/H I/L F Gas', 'Tgi'),
+    ('Temp A/H I/L F G', 'Tgi'),
+    ('Temp A/H IN Flue Gas', 'Tgi'),
+    ('Temp A/H IN Flue G', 'Tgi'),
+    ('Temp A/H IN FG Gas', 'Tgi'),
+    ('Temp A/H IN FG G', 'Tgi'),
+    ('Temp A/H IN F Gas', 'Tgi'),
+    ('Temp A/H IN F G', 'Tgi'),
+    ('Temp AH Inlet Flue Gas', 'Tgi'),
+    ('Temp AH Inlet Flue G', 'Tgi'),
+    ('Temp AH Inlet FG Gas', 'Tgi'),
+    ('Temp AH Inlet FG G', 'Tgi'),
+    ('Temp AH Inlet F Gas', 'Tgi'),
+    ('Temp AH Inlet F G', 'Tgi'),
+    ('Temp AH In Flue Gas', 'Tgi'),
+    ('Temp AH In Flue G', 'Tgi'),
+    ('Temp AH In FG Gas', 'Tgi'),
+    ('Temp AH In FG G', 'Tgi'),
+    ('Temp AH In F Gas', 'Tgi'),
+    ('Temp AH In F G', 'Tgi'),
+    ('Temp AH I/L Flue Gas', 'Tgi'),
+    ('Temp AH I/L Flue G', 'Tgi'),
+    ('Temp AH I/L FG Gas', 'Tgi'),
+    ('Temp AH I/L FG G', 'Tgi'),
+    ('Temp AH I/L F Gas', 'Tgi'),
+    ('Temp AH I/L F G', 'Tgi'),
+    ('Temp AH IN Flue Gas', 'Tgi'),
+    ('Temp AH IN Flue G', 'Tgi'),
+    ('Temp AH IN FG Gas', 'Tgi'),
+    ('Temp AH IN FG G', 'Tgi'),
+    ('Temp AH IN F Gas', 'Tgi'),
+    ('Temp AH IN F G', 'Tgi'),
+    ('Temp GAH Inlet Flue Gas', 'Tgi'),
+    ('Temp GAH Inlet Flue G', 'Tgi'),
+    ('Temp GAH Inlet FG Gas', 'Tgi'),
+    ('Temp GAH Inlet FG G', 'Tgi'),
+    ('Temp GAH Inlet F Gas', 'Tgi'),
+    ('Temp GAH Inlet F G', 'Tgi'),
+    ('Temp GAH In Flue Gas', 'Tgi'),
+    ('Temp GAH In Flue G', 'Tgi'),
+    ('Temp GAH In FG Gas', 'Tgi'),
+    ('Temp GAH In FG G', 'Tgi'),
+    ('Temp GAH In F Gas', 'Tgi'),
+    ('Temp GAH In F G', 'Tgi'),
+    ('Temp GAH I/L Flue Gas', 'Tgi'),
+    ('Temp GAH I/L Flue G', 'Tgi'),
+    ('Temp GAH I/L FG Gas', 'Tgi'),
+    ('Temp GAH I/L FG G', 'Tgi'),
+    ('Temp GAH I/L F Gas', 'Tgi'),
+    ('Temp GAH I/L F G', 'Tgi'),
+    ('Temp GAH IN Flue Gas', 'Tgi'),
+    ('Temp GAH IN Flue G', 'Tgi'),
+    ('Temp GAH IN FG Gas', 'Tgi'),
+    ('Temp GAH IN FG G', 'Tgi'),
+    ('Temp GAH IN F Gas', 'Tgi'),
+    ('Temp GAH IN F G', 'Tgi'),
+    ('FG Temp APH Inlet Flue Gas', 'Tgi'),
+    ('FG Temp APH Inlet Flue G', 'Tgi'),
+    ('FG Temp APH Inlet FG Gas', 'Tgi'),
+    ('FG Temp APH Inlet FG G', 'Tgi'),
+    ('FG Temp APH Inlet F Gas', 'Tgi'),
+    ('FG Temp APH Inlet F G', 'Tgi'),
+    ('FG Temp APH In Flue Gas', 'Tgi'),
+    ('FG Temp APH In Flue G', 'Tgi'),
+    ('FG Temp APH In FG Gas', 'Tgi'),
+    ('FG Temp APH In FG G', 'Tgi'),
+    ('FG Temp APH In F Gas', 'Tgi'),
+    ('FG Temp APH In F G', 'Tgi'),
+    ('FG Temp APH I/L Flue Gas', 'Tgi'),
+    ('FG Temp APH I/L Flue G', 'Tgi'),
+    ('FG Temp APH I/L FG Gas', 'Tgi'),
+    ('FG Temp APH I/L FG G', 'Tgi'),
+    ('FG Temp APH I/L F Gas', 'Tgi'),
+    ('FG Temp APH I/L F G', 'Tgi'),
+    ('FG Temp APH IN Flue Gas', 'Tgi'),
+    ('FG Temp APH IN Flue G', 'Tgi'),
+    ('FG Temp APH IN FG Gas', 'Tgi'),
+    ('FG Temp APH IN FG G', 'Tgi'),
+    ('FG Temp APH IN F Gas', 'Tgi'),
+    ('FG Temp APH IN F G', 'Tgi'),
+    ('FG Temp Air Preheater Inlet Flue Gas', 'Tgi'),
+    ('FG Temp Air Preheater Inlet Flue G', 'Tgi'),
+    ('FG Temp Air Preheater Inlet FG Gas', 'Tgi'),
+    ('FG Temp Air Preheater Inlet FG G', 'Tgi'),
+    ('FG Temp Air Preheater Inlet F Gas', 'Tgi'),
+    ('FG Temp Air Preheater Inlet F G', 'Tgi'),
+    ('FG Temp Air Preheater In Flue Gas', 'Tgi'),
+    ('FG Temp Air Preheater In Flue G', 'Tgi'),
+    ('FG Temp Air Preheater In FG Gas', 'Tgi'),
+    ('FG Temp Air Preheater In FG G', 'Tgi'),
+    ('FG Temp Air Preheater In F Gas', 'Tgi'),
+    ('FG Temp Air Preheater In F G', 'Tgi'),
+    ('FG Temp Air Preheater I/L Flue Gas', 'Tgi'),
+    ('FG Temp Air Preheater I/L Flue G', 'Tgi'),
+    ('FG Temp Air Preheater I/L FG Gas', 'Tgi'),
+    ('FG Temp Air Preheater I/L FG G', 'Tgi'),
+    ('FG Temp Air Preheater I/L F Gas', 'Tgi'),
+    ('FG Temp Air Preheater I/L F G', 'Tgi'),
+    ('FG Temp Air Preheater IN Flue Gas', 'Tgi'),
+    ('FG Temp Air Preheater IN Flue G', 'Tgi'),
+    ('FG Temp Air Preheater IN FG Gas', 'Tgi'),
+    ('FG Temp Air Preheater IN FG G', 'Tgi'),
+    ('FG Temp Air Preheater IN F Gas', 'Tgi'),
+    ('FG Temp Air Preheater IN F G', 'Tgi'),
+    ('FG Temp Air Pre Heater Inlet Flue Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater Inlet Flue G', 'Tgi'),
+    ('FG Temp Air Pre Heater Inlet FG Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater Inlet FG G', 'Tgi'),
+    ('FG Temp Air Pre Heater Inlet F Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater Inlet F G', 'Tgi'),
+    ('FG Temp Air Pre Heater In Flue Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater In Flue G', 'Tgi'),
+    ('FG Temp Air Pre Heater In FG Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater In FG G', 'Tgi'),
+    ('FG Temp Air Pre Heater In F Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater In F G', 'Tgi'),
+    ('FG Temp Air Pre Heater I/L Flue Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater I/L Flue G', 'Tgi'),
+    ('FG Temp Air Pre Heater I/L FG Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater I/L FG G', 'Tgi'),
+    ('FG Temp Air Pre Heater I/L F Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater I/L F G', 'Tgi'),
+    ('FG Temp Air Pre Heater IN Flue Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater IN Flue G', 'Tgi'),
+    ('FG Temp Air Pre Heater IN FG Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater IN FG G', 'Tgi'),
+    ('FG Temp Air Pre Heater IN F Gas', 'Tgi'),
+    ('FG Temp Air Pre Heater IN F G', 'Tgi'),
+    ('FG Temp A/H Inlet Flue Gas', 'Tgi'),
+    ('FG Temp A/H Inlet Flue G', 'Tgi'),
+    ('FG Temp A/H Inlet FG Gas', 'Tgi'),
+    ('FG Temp A/H Inlet FG G', 'Tgi'),
+    ('FG Temp A/H Inlet F Gas', 'Tgi'),
+    ('FG Temp A/H Inlet F G', 'Tgi'),
+    ('FG Temp A/H In Flue Gas', 'Tgi'),
+    ('FG Temp A/H In Flue G', 'Tgi'),
+    ('FG Temp A/H In FG Gas', 'Tgi'),
+    ('FG Temp A/H In FG G', 'Tgi'),
+    ('FG Temp A/H In F Gas', 'Tgi'),
+    ('FG Temp A/H In F G', 'Tgi'),
+    ('FG Temp A/H I/L Flue Gas', 'Tgi'),
+    ('FG Temp A/H I/L Flue G', 'Tgi'),
+    ('FG Temp A/H I/L FG Gas', 'Tgi'),
+    ('FG Temp A/H I/L FG G', 'Tgi'),
+    ('FG Temp A/H I/L F Gas', 'Tgi'),
+    ('FG Temp A/H I/L F G', 'Tgi'),
+    ('FG Temp A/H IN Flue Gas', 'Tgi'),
+    ('FG Temp A/H IN Flue G', 'Tgi'),
+    ('FG Temp A/H IN FG Gas', 'Tgi'),
+    ('FG Temp A/H IN FG G', 'Tgi'),
+    ('FG Temp A/H IN F Gas', 'Tgi'),
+    ('FG Temp A/H IN F G', 'Tgi'),
+    ('FG Temp AH Inlet Flue Gas', 'Tgi'),
+    ('FG Temp AH Inlet Flue G', 'Tgi'),
+    ('FG Temp AH Inlet FG Gas', 'Tgi'),
+    ('FG Temp AH Inlet FG G', 'Tgi'),
+    ('FG Temp AH Inlet F Gas', 'Tgi'),
+    ('FG Temp AH Inlet F G', 'Tgi'),
+    ('FG Temp AH In Flue Gas', 'Tgi'),
+    ('FG Temp AH In Flue G', 'Tgi'),
+    ('FG Temp AH In FG Gas', 'Tgi'),
+    ('FG Temp AH In FG G', 'Tgi'),
+    ('FG Temp AH In F Gas', 'Tgi'),
+    ('FG Temp AH In F G', 'Tgi'),
+    ('FG Temp AH I/L Flue Gas', 'Tgi'),
+    ('FG Temp AH I/L Flue G', 'Tgi'),
+    ('FG Temp AH I/L FG Gas', 'Tgi'),
+    ('FG Temp AH I/L FG G', 'Tgi'),
+    ('FG Temp AH I/L F Gas', 'Tgi'),
+    ('FG Temp AH I/L F G', 'Tgi'),
+    ('FG Temp AH IN Flue Gas', 'Tgi'),
+    ('FG Temp AH IN Flue G', 'Tgi'),
+    ('FG Temp AH IN FG Gas', 'Tgi'),
+    ('FG Temp AH IN FG G', 'Tgi'),
+    ('FG Temp AH IN F Gas', 'Tgi'),
+    ('FG Temp AH IN F G', 'Tgi'),
+    ('FG Temp GAH Inlet Flue Gas', 'Tgi'),
+    ('FG Temp GAH Inlet Flue G', 'Tgi'),
+    ('FG Temp GAH Inlet FG Gas', 'Tgi'),
+    ('FG Temp GAH Inlet FG G', 'Tgi'),
+    ('FG Temp GAH Inlet F Gas', 'Tgi'),
+    ('FG Temp GAH Inlet F G', 'Tgi'),
+    ('FG Temp GAH In Flue Gas', 'Tgi'),
+    ('FG Temp GAH In Flue G', 'Tgi'),
+    ('FG Temp GAH In FG Gas', 'Tgi'),
+    ('FG Temp GAH In FG G', 'Tgi'),
+    ('FG Temp GAH In F Gas', 'Tgi'),
+    ('FG Temp GAH In F G', 'Tgi'),
+    ('FG Temp GAH I/L Flue Gas', 'Tgi'),
+    ('FG Temp GAH I/L Flue G', 'Tgi'),
+    ('FG Temp GAH I/L FG Gas', 'Tgi'),
+    ('FG Temp GAH I/L FG G', 'Tgi'),
+    ('FG Temp GAH I/L F Gas', 'Tgi'),
+    ('FG Temp GAH I/L F G', 'Tgi'),
+    ('FG Temp GAH IN Flue Gas', 'Tgi'),
+    ('FG Temp GAH IN Flue G', 'Tgi'),
+    ('FG Temp GAH IN FG Gas', 'Tgi'),
+    ('FG Temp GAH IN FG G', 'Tgi'),
+    ('FG Temp GAH IN F Gas', 'Tgi'),
+    ('FG Temp GAH IN F G', 'Tgi'),
+    ('Temp APH Outlet Flue Gas', 'Tgo'),
+    ('Temp APH Outlet Flue G', 'Tgo'),
+    ('Temp APH Outlet FG Gas', 'Tgo'),
+    ('Temp APH Outlet FG G', 'Tgo'),
+    ('Temp APH Outlet F Gas', 'Tgo'),
+    ('Temp APH Outlet F G', 'Tgo'),
+    ('Temp APH Out Flue Gas', 'Tgo'),
+    ('Temp APH Out Flue G', 'Tgo'),
+    ('Temp APH Out FG Gas', 'Tgo'),
+    ('Temp APH Out FG G', 'Tgo'),
+    ('Temp APH Out F Gas', 'Tgo'),
+    ('Temp APH Out F G', 'Tgo'),
+    ('Temp APH O/L Flue Gas', 'Tgo'),
+    ('Temp APH O/L Flue G', 'Tgo'),
+    ('Temp APH O/L FG Gas', 'Tgo'),
+    ('Temp APH O/L FG G', 'Tgo'),
+    ('Temp APH O/L F Gas', 'Tgo'),
+    ('Temp APH O/L F G', 'Tgo'),
+    ('Temp APH OUT Flue Gas', 'Tgo'),
+    ('Temp APH OUT Flue G', 'Tgo'),
+    ('Temp APH OUT FG Gas', 'Tgo'),
+    ('Temp APH OUT FG G', 'Tgo'),
+    ('Temp APH OUT F Gas', 'Tgo'),
+    ('Temp APH OUT F G', 'Tgo'),
+    ('Temp Air Preheater Outlet Flue Gas', 'Tgo'),
+    ('Temp Air Preheater Outlet Flue G', 'Tgo'),
+    ('Temp Air Preheater Outlet FG Gas', 'Tgo'),
+    ('Temp Air Preheater Outlet FG G', 'Tgo'),
+    ('Temp Air Preheater Outlet F Gas', 'Tgo'),
+    ('Temp Air Preheater Outlet F G', 'Tgo'),
+    ('Temp Air Preheater Out Flue Gas', 'Tgo'),
+    ('Temp Air Preheater Out Flue G', 'Tgo'),
+    ('Temp Air Preheater Out FG Gas', 'Tgo'),
+    ('Temp Air Preheater Out FG G', 'Tgo'),
+    ('Temp Air Preheater Out F Gas', 'Tgo'),
+    ('Temp Air Preheater Out F G', 'Tgo'),
+    ('Temp Air Preheater O/L Flue Gas', 'Tgo'),
+    ('Temp Air Preheater O/L Flue G', 'Tgo'),
+    ('Temp Air Preheater O/L FG Gas', 'Tgo'),
+    ('Temp Air Preheater O/L FG G', 'Tgo'),
+    ('Temp Air Preheater O/L F Gas', 'Tgo'),
+    ('Temp Air Preheater O/L F G', 'Tgo'),
+    ('Temp Air Preheater OUT Flue Gas', 'Tgo'),
+    ('Temp Air Preheater OUT Flue G', 'Tgo'),
+    ('Temp Air Preheater OUT FG Gas', 'Tgo'),
+    ('Temp Air Preheater OUT FG G', 'Tgo'),
+    ('Temp Air Preheater OUT F Gas', 'Tgo'),
+    ('Temp Air Preheater OUT F G', 'Tgo'),
+    ('Temp Air Pre Heater Outlet Flue Gas', 'Tgo'),
+    ('Temp Air Pre Heater Outlet Flue G', 'Tgo'),
+    ('Temp Air Pre Heater Outlet FG Gas', 'Tgo'),
+    ('Temp Air Pre Heater Outlet FG G', 'Tgo'),
+    ('Temp Air Pre Heater Outlet F Gas', 'Tgo'),
+    ('Temp Air Pre Heater Outlet F G', 'Tgo'),
+    ('Temp Air Pre Heater Out Flue Gas', 'Tgo'),
+    ('Temp Air Pre Heater Out Flue G', 'Tgo'),
+    ('Temp Air Pre Heater Out FG Gas', 'Tgo'),
+    ('Temp Air Pre Heater Out FG G', 'Tgo'),
+    ('Temp Air Pre Heater Out F Gas', 'Tgo'),
+    ('Temp Air Pre Heater Out F G', 'Tgo'),
+    ('Temp Air Pre Heater O/L Flue Gas', 'Tgo'),
+    ('Temp Air Pre Heater O/L Flue G', 'Tgo'),
+    ('Temp Air Pre Heater O/L FG Gas', 'Tgo'),
+    ('Temp Air Pre Heater O/L FG G', 'Tgo'),
+    ('Temp Air Pre Heater O/L F Gas', 'Tgo'),
+    ('Temp Air Pre Heater O/L F G', 'Tgo'),
+    ('Temp Air Pre Heater OUT Flue Gas', 'Tgo'),
+    ('Temp Air Pre Heater OUT Flue G', 'Tgo'),
+    ('Temp Air Pre Heater OUT FG Gas', 'Tgo'),
+    ('Temp Air Pre Heater OUT FG G', 'Tgo'),
+    ('Temp Air Pre Heater OUT F Gas', 'Tgo'),
+    ('Temp Air Pre Heater OUT F G', 'Tgo'),
+    ('Temp A/H Outlet Flue Gas', 'Tgo'),
+    ('Temp A/H Outlet Flue G', 'Tgo'),
+    ('Temp A/H Outlet FG Gas', 'Tgo'),
+    ('Temp A/H Outlet FG G', 'Tgo'),
+    ('Temp A/H Outlet F Gas', 'Tgo'),
+    ('Temp A/H Outlet F G', 'Tgo'),
+    ('Temp A/H Out Flue Gas', 'Tgo'),
+    ('Temp A/H Out Flue G', 'Tgo'),
+    ('Temp A/H Out FG Gas', 'Tgo'),
+    ('Temp A/H Out FG G', 'Tgo'),
+    ('Temp A/H Out F Gas', 'Tgo'),
+    ('Temp A/H Out F G', 'Tgo'),
+    ('Temp A/H O/L Flue Gas', 'Tgo'),
+    ('Temp A/H O/L Flue G', 'Tgo'),
+    ('Temp A/H O/L FG Gas', 'Tgo'),
+    ('Temp A/H O/L FG G', 'Tgo'),
+    ('Temp A/H O/L F Gas', 'Tgo'),
+    ('Temp A/H O/L F G', 'Tgo'),
+    ('Temp A/H OUT Flue Gas', 'Tgo'),
+    ('Temp A/H OUT Flue G', 'Tgo'),
+    ('Temp A/H OUT FG Gas', 'Tgo'),
+    ('Temp A/H OUT FG G', 'Tgo'),
+    ('Temp A/H OUT F Gas', 'Tgo'),
+    ('Temp A/H OUT F G', 'Tgo'),
+    ('Temp AH Outlet Flue Gas', 'Tgo'),
+    ('Temp AH Outlet Flue G', 'Tgo'),
+    ('Temp AH Outlet FG Gas', 'Tgo'),
+    ('Temp AH Outlet FG G', 'Tgo'),
+    ('Temp AH Outlet F Gas', 'Tgo'),
+    ('Temp AH Outlet F G', 'Tgo'),
+    ('Temp AH Out Flue Gas', 'Tgo'),
+    ('Temp AH Out Flue G', 'Tgo'),
+    ('Temp AH Out FG Gas', 'Tgo'),
+    ('Temp AH Out FG G', 'Tgo'),
+    ('Temp AH Out F Gas', 'Tgo'),
+    ('Temp AH Out F G', 'Tgo'),
+    ('Temp AH O/L Flue Gas', 'Tgo'),
+    ('Temp AH O/L Flue G', 'Tgo'),
+    ('Temp AH O/L FG Gas', 'Tgo'),
+    ('Temp AH O/L FG G', 'Tgo'),
+    ('Temp AH O/L F Gas', 'Tgo'),
+    ('Temp AH O/L F G', 'Tgo'),
+    ('Temp AH OUT Flue Gas', 'Tgo'),
+    ('Temp AH OUT Flue G', 'Tgo'),
+    ('Temp AH OUT FG Gas', 'Tgo'),
+    ('Temp AH OUT FG G', 'Tgo'),
+    ('Temp AH OUT F Gas', 'Tgo'),
+    ('Temp AH OUT F G', 'Tgo'),
+    ('Temp GAH Outlet Flue Gas', 'Tgo'),
+    ('Temp GAH Outlet Flue G', 'Tgo'),
+    ('Temp GAH Outlet FG Gas', 'Tgo'),
+    ('Temp GAH Outlet FG G', 'Tgo'),
+    ('Temp GAH Outlet F Gas', 'Tgo'),
+    ('Temp GAH Outlet F G', 'Tgo'),
+    ('Temp GAH Out Flue Gas', 'Tgo'),
+    ('Temp GAH Out Flue G', 'Tgo'),
+    ('Temp GAH Out FG Gas', 'Tgo'),
+    ('Temp GAH Out FG G', 'Tgo'),
+    ('Temp GAH Out F Gas', 'Tgo'),
+    ('Temp GAH Out F G', 'Tgo'),
+    ('Temp GAH O/L Flue Gas', 'Tgo'),
+    ('Temp GAH O/L Flue G', 'Tgo'),
+    ('Temp GAH O/L FG Gas', 'Tgo'),
+    ('Temp GAH O/L FG G', 'Tgo'),
+    ('Temp GAH O/L F Gas', 'Tgo'),
+    ('Temp GAH O/L F G', 'Tgo'),
+    ('Temp GAH OUT Flue Gas', 'Tgo'),
+    ('Temp GAH OUT Flue G', 'Tgo'),
+    ('Temp GAH OUT FG Gas', 'Tgo'),
+    ('Temp GAH OUT FG G', 'Tgo'),
+    ('Temp GAH OUT F Gas', 'Tgo'),
+    ('Temp GAH OUT F G', 'Tgo'),
+    ('FG Temp APH Outlet Flue Gas', 'Tgo'),
+    ('FG Temp APH Outlet Flue G', 'Tgo'),
+    ('FG Temp APH Outlet FG Gas', 'Tgo'),
+    ('FG Temp APH Outlet FG G', 'Tgo'),
+    ('FG Temp APH Outlet F Gas', 'Tgo'),
+    ('FG Temp APH Outlet F G', 'Tgo'),
+    ('FG Temp APH Out Flue Gas', 'Tgo'),
+    ('FG Temp APH Out Flue G', 'Tgo'),
+    ('FG Temp APH Out FG Gas', 'Tgo'),
+    ('FG Temp APH Out FG G', 'Tgo'),
+    ('FG Temp APH Out F Gas', 'Tgo'),
+    ('FG Temp APH Out F G', 'Tgo'),
+    ('FG Temp APH O/L Flue Gas', 'Tgo'),
+    ('FG Temp APH O/L Flue G', 'Tgo'),
+    ('FG Temp APH O/L FG Gas', 'Tgo'),
+    ('FG Temp APH O/L FG G', 'Tgo'),
+    ('FG Temp APH O/L F Gas', 'Tgo'),
+    ('FG Temp APH O/L F G', 'Tgo'),
+    ('FG Temp APH OUT Flue Gas', 'Tgo'),
+    ('FG Temp APH OUT Flue G', 'Tgo'),
+    ('FG Temp APH OUT FG Gas', 'Tgo'),
+    ('FG Temp APH OUT FG G', 'Tgo'),
+    ('FG Temp APH OUT F Gas', 'Tgo'),
+    ('FG Temp APH OUT F G', 'Tgo'),
+    ('FG Temp Air Preheater Outlet Flue Gas', 'Tgo'),
+    ('FG Temp Air Preheater Outlet Flue G', 'Tgo'),
+    ('FG Temp Air Preheater Outlet FG Gas', 'Tgo'),
+    ('FG Temp Air Preheater Outlet FG G', 'Tgo'),
+    ('FG Temp Air Preheater Outlet F Gas', 'Tgo'),
+    ('FG Temp Air Preheater Outlet F G', 'Tgo'),
+    ('FG Temp Air Preheater Out Flue Gas', 'Tgo'),
+    ('FG Temp Air Preheater Out Flue G', 'Tgo'),
+    ('FG Temp Air Preheater Out FG Gas', 'Tgo'),
+    ('FG Temp Air Preheater Out FG G', 'Tgo'),
+    ('FG Temp Air Preheater Out F Gas', 'Tgo'),
+    ('FG Temp Air Preheater Out F G', 'Tgo'),
+    ('FG Temp Air Preheater O/L Flue Gas', 'Tgo'),
+    ('FG Temp Air Preheater O/L Flue G', 'Tgo'),
+    ('FG Temp Air Preheater O/L FG Gas', 'Tgo'),
+    ('FG Temp Air Preheater O/L FG G', 'Tgo'),
+    ('FG Temp Air Preheater O/L F Gas', 'Tgo'),
+    ('FG Temp Air Preheater O/L F G', 'Tgo'),
+    ('FG Temp Air Preheater OUT Flue Gas', 'Tgo'),
+    ('FG Temp Air Preheater OUT Flue G', 'Tgo'),
+    ('FG Temp Air Preheater OUT FG Gas', 'Tgo'),
+    ('FG Temp Air Preheater OUT FG G', 'Tgo'),
+    ('FG Temp Air Preheater OUT F Gas', 'Tgo'),
+    ('FG Temp Air Preheater OUT F G', 'Tgo'),
+    ('FG Temp Air Pre Heater Outlet Flue Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater Outlet Flue G', 'Tgo'),
+    ('FG Temp Air Pre Heater Outlet FG Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater Outlet FG G', 'Tgo'),
+    ('FG Temp Air Pre Heater Outlet F Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater Outlet F G', 'Tgo'),
+    ('FG Temp Air Pre Heater Out Flue Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater Out Flue G', 'Tgo'),
+    ('FG Temp Air Pre Heater Out FG Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater Out FG G', 'Tgo'),
+    ('FG Temp Air Pre Heater Out F Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater Out F G', 'Tgo'),
+    ('FG Temp Air Pre Heater O/L Flue Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater O/L Flue G', 'Tgo'),
+    ('FG Temp Air Pre Heater O/L FG Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater O/L FG G', 'Tgo'),
+    ('FG Temp Air Pre Heater O/L F Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater O/L F G', 'Tgo'),
+    ('FG Temp Air Pre Heater OUT Flue Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater OUT Flue G', 'Tgo'),
+    ('FG Temp Air Pre Heater OUT FG Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater OUT FG G', 'Tgo'),
+    ('FG Temp Air Pre Heater OUT F Gas', 'Tgo'),
+    ('FG Temp Air Pre Heater OUT F G', 'Tgo'),
+    ('FG Temp A/H Outlet Flue Gas', 'Tgo'),
+    ('FG Temp A/H Outlet Flue G', 'Tgo'),
+    ('FG Temp A/H Outlet FG Gas', 'Tgo'),
+    ('FG Temp A/H Outlet FG G', 'Tgo'),
+    ('FG Temp A/H Outlet F Gas', 'Tgo'),
+    ('FG Temp A/H Outlet F G', 'Tgo'),
+    ('FG Temp A/H Out Flue Gas', 'Tgo'),
+    ('FG Temp A/H Out Flue G', 'Tgo'),
+    ('FG Temp A/H Out FG Gas', 'Tgo'),
+    ('FG Temp A/H Out FG G', 'Tgo'),
+    ('FG Temp A/H Out F Gas', 'Tgo'),
+    ('FG Temp A/H Out F G', 'Tgo'),
+    ('FG Temp A/H O/L Flue Gas', 'Tgo'),
+    ('FG Temp A/H O/L Flue G', 'Tgo'),
+    ('FG Temp A/H O/L FG Gas', 'Tgo'),
+    ('FG Temp A/H O/L FG G', 'Tgo'),
+    ('FG Temp A/H O/L F Gas', 'Tgo'),
+    ('FG Temp A/H O/L F G', 'Tgo'),
+    ('FG Temp A/H OUT Flue Gas', 'Tgo'),
+    ('FG Temp A/H OUT Flue G', 'Tgo'),
+    ('FG Temp A/H OUT FG Gas', 'Tgo'),
+    ('FG Temp A/H OUT FG G', 'Tgo'),
+    ('FG Temp A/H OUT F Gas', 'Tgo'),
+    ('FG Temp A/H OUT F G', 'Tgo'),
+    ('FG Temp AH Outlet Flue Gas', 'Tgo'),
+    ('FG Temp AH Outlet Flue G', 'Tgo'),
+    ('FG Temp AH Outlet FG Gas', 'Tgo'),
+    ('FG Temp AH Outlet FG G', 'Tgo'),
+    ('FG Temp AH Outlet F Gas', 'Tgo'),
+    ('FG Temp AH Outlet F G', 'Tgo'),
+    ('FG Temp AH Out Flue Gas', 'Tgo'),
+    ('FG Temp AH Out Flue G', 'Tgo'),
+    ('FG Temp AH Out FG Gas', 'Tgo'),
+    ('FG Temp AH Out FG G', 'Tgo'),
+    ('FG Temp AH Out F Gas', 'Tgo'),
+    ('FG Temp AH Out F G', 'Tgo'),
+    ('FG Temp AH O/L Flue Gas', 'Tgo'),
+    ('FG Temp AH O/L Flue G', 'Tgo'),
+    ('FG Temp AH O/L FG Gas', 'Tgo'),
+    ('FG Temp AH O/L FG G', 'Tgo'),
+    ('FG Temp AH O/L F Gas', 'Tgo'),
+    ('FG Temp AH O/L F G', 'Tgo'),
+    ('FG Temp AH OUT Flue Gas', 'Tgo'),
+    ('FG Temp AH OUT Flue G', 'Tgo'),
+    ('FG Temp AH OUT FG Gas', 'Tgo'),
+    ('FG Temp AH OUT FG G', 'Tgo'),
+    ('FG Temp AH OUT F Gas', 'Tgo'),
+    ('FG Temp AH OUT F G', 'Tgo'),
+    ('FG Temp GAH Outlet Flue Gas', 'Tgo'),
+    ('FG Temp GAH Outlet Flue G', 'Tgo'),
+    ('FG Temp GAH Outlet FG Gas', 'Tgo'),
+    ('FG Temp GAH Outlet FG G', 'Tgo'),
+    ('FG Temp GAH Outlet F Gas', 'Tgo'),
+    ('FG Temp GAH Outlet F G', 'Tgo'),
+    ('FG Temp GAH Out Flue Gas', 'Tgo'),
+    ('FG Temp GAH Out Flue G', 'Tgo'),
+    ('FG Temp GAH Out FG Gas', 'Tgo'),
+    ('FG Temp GAH Out FG G', 'Tgo'),
+    ('FG Temp GAH Out F Gas', 'Tgo'),
+    ('FG Temp GAH Out F G', 'Tgo'),
+    ('FG Temp GAH O/L Flue Gas', 'Tgo'),
+    ('FG Temp GAH O/L Flue G', 'Tgo'),
+    ('FG Temp GAH O/L FG Gas', 'Tgo'),
+    ('FG Temp GAH O/L FG G', 'Tgo'),
+    ('FG Temp GAH O/L F Gas', 'Tgo'),
+    ('FG Temp GAH O/L F G', 'Tgo'),
+    ('FG Temp GAH OUT Flue Gas', 'Tgo'),
+    ('FG Temp GAH OUT Flue G', 'Tgo'),
+    ('FG Temp GAH OUT FG Gas', 'Tgo'),
+    ('FG Temp GAH OUT FG G', 'Tgo'),
+    ('FG Temp GAH OUT F Gas', 'Tgo'),
+    ('FG Temp GAH OUT F G', 'Tgo'),
+    ('Temp APH Inlet PA', 'Tpai'),
+    ('Temp APH Inlet Primary Air', 'Tpai'),
+    ('Temp APH Inlet Prim Air', 'Tpai'),
+    ('Temp APH Inlet Primary', 'Tpai'),
+    ('Temp APH In PA', 'Tpai'),
+    ('Temp APH In Primary Air', 'Tpai'),
+    ('Temp APH In Prim Air', 'Tpai'),
+    ('Temp APH In Primary', 'Tpai'),
+    ('Temp APH I/L PA', 'Tpai'),
+    ('Temp APH I/L Primary Air', 'Tpai'),
+    ('Temp APH I/L Prim Air', 'Tpai'),
+    ('Temp APH I/L Primary', 'Tpai'),
+    ('Temp APH IN PA', 'Tpai'),
+    ('Temp APH IN Primary Air', 'Tpai'),
+    ('Temp APH IN Prim Air', 'Tpai'),
+    ('Temp APH IN Primary', 'Tpai'),
+    ('Temp Air Preheater Inlet PA', 'Tpai'),
+    ('Temp Air Preheater Inlet Primary Air', 'Tpai'),
+    ('Temp Air Preheater Inlet Prim Air', 'Tpai'),
+    ('Temp Air Preheater Inlet Primary', 'Tpai'),
+    ('Temp Air Preheater In PA', 'Tpai'),
+    ('Temp Air Preheater In Primary Air', 'Tpai'),
+    ('Temp Air Preheater In Prim Air', 'Tpai'),
+    ('Temp Air Preheater In Primary', 'Tpai'),
+    ('Temp Air Preheater I/L PA', 'Tpai'),
+    ('Temp Air Preheater I/L Primary Air', 'Tpai'),
+    ('Temp Air Preheater I/L Prim Air', 'Tpai'),
+    ('Temp Air Preheater I/L Primary', 'Tpai'),
+    ('Temp Air Preheater IN PA', 'Tpai'),
+    ('Temp Air Preheater IN Primary Air', 'Tpai'),
+    ('Temp Air Preheater IN Prim Air', 'Tpai'),
+    ('Temp Air Preheater IN Primary', 'Tpai'),
+    ('Temp Air Pre Heater Inlet PA', 'Tpai'),
+    ('Temp Air Pre Heater Inlet Primary Air', 'Tpai'),
+    ('Temp Air Pre Heater Inlet Prim Air', 'Tpai'),
+    ('Temp Air Pre Heater Inlet Primary', 'Tpai'),
+    ('Temp Air Pre Heater In PA', 'Tpai'),
+    ('Temp Air Pre Heater In Primary Air', 'Tpai'),
+    ('Temp Air Pre Heater In Prim Air', 'Tpai'),
+    ('Temp Air Pre Heater In Primary', 'Tpai'),
+    ('Temp Air Pre Heater I/L PA', 'Tpai'),
+    ('Temp Air Pre Heater I/L Primary Air', 'Tpai'),
+    ('Temp Air Pre Heater I/L Prim Air', 'Tpai'),
+    ('Temp Air Pre Heater I/L Primary', 'Tpai'),
+    ('Temp Air Pre Heater IN PA', 'Tpai'),
+    ('Temp Air Pre Heater IN Primary Air', 'Tpai'),
+    ('Temp Air Pre Heater IN Prim Air', 'Tpai'),
+    ('Temp Air Pre Heater IN Primary', 'Tpai'),
+    ('Temp A/H Inlet PA', 'Tpai'),
+    ('Temp A/H Inlet Primary Air', 'Tpai'),
+    ('Temp A/H Inlet Prim Air', 'Tpai'),
+    ('Temp A/H Inlet Primary', 'Tpai'),
+    ('Temp A/H In PA', 'Tpai'),
+    ('Temp A/H In Primary Air', 'Tpai'),
+    ('Temp A/H In Prim Air', 'Tpai'),
+    ('Temp A/H In Primary', 'Tpai'),
+    ('Temp A/H I/L PA', 'Tpai'),
+    ('Temp A/H I/L Primary Air', 'Tpai'),
+    ('Temp A/H I/L Prim Air', 'Tpai'),
+    ('Temp A/H I/L Primary', 'Tpai'),
+    ('Temp A/H IN PA', 'Tpai'),
+    ('Temp A/H IN Primary Air', 'Tpai'),
+    ('Temp A/H IN Prim Air', 'Tpai'),
+    ('Temp A/H IN Primary', 'Tpai'),
+    ('Temp AH Inlet PA', 'Tpai'),
+    ('Temp AH Inlet Primary Air', 'Tpai'),
+    ('Temp AH Inlet Prim Air', 'Tpai'),
+    ('Temp AH Inlet Primary', 'Tpai'),
+    ('Temp AH In PA', 'Tpai'),
+    ('Temp AH In Primary Air', 'Tpai'),
+    ('Temp AH In Prim Air', 'Tpai'),
+    ('Temp AH In Primary', 'Tpai'),
+    ('Temp AH I/L PA', 'Tpai'),
+    ('Temp AH I/L Primary Air', 'Tpai'),
+    ('Temp AH I/L Prim Air', 'Tpai'),
+    ('Temp AH I/L Primary', 'Tpai'),
+    ('Temp AH IN PA', 'Tpai'),
+    ('Temp AH IN Primary Air', 'Tpai'),
+    ('Temp AH IN Prim Air', 'Tpai'),
+    ('Temp AH IN Primary', 'Tpai'),
+    ('Temp GAH Inlet PA', 'Tpai'),
+    ('Temp GAH Inlet Primary Air', 'Tpai'),
+    ('Temp GAH Inlet Prim Air', 'Tpai'),
+    ('Temp GAH Inlet Primary', 'Tpai'),
+    ('Temp GAH In PA', 'Tpai'),
+    ('Temp GAH In Primary Air', 'Tpai'),
+    ('Temp GAH In Prim Air', 'Tpai'),
+    ('Temp GAH In Primary', 'Tpai'),
+    ('Temp GAH I/L PA', 'Tpai'),
+    ('Temp GAH I/L Primary Air', 'Tpai'),
+    ('Temp GAH I/L Prim Air', 'Tpai'),
+    ('Temp GAH I/L Primary', 'Tpai'),
+    ('Temp GAH IN PA', 'Tpai'),
+    ('Temp GAH IN Primary Air', 'Tpai'),
+    ('Temp GAH IN Prim Air', 'Tpai'),
+    ('Temp GAH IN Primary', 'Tpai'),
+    ('Temperature APH Inlet PA', 'Tpai'),
+    ('Temperature APH Inlet Primary Air', 'Tpai'),
+    ('Temperature APH Inlet Prim Air', 'Tpai'),
+    ('Temperature APH Inlet Primary', 'Tpai'),
+    ('Temperature APH In PA', 'Tpai'),
+    ('Temperature APH In Primary Air', 'Tpai'),
+    ('Temperature APH In Prim Air', 'Tpai'),
+    ('Temperature APH In Primary', 'Tpai'),
+    ('Temperature APH I/L PA', 'Tpai'),
+    ('Temperature APH I/L Primary Air', 'Tpai'),
+    ('Temperature APH I/L Prim Air', 'Tpai'),
+    ('Temperature APH I/L Primary', 'Tpai'),
+    ('Temperature APH IN PA', 'Tpai'),
+    ('Temperature APH IN Primary Air', 'Tpai'),
+    ('Temperature APH IN Prim Air', 'Tpai'),
+    ('Temperature APH IN Primary', 'Tpai'),
+    ('Temperature Air Preheater Inlet PA', 'Tpai'),
+    ('Temperature Air Preheater Inlet Primary Air', 'Tpai'),
+    ('Temperature Air Preheater Inlet Prim Air', 'Tpai'),
+    ('Temperature Air Preheater Inlet Primary', 'Tpai'),
+    ('Temperature Air Preheater In PA', 'Tpai'),
+    ('Temperature Air Preheater In Primary Air', 'Tpai'),
+    ('Temperature Air Preheater In Prim Air', 'Tpai'),
+    ('Temperature Air Preheater In Primary', 'Tpai'),
+    ('Temperature Air Preheater I/L PA', 'Tpai'),
+    ('Temperature Air Preheater I/L Primary Air', 'Tpai'),
+    ('Temperature Air Preheater I/L Prim Air', 'Tpai'),
+    ('Temperature Air Preheater I/L Primary', 'Tpai'),
+    ('Temperature Air Preheater IN PA', 'Tpai'),
+    ('Temperature Air Preheater IN Primary Air', 'Tpai'),
+    ('Temperature Air Preheater IN Prim Air', 'Tpai'),
+    ('Temperature Air Preheater IN Primary', 'Tpai'),
+    ('Temperature Air Pre Heater Inlet PA', 'Tpai'),
+    ('Temperature Air Pre Heater Inlet Primary Air', 'Tpai'),
+    ('Temperature Air Pre Heater Inlet Prim Air', 'Tpai'),
+    ('Temperature Air Pre Heater Inlet Primary', 'Tpai'),
+    ('Temperature Air Pre Heater In PA', 'Tpai'),
+    ('Temperature Air Pre Heater In Primary Air', 'Tpai'),
+    ('Temperature Air Pre Heater In Prim Air', 'Tpai'),
+    ('Temperature Air Pre Heater In Primary', 'Tpai'),
+    ('Temperature Air Pre Heater I/L PA', 'Tpai'),
+    ('Temperature Air Pre Heater I/L Primary Air', 'Tpai'),
+    ('Temperature Air Pre Heater I/L Prim Air', 'Tpai'),
+    ('Temperature Air Pre Heater I/L Primary', 'Tpai'),
+    ('Temperature Air Pre Heater IN PA', 'Tpai'),
+    ('Temperature Air Pre Heater IN Primary Air', 'Tpai'),
+    ('Temperature Air Pre Heater IN Prim Air', 'Tpai'),
+    ('Temperature Air Pre Heater IN Primary', 'Tpai'),
+    ('Temperature A/H Inlet PA', 'Tpai'),
+    ('Temperature A/H Inlet Primary Air', 'Tpai'),
+    ('Temperature A/H Inlet Prim Air', 'Tpai'),
+    ('Temperature A/H Inlet Primary', 'Tpai'),
+    ('Temperature A/H In PA', 'Tpai'),
+    ('Temperature A/H In Primary Air', 'Tpai'),
+    ('Temperature A/H In Prim Air', 'Tpai'),
+    ('Temperature A/H In Primary', 'Tpai'),
+    ('Temperature A/H I/L PA', 'Tpai'),
+    ('Temperature A/H I/L Primary Air', 'Tpai'),
+    ('Temperature A/H I/L Prim Air', 'Tpai'),
+    ('Temperature A/H I/L Primary', 'Tpai'),
+    ('Temperature A/H IN PA', 'Tpai'),
+    ('Temperature A/H IN Primary Air', 'Tpai'),
+    ('Temperature A/H IN Prim Air', 'Tpai'),
+    ('Temperature A/H IN Primary', 'Tpai'),
+    ('Temperature AH Inlet PA', 'Tpai'),
+    ('Temperature AH Inlet Primary Air', 'Tpai'),
+    ('Temperature AH Inlet Prim Air', 'Tpai'),
+    ('Temperature AH Inlet Primary', 'Tpai'),
+    ('Temperature AH In PA', 'Tpai'),
+    ('Temperature AH In Primary Air', 'Tpai'),
+    ('Temperature AH In Prim Air', 'Tpai'),
+    ('Temperature AH In Primary', 'Tpai'),
+    ('Temperature AH I/L PA', 'Tpai'),
+    ('Temperature AH I/L Primary Air', 'Tpai'),
+    ('Temperature AH I/L Prim Air', 'Tpai'),
+    ('Temperature AH I/L Primary', 'Tpai'),
+    ('Temperature AH IN PA', 'Tpai'),
+    ('Temperature AH IN Primary Air', 'Tpai'),
+    ('Temperature AH IN Prim Air', 'Tpai'),
+    ('Temperature AH IN Primary', 'Tpai'),
+    ('Temperature GAH Inlet PA', 'Tpai'),
+    ('Temperature GAH Inlet Primary Air', 'Tpai'),
+    ('Temperature GAH Inlet Prim Air', 'Tpai'),
+    ('Temperature GAH Inlet Primary', 'Tpai'),
+    ('Temperature GAH In PA', 'Tpai'),
+    ('Temperature GAH In Primary Air', 'Tpai'),
+    ('Temperature GAH In Prim Air', 'Tpai'),
+    ('Temperature GAH In Primary', 'Tpai'),
+    ('Temperature GAH I/L PA', 'Tpai'),
+    ('Temperature GAH I/L Primary Air', 'Tpai'),
+    ('Temperature GAH I/L Prim Air', 'Tpai'),
+    ('Temperature GAH I/L Primary', 'Tpai'),
+    ('Temperature GAH IN PA', 'Tpai'),
+    ('Temperature GAH IN Primary Air', 'Tpai'),
+    ('Temperature GAH IN Prim Air', 'Tpai'),
+    ('Temperature GAH IN Primary', 'Tpai'),
+    ('TMP APH Inlet PA', 'Tpai'),
+    ('TMP APH Inlet Primary Air', 'Tpai'),
+    ('TMP APH Inlet Prim Air', 'Tpai'),
+    ('TMP APH Inlet Primary', 'Tpai'),
+    ('TMP APH In PA', 'Tpai'),
+    ('TMP APH In Primary Air', 'Tpai'),
+    ('TMP APH In Prim Air', 'Tpai'),
+    ('TMP APH In Primary', 'Tpai'),
+    ('TMP APH I/L PA', 'Tpai'),
+    ('TMP APH I/L Primary Air', 'Tpai'),
+    ('TMP APH I/L Prim Air', 'Tpai'),
+    ('TMP APH I/L Primary', 'Tpai'),
+    ('TMP APH IN PA', 'Tpai'),
+    ('TMP APH IN Primary Air', 'Tpai'),
+    ('TMP APH IN Prim Air', 'Tpai'),
+    ('TMP APH IN Primary', 'Tpai'),
+    ('TMP Air Preheater Inlet PA', 'Tpai'),
+    ('TMP Air Preheater Inlet Primary Air', 'Tpai'),
+    ('TMP Air Preheater Inlet Prim Air', 'Tpai'),
+    ('TMP Air Preheater Inlet Primary', 'Tpai'),
+    ('TMP Air Preheater In PA', 'Tpai'),
+    ('TMP Air Preheater In Primary Air', 'Tpai'),
+    ('TMP Air Preheater In Prim Air', 'Tpai'),
+    ('TMP Air Preheater In Primary', 'Tpai'),
+    ('TMP Air Preheater I/L PA', 'Tpai'),
+    ('TMP Air Preheater I/L Primary Air', 'Tpai'),
+    ('TMP Air Preheater I/L Prim Air', 'Tpai'),
+    ('TMP Air Preheater I/L Primary', 'Tpai'),
+    ('TMP Air Preheater IN PA', 'Tpai'),
+    ('TMP Air Preheater IN Primary Air', 'Tpai'),
+    ('TMP Air Preheater IN Prim Air', 'Tpai'),
+    ('TMP Air Preheater IN Primary', 'Tpai'),
+    ('TMP Air Pre Heater Inlet PA', 'Tpai'),
+    ('TMP Air Pre Heater Inlet Primary Air', 'Tpai'),
+    ('TMP Air Pre Heater Inlet Prim Air', 'Tpai'),
+    ('TMP Air Pre Heater Inlet Primary', 'Tpai'),
+    ('TMP Air Pre Heater In PA', 'Tpai'),
+    ('TMP Air Pre Heater In Primary Air', 'Tpai'),
+    ('TMP Air Pre Heater In Prim Air', 'Tpai'),
+    ('TMP Air Pre Heater In Primary', 'Tpai'),
+    ('TMP Air Pre Heater I/L PA', 'Tpai'),
+    ('TMP Air Pre Heater I/L Primary Air', 'Tpai'),
+    ('TMP Air Pre Heater I/L Prim Air', 'Tpai'),
+    ('TMP Air Pre Heater I/L Primary', 'Tpai'),
+    ('TMP Air Pre Heater IN PA', 'Tpai'),
+    ('TMP Air Pre Heater IN Primary Air', 'Tpai'),
+    ('TMP Air Pre Heater IN Prim Air', 'Tpai'),
+    ('TMP Air Pre Heater IN Primary', 'Tpai'),
+    ('TMP A/H Inlet PA', 'Tpai'),
+    ('TMP A/H Inlet Primary Air', 'Tpai'),
+    ('TMP A/H Inlet Prim Air', 'Tpai'),
+    ('TMP A/H Inlet Primary', 'Tpai'),
+    ('TMP A/H In PA', 'Tpai'),
+    ('TMP A/H In Primary Air', 'Tpai'),
+    ('TMP A/H In Prim Air', 'Tpai'),
+    ('TMP A/H In Primary', 'Tpai'),
+    ('TMP A/H I/L PA', 'Tpai'),
+    ('TMP A/H I/L Primary Air', 'Tpai'),
+    ('TMP A/H I/L Prim Air', 'Tpai'),
+    ('TMP A/H I/L Primary', 'Tpai'),
+    ('TMP A/H IN PA', 'Tpai'),
+    ('TMP A/H IN Primary Air', 'Tpai'),
+    ('TMP A/H IN Prim Air', 'Tpai'),
+    ('TMP A/H IN Primary', 'Tpai'),
+    ('TMP AH Inlet PA', 'Tpai'),
+    ('TMP AH Inlet Primary Air', 'Tpai'),
+    ('TMP AH Inlet Prim Air', 'Tpai'),
+    ('TMP AH Inlet Primary', 'Tpai'),
+    ('TMP AH In PA', 'Tpai'),
+    ('TMP AH In Primary Air', 'Tpai'),
+    ('TMP AH In Prim Air', 'Tpai'),
+    ('TMP AH In Primary', 'Tpai'),
+    ('TMP AH I/L PA', 'Tpai'),
+    ('TMP AH I/L Primary Air', 'Tpai'),
+    ('TMP AH I/L Prim Air', 'Tpai'),
+    ('TMP AH I/L Primary', 'Tpai'),
+    ('TMP AH IN PA', 'Tpai'),
+    ('TMP AH IN Primary Air', 'Tpai'),
+    ('TMP AH IN Prim Air', 'Tpai'),
+    ('TMP AH IN Primary', 'Tpai'),
+    ('TMP GAH Inlet PA', 'Tpai'),
+    ('TMP GAH Inlet Primary Air', 'Tpai'),
+    ('TMP GAH Inlet Prim Air', 'Tpai'),
+    ('TMP GAH Inlet Primary', 'Tpai'),
+    ('TMP GAH In PA', 'Tpai'),
+    ('TMP GAH In Primary Air', 'Tpai'),
+    ('TMP GAH In Prim Air', 'Tpai'),
+    ('TMP GAH In Primary', 'Tpai'),
+    ('TMP GAH I/L PA', 'Tpai'),
+    ('TMP GAH I/L Primary Air', 'Tpai'),
+    ('TMP GAH I/L Prim Air', 'Tpai'),
+    ('TMP GAH I/L Primary', 'Tpai'),
+    ('TMP GAH IN PA', 'Tpai'),
+    ('TMP GAH IN Primary Air', 'Tpai'),
+    ('TMP GAH IN Prim Air', 'Tpai'),
+    ('TMP GAH IN Primary', 'Tpai'),
+    ('Temp APH Outlet PA', 'Tpao'),
+    ('Temp APH Outlet Primary Air', 'Tpao'),
+    ('Temp APH Outlet Prim Air', 'Tpao'),
+    ('Temp APH Outlet Primary', 'Tpao'),
+    ('Temp APH Out PA', 'Tpao'),
+    ('Temp APH Out Primary Air', 'Tpao'),
+    ('Temp APH Out Prim Air', 'Tpao'),
+    ('Temp APH Out Primary', 'Tpao'),
+    ('Temp APH O/L PA', 'Tpao'),
+    ('Temp APH O/L Primary Air', 'Tpao'),
+    ('Temp APH O/L Prim Air', 'Tpao'),
+    ('Temp APH O/L Primary', 'Tpao'),
+    ('Temp APH OUT PA', 'Tpao'),
+    ('Temp APH OUT Primary Air', 'Tpao'),
+    ('Temp APH OUT Prim Air', 'Tpao'),
+    ('Temp APH OUT Primary', 'Tpao'),
+    ('Temp Air Preheater Outlet PA', 'Tpao'),
+    ('Temp Air Preheater Outlet Primary Air', 'Tpao'),
+    ('Temp Air Preheater Outlet Prim Air', 'Tpao'),
+    ('Temp Air Preheater Outlet Primary', 'Tpao'),
+    ('Temp Air Preheater Out PA', 'Tpao'),
+    ('Temp Air Preheater Out Primary Air', 'Tpao'),
+    ('Temp Air Preheater Out Prim Air', 'Tpao'),
+    ('Temp Air Preheater Out Primary', 'Tpao'),
+    ('Temp Air Preheater O/L PA', 'Tpao'),
+    ('Temp Air Preheater O/L Primary Air', 'Tpao'),
+    ('Temp Air Preheater O/L Prim Air', 'Tpao'),
+    ('Temp Air Preheater O/L Primary', 'Tpao'),
+    ('Temp Air Preheater OUT PA', 'Tpao'),
+    ('Temp Air Preheater OUT Primary Air', 'Tpao'),
+    ('Temp Air Preheater OUT Prim Air', 'Tpao'),
+    ('Temp Air Preheater OUT Primary', 'Tpao'),
+    ('Temp Air Pre Heater Outlet PA', 'Tpao'),
+    ('Temp Air Pre Heater Outlet Primary Air', 'Tpao'),
+    ('Temp Air Pre Heater Outlet Prim Air', 'Tpao'),
+    ('Temp Air Pre Heater Outlet Primary', 'Tpao'),
+    ('Temp Air Pre Heater Out PA', 'Tpao'),
+    ('Temp Air Pre Heater Out Primary Air', 'Tpao'),
+    ('Temp Air Pre Heater Out Prim Air', 'Tpao'),
+    ('Temp Air Pre Heater Out Primary', 'Tpao'),
+    ('Temp Air Pre Heater O/L PA', 'Tpao'),
+    ('Temp Air Pre Heater O/L Primary Air', 'Tpao'),
+    ('Temp Air Pre Heater O/L Prim Air', 'Tpao'),
+    ('Temp Air Pre Heater O/L Primary', 'Tpao'),
+    ('Temp Air Pre Heater OUT PA', 'Tpao'),
+    ('Temp Air Pre Heater OUT Primary Air', 'Tpao'),
+    ('Temp Air Pre Heater OUT Prim Air', 'Tpao'),
+    ('Temp Air Pre Heater OUT Primary', 'Tpao'),
+    ('Temp A/H Outlet PA', 'Tpao'),
+    ('Temp A/H Outlet Primary Air', 'Tpao'),
+    ('Temp A/H Outlet Prim Air', 'Tpao'),
+    ('Temp A/H Outlet Primary', 'Tpao'),
+    ('Temp A/H Out PA', 'Tpao'),
+    ('Temp A/H Out Primary Air', 'Tpao'),
+    ('Temp A/H Out Prim Air', 'Tpao'),
+    ('Temp A/H Out Primary', 'Tpao'),
+    ('Temp A/H O/L PA', 'Tpao'),
+    ('Temp A/H O/L Primary Air', 'Tpao'),
+    ('Temp A/H O/L Prim Air', 'Tpao'),
+    ('Temp A/H O/L Primary', 'Tpao'),
+    ('Temp A/H OUT PA', 'Tpao'),
+    ('Temp A/H OUT Primary Air', 'Tpao'),
+    ('Temp A/H OUT Prim Air', 'Tpao'),
+    ('Temp A/H OUT Primary', 'Tpao'),
+    ('Temp AH Outlet PA', 'Tpao'),
+    ('Temp AH Outlet Primary Air', 'Tpao'),
+    ('Temp AH Outlet Prim Air', 'Tpao'),
+    ('Temp AH Outlet Primary', 'Tpao'),
+    ('Temp AH Out PA', 'Tpao'),
+    ('Temp AH Out Primary Air', 'Tpao'),
+    ('Temp AH Out Prim Air', 'Tpao'),
+    ('Temp AH Out Primary', 'Tpao'),
+    ('Temp AH O/L PA', 'Tpao'),
+    ('Temp AH O/L Primary Air', 'Tpao'),
+    ('Temp AH O/L Prim Air', 'Tpao'),
+    ('Temp AH O/L Primary', 'Tpao'),
+    ('Temp AH OUT PA', 'Tpao'),
+    ('Temp AH OUT Primary Air', 'Tpao'),
+    ('Temp AH OUT Prim Air', 'Tpao'),
+    ('Temp AH OUT Primary', 'Tpao'),
+    ('Temp GAH Outlet PA', 'Tpao'),
+    ('Temp GAH Outlet Primary Air', 'Tpao'),
+    ('Temp GAH Outlet Prim Air', 'Tpao'),
+    ('Temp GAH Outlet Primary', 'Tpao'),
+    ('Temp GAH Out PA', 'Tpao'),
+    ('Temp GAH Out Primary Air', 'Tpao'),
+    ('Temp GAH Out Prim Air', 'Tpao'),
+    ('Temp GAH Out Primary', 'Tpao'),
+    ('Temp GAH O/L PA', 'Tpao'),
+    ('Temp GAH O/L Primary Air', 'Tpao'),
+    ('Temp GAH O/L Prim Air', 'Tpao'),
+    ('Temp GAH O/L Primary', 'Tpao'),
+    ('Temp GAH OUT PA', 'Tpao'),
+    ('Temp GAH OUT Primary Air', 'Tpao'),
+    ('Temp GAH OUT Prim Air', 'Tpao'),
+    ('Temp GAH OUT Primary', 'Tpao'),
+    ('Temperature APH Outlet PA', 'Tpao'),
+    ('Temperature APH Outlet Primary Air', 'Tpao'),
+    ('Temperature APH Outlet Prim Air', 'Tpao'),
+    ('Temperature APH Outlet Primary', 'Tpao'),
+    ('Temperature APH Out PA', 'Tpao'),
+    ('Temperature APH Out Primary Air', 'Tpao'),
+    ('Temperature APH Out Prim Air', 'Tpao'),
+    ('Temperature APH Out Primary', 'Tpao'),
+    ('Temperature APH O/L PA', 'Tpao'),
+    ('Temperature APH O/L Primary Air', 'Tpao'),
+    ('Temperature APH O/L Prim Air', 'Tpao'),
+    ('Temperature APH O/L Primary', 'Tpao'),
+    ('Temperature APH OUT PA', 'Tpao'),
+    ('Temperature APH OUT Primary Air', 'Tpao'),
+    ('Temperature APH OUT Prim Air', 'Tpao'),
+    ('Temperature APH OUT Primary', 'Tpao'),
+    ('Temperature Air Preheater Outlet PA', 'Tpao'),
+    ('Temperature Air Preheater Outlet Primary Air', 'Tpao'),
+    ('Temperature Air Preheater Outlet Prim Air', 'Tpao'),
+    ('Temperature Air Preheater Outlet Primary', 'Tpao'),
+    ('Temperature Air Preheater Out PA', 'Tpao'),
+    ('Temperature Air Preheater Out Primary Air', 'Tpao'),
+    ('Temperature Air Preheater Out Prim Air', 'Tpao'),
+    ('Temperature Air Preheater Out Primary', 'Tpao'),
+    ('Temperature Air Preheater O/L PA', 'Tpao'),
+    ('Temperature Air Preheater O/L Primary Air', 'Tpao'),
+    ('Temperature Air Preheater O/L Prim Air', 'Tpao'),
+    ('Temperature Air Preheater O/L Primary', 'Tpao'),
+    ('Temperature Air Preheater OUT PA', 'Tpao'),
+    ('Temperature Air Preheater OUT Primary Air', 'Tpao'),
+    ('Temperature Air Preheater OUT Prim Air', 'Tpao'),
+    ('Temperature Air Preheater OUT Primary', 'Tpao'),
+    ('Temperature Air Pre Heater Outlet PA', 'Tpao'),
+    ('Temperature Air Pre Heater Outlet Primary Air', 'Tpao'),
+    ('Temperature Air Pre Heater Outlet Prim Air', 'Tpao'),
+    ('Temperature Air Pre Heater Outlet Primary', 'Tpao'),
+    ('Temperature Air Pre Heater Out PA', 'Tpao'),
+    ('Temperature Air Pre Heater Out Primary Air', 'Tpao'),
+    ('Temperature Air Pre Heater Out Prim Air', 'Tpao'),
+    ('Temperature Air Pre Heater Out Primary', 'Tpao'),
+    ('Temperature Air Pre Heater O/L PA', 'Tpao'),
+    ('Temperature Air Pre Heater O/L Primary Air', 'Tpao'),
+    ('Temperature Air Pre Heater O/L Prim Air', 'Tpao'),
+    ('Temperature Air Pre Heater O/L Primary', 'Tpao'),
+    ('Temperature Air Pre Heater OUT PA', 'Tpao'),
+    ('Temperature Air Pre Heater OUT Primary Air', 'Tpao'),
+    ('Temperature Air Pre Heater OUT Prim Air', 'Tpao'),
+    ('Temperature Air Pre Heater OUT Primary', 'Tpao'),
+    ('Temperature A/H Outlet PA', 'Tpao'),
+    ('Temperature A/H Outlet Primary Air', 'Tpao'),
+    ('Temperature A/H Outlet Prim Air', 'Tpao'),
+    ('Temperature A/H Outlet Primary', 'Tpao'),
+    ('Temperature A/H Out PA', 'Tpao'),
+    ('Temperature A/H Out Primary Air', 'Tpao'),
+    ('Temperature A/H Out Prim Air', 'Tpao'),
+    ('Temperature A/H Out Primary', 'Tpao'),
+    ('Temperature A/H O/L PA', 'Tpao'),
+    ('Temperature A/H O/L Primary Air', 'Tpao'),
+    ('Temperature A/H O/L Prim Air', 'Tpao'),
+    ('Temperature A/H O/L Primary', 'Tpao'),
+    ('Temperature A/H OUT PA', 'Tpao'),
+    ('Temperature A/H OUT Primary Air', 'Tpao'),
+    ('Temperature A/H OUT Prim Air', 'Tpao'),
+    ('Temperature A/H OUT Primary', 'Tpao'),
+    ('Temperature AH Outlet PA', 'Tpao'),
+    ('Temperature AH Outlet Primary Air', 'Tpao'),
+    ('Temperature AH Outlet Prim Air', 'Tpao'),
+    ('Temperature AH Outlet Primary', 'Tpao'),
+    ('Temperature AH Out PA', 'Tpao'),
+    ('Temperature AH Out Primary Air', 'Tpao'),
+    ('Temperature AH Out Prim Air', 'Tpao'),
+    ('Temperature AH Out Primary', 'Tpao'),
+    ('Temperature AH O/L PA', 'Tpao'),
+    ('Temperature AH O/L Primary Air', 'Tpao'),
+    ('Temperature AH O/L Prim Air', 'Tpao'),
+    ('Temperature AH O/L Primary', 'Tpao'),
+    ('Temperature AH OUT PA', 'Tpao'),
+    ('Temperature AH OUT Primary Air', 'Tpao'),
+    ('Temperature AH OUT Prim Air', 'Tpao'),
+    ('Temperature AH OUT Primary', 'Tpao'),
+    ('Temperature GAH Outlet PA', 'Tpao'),
+    ('Temperature GAH Outlet Primary Air', 'Tpao'),
+    ('Temperature GAH Outlet Prim Air', 'Tpao'),
+    ('Temperature GAH Outlet Primary', 'Tpao'),
+    ('Temperature GAH Out PA', 'Tpao'),
+    ('Temperature GAH Out Primary Air', 'Tpao'),
+    ('Temperature GAH Out Prim Air', 'Tpao'),
+    ('Temperature GAH Out Primary', 'Tpao'),
+    ('Temperature GAH O/L PA', 'Tpao'),
+    ('Temperature GAH O/L Primary Air', 'Tpao'),
+    ('Temperature GAH O/L Prim Air', 'Tpao'),
+    ('Temperature GAH O/L Primary', 'Tpao'),
+    ('Temperature GAH OUT PA', 'Tpao'),
+    ('Temperature GAH OUT Primary Air', 'Tpao'),
+    ('Temperature GAH OUT Prim Air', 'Tpao'),
+    ('Temperature GAH OUT Primary', 'Tpao'),
+    ('TMP APH Outlet PA', 'Tpao'),
+    ('TMP APH Outlet Primary Air', 'Tpao'),
+    ('TMP APH Outlet Prim Air', 'Tpao'),
+    ('TMP APH Outlet Primary', 'Tpao'),
+    ('TMP APH Out PA', 'Tpao'),
+    ('TMP APH Out Primary Air', 'Tpao'),
+    ('TMP APH Out Prim Air', 'Tpao'),
+    ('TMP APH Out Primary', 'Tpao'),
+    ('TMP APH O/L PA', 'Tpao'),
+    ('TMP APH O/L Primary Air', 'Tpao'),
+    ('TMP APH O/L Prim Air', 'Tpao'),
+    ('TMP APH O/L Primary', 'Tpao'),
+    ('TMP APH OUT PA', 'Tpao'),
+    ('TMP APH OUT Primary Air', 'Tpao'),
+    ('TMP APH OUT Prim Air', 'Tpao'),
+    ('TMP APH OUT Primary', 'Tpao'),
+    ('TMP Air Preheater Outlet PA', 'Tpao'),
+    ('TMP Air Preheater Outlet Primary Air', 'Tpao'),
+    ('TMP Air Preheater Outlet Prim Air', 'Tpao'),
+    ('TMP Air Preheater Outlet Primary', 'Tpao'),
+    ('TMP Air Preheater Out PA', 'Tpao'),
+    ('TMP Air Preheater Out Primary Air', 'Tpao'),
+    ('TMP Air Preheater Out Prim Air', 'Tpao'),
+    ('TMP Air Preheater Out Primary', 'Tpao'),
+    ('TMP Air Preheater O/L PA', 'Tpao'),
+    ('TMP Air Preheater O/L Primary Air', 'Tpao'),
+    ('TMP Air Preheater O/L Prim Air', 'Tpao'),
+    ('TMP Air Preheater O/L Primary', 'Tpao'),
+    ('TMP Air Preheater OUT PA', 'Tpao'),
+    ('TMP Air Preheater OUT Primary Air', 'Tpao'),
+    ('TMP Air Preheater OUT Prim Air', 'Tpao'),
+    ('TMP Air Preheater OUT Primary', 'Tpao'),
+    ('TMP Air Pre Heater Outlet PA', 'Tpao'),
+    ('TMP Air Pre Heater Outlet Primary Air', 'Tpao'),
+    ('TMP Air Pre Heater Outlet Prim Air', 'Tpao'),
+    ('TMP Air Pre Heater Outlet Primary', 'Tpao'),
+    ('TMP Air Pre Heater Out PA', 'Tpao'),
+    ('TMP Air Pre Heater Out Primary Air', 'Tpao'),
+    ('TMP Air Pre Heater Out Prim Air', 'Tpao'),
+    ('TMP Air Pre Heater Out Primary', 'Tpao'),
+    ('TMP Air Pre Heater O/L PA', 'Tpao'),
+    ('TMP Air Pre Heater O/L Primary Air', 'Tpao'),
+    ('TMP Air Pre Heater O/L Prim Air', 'Tpao'),
+    ('TMP Air Pre Heater O/L Primary', 'Tpao'),
+    ('TMP Air Pre Heater OUT PA', 'Tpao'),
+    ('TMP Air Pre Heater OUT Primary Air', 'Tpao'),
+    ('TMP Air Pre Heater OUT Prim Air', 'Tpao'),
+    ('TMP Air Pre Heater OUT Primary', 'Tpao'),
+    ('TMP A/H Outlet PA', 'Tpao'),
+    ('TMP A/H Outlet Primary Air', 'Tpao'),
+    ('TMP A/H Outlet Prim Air', 'Tpao'),
+    ('TMP A/H Outlet Primary', 'Tpao'),
+    ('TMP A/H Out PA', 'Tpao'),
+    ('TMP A/H Out Primary Air', 'Tpao'),
+    ('TMP A/H Out Prim Air', 'Tpao'),
+    ('TMP A/H Out Primary', 'Tpao'),
+    ('TMP A/H O/L PA', 'Tpao'),
+    ('TMP A/H O/L Primary Air', 'Tpao'),
+    ('TMP A/H O/L Prim Air', 'Tpao'),
+    ('TMP A/H O/L Primary', 'Tpao'),
+    ('TMP A/H OUT PA', 'Tpao'),
+    ('TMP A/H OUT Primary Air', 'Tpao'),
+    ('TMP A/H OUT Prim Air', 'Tpao'),
+    ('TMP A/H OUT Primary', 'Tpao'),
+    ('TMP AH Outlet PA', 'Tpao'),
+    ('TMP AH Outlet Primary Air', 'Tpao'),
+    ('TMP AH Outlet Prim Air', 'Tpao'),
+    ('TMP AH Outlet Primary', 'Tpao'),
+    ('TMP AH Out PA', 'Tpao'),
+    ('TMP AH Out Primary Air', 'Tpao'),
+    ('TMP AH Out Prim Air', 'Tpao'),
+    ('TMP AH Out Primary', 'Tpao'),
+    ('TMP AH O/L PA', 'Tpao'),
+    ('TMP AH O/L Primary Air', 'Tpao'),
+    ('TMP AH O/L Prim Air', 'Tpao'),
+    ('TMP AH O/L Primary', 'Tpao'),
+    ('TMP AH OUT PA', 'Tpao'),
+    ('TMP AH OUT Primary Air', 'Tpao'),
+    ('TMP AH OUT Prim Air', 'Tpao'),
+    ('TMP AH OUT Primary', 'Tpao'),
+    ('TMP GAH Outlet PA', 'Tpao'),
+    ('TMP GAH Outlet Primary Air', 'Tpao'),
+    ('TMP GAH Outlet Prim Air', 'Tpao'),
+    ('TMP GAH Outlet Primary', 'Tpao'),
+    ('TMP GAH Out PA', 'Tpao'),
+    ('TMP GAH Out Primary Air', 'Tpao'),
+    ('TMP GAH Out Prim Air', 'Tpao'),
+    ('TMP GAH Out Primary', 'Tpao'),
+    ('TMP GAH O/L PA', 'Tpao'),
+    ('TMP GAH O/L Primary Air', 'Tpao'),
+    ('TMP GAH O/L Prim Air', 'Tpao'),
+    ('TMP GAH O/L Primary', 'Tpao'),
+    ('TMP GAH OUT PA', 'Tpao'),
+    ('TMP GAH OUT Primary Air', 'Tpao'),
+    ('TMP GAH OUT Prim Air', 'Tpao'),
+    ('TMP GAH OUT Primary', 'Tpao'),
+    ('Temp APH Inlet SA', 'Tsai'),
+    ('Temp APH Inlet Secondary Air', 'Tsai'),
+    ('Temp APH Inlet Sec Air', 'Tsai'),
+    ('Temp APH Inlet Secondry Air', 'Tsai'),
+    ('Temp APH In SA', 'Tsai'),
+    ('Temp APH In Secondary Air', 'Tsai'),
+    ('Temp APH In Sec Air', 'Tsai'),
+    ('Temp APH In Secondry Air', 'Tsai'),
+    ('Temp APH I/L SA', 'Tsai'),
+    ('Temp APH I/L Secondary Air', 'Tsai'),
+    ('Temp APH I/L Sec Air', 'Tsai'),
+    ('Temp APH I/L Secondry Air', 'Tsai'),
+    ('Temp APH IN SA', 'Tsai'),
+    ('Temp APH IN Secondary Air', 'Tsai'),
+    ('Temp APH IN Sec Air', 'Tsai'),
+    ('Temp APH IN Secondry Air', 'Tsai'),
+    ('Temp Air Preheater Inlet SA', 'Tsai'),
+    ('Temp Air Preheater Inlet Secondary Air', 'Tsai'),
+    ('Temp Air Preheater Inlet Sec Air', 'Tsai'),
+    ('Temp Air Preheater Inlet Secondry Air', 'Tsai'),
+    ('Temp Air Preheater In SA', 'Tsai'),
+    ('Temp Air Preheater In Secondary Air', 'Tsai'),
+    ('Temp Air Preheater In Sec Air', 'Tsai'),
+    ('Temp Air Preheater In Secondry Air', 'Tsai'),
+    ('Temp Air Preheater I/L SA', 'Tsai'),
+    ('Temp Air Preheater I/L Secondary Air', 'Tsai'),
+    ('Temp Air Preheater I/L Sec Air', 'Tsai'),
+    ('Temp Air Preheater I/L Secondry Air', 'Tsai'),
+    ('Temp Air Preheater IN SA', 'Tsai'),
+    ('Temp Air Preheater IN Secondary Air', 'Tsai'),
+    ('Temp Air Preheater IN Sec Air', 'Tsai'),
+    ('Temp Air Preheater IN Secondry Air', 'Tsai'),
+    ('Temp Air Pre Heater Inlet SA', 'Tsai'),
+    ('Temp Air Pre Heater Inlet Secondary Air', 'Tsai'),
+    ('Temp Air Pre Heater Inlet Sec Air', 'Tsai'),
+    ('Temp Air Pre Heater Inlet Secondry Air', 'Tsai'),
+    ('Temp Air Pre Heater In SA', 'Tsai'),
+    ('Temp Air Pre Heater In Secondary Air', 'Tsai'),
+    ('Temp Air Pre Heater In Sec Air', 'Tsai'),
+    ('Temp Air Pre Heater In Secondry Air', 'Tsai'),
+    ('Temp Air Pre Heater I/L SA', 'Tsai'),
+    ('Temp Air Pre Heater I/L Secondary Air', 'Tsai'),
+    ('Temp Air Pre Heater I/L Sec Air', 'Tsai'),
+    ('Temp Air Pre Heater I/L Secondry Air', 'Tsai'),
+    ('Temp Air Pre Heater IN SA', 'Tsai'),
+    ('Temp Air Pre Heater IN Secondary Air', 'Tsai'),
+    ('Temp Air Pre Heater IN Sec Air', 'Tsai'),
+    ('Temp Air Pre Heater IN Secondry Air', 'Tsai'),
+    ('Temp A/H Inlet SA', 'Tsai'),
+    ('Temp A/H Inlet Secondary Air', 'Tsai'),
+    ('Temp A/H Inlet Sec Air', 'Tsai'),
+    ('Temp A/H Inlet Secondry Air', 'Tsai'),
+    ('Temp A/H In SA', 'Tsai'),
+    ('Temp A/H In Secondary Air', 'Tsai'),
+    ('Temp A/H In Sec Air', 'Tsai'),
+    ('Temp A/H In Secondry Air', 'Tsai'),
+    ('Temp A/H I/L SA', 'Tsai'),
+    ('Temp A/H I/L Secondary Air', 'Tsai'),
+    ('Temp A/H I/L Sec Air', 'Tsai'),
+    ('Temp A/H I/L Secondry Air', 'Tsai'),
+    ('Temp A/H IN SA', 'Tsai'),
+    ('Temp A/H IN Secondary Air', 'Tsai'),
+    ('Temp A/H IN Sec Air', 'Tsai'),
+    ('Temp A/H IN Secondry Air', 'Tsai'),
+    ('Temp AH Inlet SA', 'Tsai'),
+    ('Temp AH Inlet Secondary Air', 'Tsai'),
+    ('Temp AH Inlet Sec Air', 'Tsai'),
+    ('Temp AH Inlet Secondry Air', 'Tsai'),
+    ('Temp AH In SA', 'Tsai'),
+    ('Temp AH In Secondary Air', 'Tsai'),
+    ('Temp AH In Sec Air', 'Tsai'),
+    ('Temp AH In Secondry Air', 'Tsai'),
+    ('Temp AH I/L SA', 'Tsai'),
+    ('Temp AH I/L Secondary Air', 'Tsai'),
+    ('Temp AH I/L Sec Air', 'Tsai'),
+    ('Temp AH I/L Secondry Air', 'Tsai'),
+    ('Temp AH IN SA', 'Tsai'),
+    ('Temp AH IN Secondary Air', 'Tsai'),
+    ('Temp AH IN Sec Air', 'Tsai'),
+    ('Temp AH IN Secondry Air', 'Tsai'),
+    ('Temp GAH Inlet SA', 'Tsai'),
+    ('Temp GAH Inlet Secondary Air', 'Tsai'),
+    ('Temp GAH Inlet Sec Air', 'Tsai'),
+    ('Temp GAH Inlet Secondry Air', 'Tsai'),
+    ('Temp GAH In SA', 'Tsai'),
+    ('Temp GAH In Secondary Air', 'Tsai'),
+    ('Temp GAH In Sec Air', 'Tsai'),
+    ('Temp GAH In Secondry Air', 'Tsai'),
+    ('Temp GAH I/L SA', 'Tsai'),
+    ('Temp GAH I/L Secondary Air', 'Tsai'),
+    ('Temp GAH I/L Sec Air', 'Tsai'),
+    ('Temp GAH I/L Secondry Air', 'Tsai'),
+    ('Temp GAH IN SA', 'Tsai'),
+    ('Temp GAH IN Secondary Air', 'Tsai'),
+    ('Temp GAH IN Sec Air', 'Tsai'),
+    ('Temp GAH IN Secondry Air', 'Tsai'),
+    ('Temperature APH Inlet SA', 'Tsai'),
+    ('Temperature APH Inlet Secondary Air', 'Tsai'),
+    ('Temperature APH Inlet Sec Air', 'Tsai'),
+    ('Temperature APH Inlet Secondry Air', 'Tsai'),
+    ('Temperature APH In SA', 'Tsai'),
+    ('Temperature APH In Secondary Air', 'Tsai'),
+    ('Temperature APH In Sec Air', 'Tsai'),
+    ('Temperature APH In Secondry Air', 'Tsai'),
+    ('Temperature APH I/L SA', 'Tsai'),
+    ('Temperature APH I/L Secondary Air', 'Tsai'),
+    ('Temperature APH I/L Sec Air', 'Tsai'),
+    ('Temperature APH I/L Secondry Air', 'Tsai'),
+    ('Temperature APH IN SA', 'Tsai'),
+    ('Temperature APH IN Secondary Air', 'Tsai'),
+    ('Temperature APH IN Sec Air', 'Tsai'),
+    ('Temperature APH IN Secondry Air', 'Tsai'),
+    ('Temperature Air Preheater Inlet SA', 'Tsai'),
+    ('Temperature Air Preheater Inlet Secondary Air', 'Tsai'),
+    ('Temperature Air Preheater Inlet Sec Air', 'Tsai'),
+    ('Temperature Air Preheater Inlet Secondry Air', 'Tsai'),
+    ('Temperature Air Preheater In SA', 'Tsai'),
+    ('Temperature Air Preheater In Secondary Air', 'Tsai'),
+    ('Temperature Air Preheater In Sec Air', 'Tsai'),
+    ('Temperature Air Preheater In Secondry Air', 'Tsai'),
+    ('Temperature Air Preheater I/L SA', 'Tsai'),
+    ('Temperature Air Preheater I/L Secondary Air', 'Tsai'),
+    ('Temperature Air Preheater I/L Sec Air', 'Tsai'),
+    ('Temperature Air Preheater I/L Secondry Air', 'Tsai'),
+    ('Temperature Air Preheater IN SA', 'Tsai'),
+    ('Temperature Air Preheater IN Secondary Air', 'Tsai'),
+    ('Temperature Air Preheater IN Sec Air', 'Tsai'),
+    ('Temperature Air Preheater IN Secondry Air', 'Tsai'),
+    ('Temperature Air Pre Heater Inlet SA', 'Tsai'),
+    ('Temperature Air Pre Heater Inlet Secondary Air', 'Tsai'),
+    ('Temperature Air Pre Heater Inlet Sec Air', 'Tsai'),
+    ('Temperature Air Pre Heater Inlet Secondry Air', 'Tsai'),
+    ('Temperature Air Pre Heater In SA', 'Tsai'),
+    ('Temperature Air Pre Heater In Secondary Air', 'Tsai'),
+    ('Temperature Air Pre Heater In Sec Air', 'Tsai'),
+    ('Temperature Air Pre Heater In Secondry Air', 'Tsai'),
+    ('Temperature Air Pre Heater I/L SA', 'Tsai'),
+    ('Temperature Air Pre Heater I/L Secondary Air', 'Tsai'),
+    ('Temperature Air Pre Heater I/L Sec Air', 'Tsai'),
+    ('Temperature Air Pre Heater I/L Secondry Air', 'Tsai'),
+    ('Temperature Air Pre Heater IN SA', 'Tsai'),
+    ('Temperature Air Pre Heater IN Secondary Air', 'Tsai'),
+    ('Temperature Air Pre Heater IN Sec Air', 'Tsai'),
+    ('Temperature Air Pre Heater IN Secondry Air', 'Tsai'),
+    ('Temperature A/H Inlet SA', 'Tsai'),
+    ('Temperature A/H Inlet Secondary Air', 'Tsai'),
+    ('Temperature A/H Inlet Sec Air', 'Tsai'),
+    ('Temperature A/H Inlet Secondry Air', 'Tsai'),
+    ('Temperature A/H In SA', 'Tsai'),
+    ('Temperature A/H In Secondary Air', 'Tsai'),
+    ('Temperature A/H In Sec Air', 'Tsai'),
+    ('Temperature A/H In Secondry Air', 'Tsai'),
+    ('Temperature A/H I/L SA', 'Tsai'),
+    ('Temperature A/H I/L Secondary Air', 'Tsai'),
+    ('Temperature A/H I/L Sec Air', 'Tsai'),
+    ('Temperature A/H I/L Secondry Air', 'Tsai'),
+    ('Temperature A/H IN SA', 'Tsai'),
+    ('Temperature A/H IN Secondary Air', 'Tsai'),
+    ('Temperature A/H IN Sec Air', 'Tsai'),
+    ('Temperature A/H IN Secondry Air', 'Tsai'),
+    ('Temperature AH Inlet SA', 'Tsai'),
+    ('Temperature AH Inlet Secondary Air', 'Tsai'),
+    ('Temperature AH Inlet Sec Air', 'Tsai'),
+    ('Temperature AH Inlet Secondry Air', 'Tsai'),
+    ('Temperature AH In SA', 'Tsai'),
+    ('Temperature AH In Secondary Air', 'Tsai'),
+    ('Temperature AH In Sec Air', 'Tsai'),
+    ('Temperature AH In Secondry Air', 'Tsai'),
+    ('Temperature AH I/L SA', 'Tsai'),
+    ('Temperature AH I/L Secondary Air', 'Tsai'),
+    ('Temperature AH I/L Sec Air', 'Tsai'),
+    ('Temperature AH I/L Secondry Air', 'Tsai'),
+    ('Temperature AH IN SA', 'Tsai'),
+    ('Temperature AH IN Secondary Air', 'Tsai'),
+    ('Temperature AH IN Sec Air', 'Tsai'),
+    ('Temperature AH IN Secondry Air', 'Tsai'),
+    ('Temperature GAH Inlet SA', 'Tsai'),
+    ('Temperature GAH Inlet Secondary Air', 'Tsai'),
+    ('Temperature GAH Inlet Sec Air', 'Tsai'),
+    ('Temperature GAH Inlet Secondry Air', 'Tsai'),
+    ('Temperature GAH In SA', 'Tsai'),
+    ('Temperature GAH In Secondary Air', 'Tsai'),
+    ('Temperature GAH In Sec Air', 'Tsai'),
+    ('Temperature GAH In Secondry Air', 'Tsai'),
+    ('Temperature GAH I/L SA', 'Tsai'),
+    ('Temperature GAH I/L Secondary Air', 'Tsai'),
+    ('Temperature GAH I/L Sec Air', 'Tsai'),
+    ('Temperature GAH I/L Secondry Air', 'Tsai'),
+    ('Temperature GAH IN SA', 'Tsai'),
+    ('Temperature GAH IN Secondary Air', 'Tsai'),
+    ('Temperature GAH IN Sec Air', 'Tsai'),
+    ('Temperature GAH IN Secondry Air', 'Tsai'),
+    ('TMP APH Inlet SA', 'Tsai'),
+    ('TMP APH Inlet Secondary Air', 'Tsai'),
+    ('TMP APH Inlet Sec Air', 'Tsai'),
+    ('TMP APH Inlet Secondry Air', 'Tsai'),
+    ('TMP APH In SA', 'Tsai'),
+    ('TMP APH In Secondary Air', 'Tsai'),
+    ('TMP APH In Sec Air', 'Tsai'),
+    ('TMP APH In Secondry Air', 'Tsai'),
+    ('TMP APH I/L SA', 'Tsai'),
+    ('TMP APH I/L Secondary Air', 'Tsai'),
+    ('TMP APH I/L Sec Air', 'Tsai'),
+    ('TMP APH I/L Secondry Air', 'Tsai'),
+    ('TMP APH IN SA', 'Tsai'),
+    ('TMP APH IN Secondary Air', 'Tsai'),
+    ('TMP APH IN Sec Air', 'Tsai'),
+    ('TMP APH IN Secondry Air', 'Tsai'),
+    ('TMP Air Preheater Inlet SA', 'Tsai'),
+    ('TMP Air Preheater Inlet Secondary Air', 'Tsai'),
+    ('TMP Air Preheater Inlet Sec Air', 'Tsai'),
+    ('TMP Air Preheater Inlet Secondry Air', 'Tsai'),
+    ('TMP Air Preheater In SA', 'Tsai'),
+    ('TMP Air Preheater In Secondary Air', 'Tsai'),
+    ('TMP Air Preheater In Sec Air', 'Tsai'),
+    ('TMP Air Preheater In Secondry Air', 'Tsai'),
+    ('TMP Air Preheater I/L SA', 'Tsai'),
+    ('TMP Air Preheater I/L Secondary Air', 'Tsai'),
+    ('TMP Air Preheater I/L Sec Air', 'Tsai'),
+    ('TMP Air Preheater I/L Secondry Air', 'Tsai'),
+    ('TMP Air Preheater IN SA', 'Tsai'),
+    ('TMP Air Preheater IN Secondary Air', 'Tsai'),
+    ('TMP Air Preheater IN Sec Air', 'Tsai'),
+    ('TMP Air Preheater IN Secondry Air', 'Tsai'),
+    ('TMP Air Pre Heater Inlet SA', 'Tsai'),
+    ('TMP Air Pre Heater Inlet Secondary Air', 'Tsai'),
+    ('TMP Air Pre Heater Inlet Sec Air', 'Tsai'),
+    ('TMP Air Pre Heater Inlet Secondry Air', 'Tsai'),
+    ('TMP Air Pre Heater In SA', 'Tsai'),
+    ('TMP Air Pre Heater In Secondary Air', 'Tsai'),
+    ('TMP Air Pre Heater In Sec Air', 'Tsai'),
+    ('TMP Air Pre Heater In Secondry Air', 'Tsai'),
+    ('TMP Air Pre Heater I/L SA', 'Tsai'),
+    ('TMP Air Pre Heater I/L Secondary Air', 'Tsai'),
+    ('TMP Air Pre Heater I/L Sec Air', 'Tsai'),
+    ('TMP Air Pre Heater I/L Secondry Air', 'Tsai'),
+    ('TMP Air Pre Heater IN SA', 'Tsai'),
+    ('TMP Air Pre Heater IN Secondary Air', 'Tsai'),
+    ('TMP Air Pre Heater IN Sec Air', 'Tsai'),
+    ('TMP Air Pre Heater IN Secondry Air', 'Tsai'),
+    ('TMP A/H Inlet SA', 'Tsai'),
+    ('TMP A/H Inlet Secondary Air', 'Tsai'),
+    ('TMP A/H Inlet Sec Air', 'Tsai'),
+    ('TMP A/H Inlet Secondry Air', 'Tsai'),
+    ('TMP A/H In SA', 'Tsai'),
+    ('TMP A/H In Secondary Air', 'Tsai'),
+    ('TMP A/H In Sec Air', 'Tsai'),
+    ('TMP A/H In Secondry Air', 'Tsai'),
+    ('TMP A/H I/L SA', 'Tsai'),
+    ('TMP A/H I/L Secondary Air', 'Tsai'),
+    ('TMP A/H I/L Sec Air', 'Tsai'),
+    ('TMP A/H I/L Secondry Air', 'Tsai'),
+    ('TMP A/H IN SA', 'Tsai'),
+    ('TMP A/H IN Secondary Air', 'Tsai'),
+    ('TMP A/H IN Sec Air', 'Tsai'),
+    ('TMP A/H IN Secondry Air', 'Tsai'),
+    ('TMP AH Inlet SA', 'Tsai'),
+    ('TMP AH Inlet Secondary Air', 'Tsai'),
+    ('TMP AH Inlet Sec Air', 'Tsai'),
+    ('TMP AH Inlet Secondry Air', 'Tsai'),
+    ('TMP AH In SA', 'Tsai'),
+    ('TMP AH In Secondary Air', 'Tsai'),
+    ('TMP AH In Sec Air', 'Tsai'),
+    ('TMP AH In Secondry Air', 'Tsai'),
+    ('TMP AH I/L SA', 'Tsai'),
+    ('TMP AH I/L Secondary Air', 'Tsai'),
+    ('TMP AH I/L Sec Air', 'Tsai'),
+    ('TMP AH I/L Secondry Air', 'Tsai'),
+    ('TMP AH IN SA', 'Tsai'),
+    ('TMP AH IN Secondary Air', 'Tsai'),
+    ('TMP AH IN Sec Air', 'Tsai'),
+    ('TMP AH IN Secondry Air', 'Tsai'),
+    ('TMP GAH Inlet SA', 'Tsai'),
+    ('TMP GAH Inlet Secondary Air', 'Tsai'),
+    ('TMP GAH Inlet Sec Air', 'Tsai'),
+    ('TMP GAH Inlet Secondry Air', 'Tsai'),
+    ('TMP GAH In SA', 'Tsai'),
+    ('TMP GAH In Secondary Air', 'Tsai'),
+    ('TMP GAH In Sec Air', 'Tsai'),
+    ('TMP GAH In Secondry Air', 'Tsai'),
+    ('TMP GAH I/L SA', 'Tsai'),
+    ('TMP GAH I/L Secondary Air', 'Tsai'),
+    ('TMP GAH I/L Sec Air', 'Tsai'),
+    ('TMP GAH I/L Secondry Air', 'Tsai'),
+    ('TMP GAH IN SA', 'Tsai'),
+    ('TMP GAH IN Secondary Air', 'Tsai'),
+    ('TMP GAH IN Sec Air', 'Tsai'),
+    ('TMP GAH IN Secondry Air', 'Tsai'),
+    ('Temp APH Outlet SA', 'Tsao'),
+    ('Temp APH Outlet Secondary Air', 'Tsao'),
+    ('Temp APH Outlet Sec Air', 'Tsao'),
+    ('Temp APH Outlet Secondry Air', 'Tsao'),
+    ('Temp APH Out SA', 'Tsao'),
+    ('Temp APH Out Secondary Air', 'Tsao'),
+    ('Temp APH Out Sec Air', 'Tsao'),
+    ('Temp APH Out Secondry Air', 'Tsao'),
+    ('Temp APH O/L SA', 'Tsao'),
+    ('Temp APH O/L Secondary Air', 'Tsao'),
+    ('Temp APH O/L Sec Air', 'Tsao'),
+    ('Temp APH O/L Secondry Air', 'Tsao'),
+    ('Temp APH OUT SA', 'Tsao'),
+    ('Temp APH OUT Secondary Air', 'Tsao'),
+    ('Temp APH OUT Sec Air', 'Tsao'),
+    ('Temp APH OUT Secondry Air', 'Tsao'),
+    ('Temp Air Preheater Outlet SA', 'Tsao'),
+    ('Temp Air Preheater Outlet Secondary Air', 'Tsao'),
+    ('Temp Air Preheater Outlet Sec Air', 'Tsao'),
+    ('Temp Air Preheater Outlet Secondry Air', 'Tsao'),
+    ('Temp Air Preheater Out SA', 'Tsao'),
+    ('Temp Air Preheater Out Secondary Air', 'Tsao'),
+    ('Temp Air Preheater Out Sec Air', 'Tsao'),
+    ('Temp Air Preheater Out Secondry Air', 'Tsao'),
+    ('Temp Air Preheater O/L SA', 'Tsao'),
+    ('Temp Air Preheater O/L Secondary Air', 'Tsao'),
+    ('Temp Air Preheater O/L Sec Air', 'Tsao'),
+    ('Temp Air Preheater O/L Secondry Air', 'Tsao'),
+    ('Temp Air Preheater OUT SA', 'Tsao'),
+    ('Temp Air Preheater OUT Secondary Air', 'Tsao'),
+    ('Temp Air Preheater OUT Sec Air', 'Tsao'),
+    ('Temp Air Preheater OUT Secondry Air', 'Tsao'),
+    ('Temp Air Pre Heater Outlet SA', 'Tsao'),
+    ('Temp Air Pre Heater Outlet Secondary Air', 'Tsao'),
+    ('Temp Air Pre Heater Outlet Sec Air', 'Tsao'),
+    ('Temp Air Pre Heater Outlet Secondry Air', 'Tsao'),
+    ('Temp Air Pre Heater Out SA', 'Tsao'),
+    ('Temp Air Pre Heater Out Secondary Air', 'Tsao'),
+    ('Temp Air Pre Heater Out Sec Air', 'Tsao'),
+    ('Temp Air Pre Heater Out Secondry Air', 'Tsao'),
+    ('Temp Air Pre Heater O/L SA', 'Tsao'),
+    ('Temp Air Pre Heater O/L Secondary Air', 'Tsao'),
+    ('Temp Air Pre Heater O/L Sec Air', 'Tsao'),
+    ('Temp Air Pre Heater O/L Secondry Air', 'Tsao'),
+    ('Temp Air Pre Heater OUT SA', 'Tsao'),
+    ('Temp Air Pre Heater OUT Secondary Air', 'Tsao'),
+    ('Temp Air Pre Heater OUT Sec Air', 'Tsao'),
+    ('Temp Air Pre Heater OUT Secondry Air', 'Tsao'),
+    ('Temp A/H Outlet SA', 'Tsao'),
+    ('Temp A/H Outlet Secondary Air', 'Tsao'),
+    ('Temp A/H Outlet Sec Air', 'Tsao'),
+    ('Temp A/H Outlet Secondry Air', 'Tsao'),
+    ('Temp A/H Out SA', 'Tsao'),
+    ('Temp A/H Out Secondary Air', 'Tsao'),
+    ('Temp A/H Out Sec Air', 'Tsao'),
+    ('Temp A/H Out Secondry Air', 'Tsao'),
+    ('Temp A/H O/L SA', 'Tsao'),
+    ('Temp A/H O/L Secondary Air', 'Tsao'),
+    ('Temp A/H O/L Sec Air', 'Tsao'),
+    ('Temp A/H O/L Secondry Air', 'Tsao'),
+    ('Temp A/H OUT SA', 'Tsao'),
+    ('Temp A/H OUT Secondary Air', 'Tsao'),
+    ('Temp A/H OUT Sec Air', 'Tsao'),
+    ('Temp A/H OUT Secondry Air', 'Tsao'),
+    ('Temp AH Outlet SA', 'Tsao'),
+    ('Temp AH Outlet Secondary Air', 'Tsao'),
+    ('Temp AH Outlet Sec Air', 'Tsao'),
+    ('Temp AH Outlet Secondry Air', 'Tsao'),
+    ('Temp AH Out SA', 'Tsao'),
+    ('Temp AH Out Secondary Air', 'Tsao'),
+    ('Temp AH Out Sec Air', 'Tsao'),
+    ('Temp AH Out Secondry Air', 'Tsao'),
+    ('Temp AH O/L SA', 'Tsao'),
+    ('Temp AH O/L Secondary Air', 'Tsao'),
+    ('Temp AH O/L Sec Air', 'Tsao'),
+    ('Temp AH O/L Secondry Air', 'Tsao'),
+    ('Temp AH OUT SA', 'Tsao'),
+    ('Temp AH OUT Secondary Air', 'Tsao'),
+    ('Temp AH OUT Sec Air', 'Tsao'),
+    ('Temp AH OUT Secondry Air', 'Tsao'),
+    ('Temp GAH Outlet SA', 'Tsao'),
+    ('Temp GAH Outlet Secondary Air', 'Tsao'),
+    ('Temp GAH Outlet Sec Air', 'Tsao'),
+    ('Temp GAH Outlet Secondry Air', 'Tsao'),
+    ('Temp GAH Out SA', 'Tsao'),
+    ('Temp GAH Out Secondary Air', 'Tsao'),
+    ('Temp GAH Out Sec Air', 'Tsao'),
+    ('Temp GAH Out Secondry Air', 'Tsao'),
+    ('Temp GAH O/L SA', 'Tsao'),
+    ('Temp GAH O/L Secondary Air', 'Tsao'),
+    ('Temp GAH O/L Sec Air', 'Tsao'),
+    ('Temp GAH O/L Secondry Air', 'Tsao'),
+    ('Temp GAH OUT SA', 'Tsao'),
+    ('Temp GAH OUT Secondary Air', 'Tsao'),
+    ('Temp GAH OUT Sec Air', 'Tsao'),
+    ('Temp GAH OUT Secondry Air', 'Tsao'),
+    ('Temperature APH Outlet SA', 'Tsao'),
+    ('Temperature APH Outlet Secondary Air', 'Tsao'),
+    ('Temperature APH Outlet Sec Air', 'Tsao'),
+    ('Temperature APH Outlet Secondry Air', 'Tsao'),
+    ('Temperature APH Out SA', 'Tsao'),
+    ('Temperature APH Out Secondary Air', 'Tsao'),
+    ('Temperature APH Out Sec Air', 'Tsao'),
+    ('Temperature APH Out Secondry Air', 'Tsao'),
+    ('Temperature APH O/L SA', 'Tsao'),
+    ('Temperature APH O/L Secondary Air', 'Tsao'),
+    ('Temperature APH O/L Sec Air', 'Tsao'),
+    ('Temperature APH O/L Secondry Air', 'Tsao'),
+    ('Temperature APH OUT SA', 'Tsao'),
+    ('Temperature APH OUT Secondary Air', 'Tsao'),
+    ('Temperature APH OUT Sec Air', 'Tsao'),
+    ('Temperature APH OUT Secondry Air', 'Tsao'),
+    ('Temperature Air Preheater Outlet SA', 'Tsao'),
+    ('Temperature Air Preheater Outlet Secondary Air', 'Tsao'),
+    ('Temperature Air Preheater Outlet Sec Air', 'Tsao'),
+    ('Temperature Air Preheater Outlet Secondry Air', 'Tsao'),
+    ('Temperature Air Preheater Out SA', 'Tsao'),
+    ('Temperature Air Preheater Out Secondary Air', 'Tsao'),
+    ('Temperature Air Preheater Out Sec Air', 'Tsao'),
+    ('Temperature Air Preheater Out Secondry Air', 'Tsao'),
+    ('Temperature Air Preheater O/L SA', 'Tsao'),
+    ('Temperature Air Preheater O/L Secondary Air', 'Tsao'),
+    ('Temperature Air Preheater O/L Sec Air', 'Tsao'),
+    ('Temperature Air Preheater O/L Secondry Air', 'Tsao'),
+    ('Temperature Air Preheater OUT SA', 'Tsao'),
+    ('Temperature Air Preheater OUT Secondary Air', 'Tsao'),
+    ('Temperature Air Preheater OUT Sec Air', 'Tsao'),
+    ('Temperature Air Preheater OUT Secondry Air', 'Tsao'),
+    ('Temperature Air Pre Heater Outlet SA', 'Tsao'),
+    ('Temperature Air Pre Heater Outlet Secondary Air', 'Tsao'),
+    ('Temperature Air Pre Heater Outlet Sec Air', 'Tsao'),
+    ('Temperature Air Pre Heater Outlet Secondry Air', 'Tsao'),
+    ('Temperature Air Pre Heater Out SA', 'Tsao'),
+    ('Temperature Air Pre Heater Out Secondary Air', 'Tsao'),
+    ('Temperature Air Pre Heater Out Sec Air', 'Tsao'),
+    ('Temperature Air Pre Heater Out Secondry Air', 'Tsao'),
+    ('Temperature Air Pre Heater O/L SA', 'Tsao'),
+    ('Temperature Air Pre Heater O/L Secondary Air', 'Tsao'),
+    ('Temperature Air Pre Heater O/L Sec Air', 'Tsao'),
+    ('Temperature Air Pre Heater O/L Secondry Air', 'Tsao'),
+    ('Temperature Air Pre Heater OUT SA', 'Tsao'),
+    ('Temperature Air Pre Heater OUT Secondary Air', 'Tsao'),
+    ('Temperature Air Pre Heater OUT Sec Air', 'Tsao'),
+    ('Temperature Air Pre Heater OUT Secondry Air', 'Tsao'),
+    ('Temperature A/H Outlet SA', 'Tsao'),
+    ('Temperature A/H Outlet Secondary Air', 'Tsao'),
+    ('Temperature A/H Outlet Sec Air', 'Tsao'),
+    ('Temperature A/H Outlet Secondry Air', 'Tsao'),
+    ('Temperature A/H Out SA', 'Tsao'),
+    ('Temperature A/H Out Secondary Air', 'Tsao'),
+    ('Temperature A/H Out Sec Air', 'Tsao'),
+    ('Temperature A/H Out Secondry Air', 'Tsao'),
+    ('Temperature A/H O/L SA', 'Tsao'),
+    ('Temperature A/H O/L Secondary Air', 'Tsao'),
+    ('Temperature A/H O/L Sec Air', 'Tsao'),
+    ('Temperature A/H O/L Secondry Air', 'Tsao'),
+    ('Temperature A/H OUT SA', 'Tsao'),
+    ('Temperature A/H OUT Secondary Air', 'Tsao'),
+    ('Temperature A/H OUT Sec Air', 'Tsao'),
+    ('Temperature A/H OUT Secondry Air', 'Tsao'),
+    ('Temperature AH Outlet SA', 'Tsao'),
+    ('Temperature AH Outlet Secondary Air', 'Tsao'),
+    ('Temperature AH Outlet Sec Air', 'Tsao'),
+    ('Temperature AH Outlet Secondry Air', 'Tsao'),
+    ('Temperature AH Out SA', 'Tsao'),
+    ('Temperature AH Out Secondary Air', 'Tsao'),
+    ('Temperature AH Out Sec Air', 'Tsao'),
+    ('Temperature AH Out Secondry Air', 'Tsao'),
+    ('Temperature AH O/L SA', 'Tsao'),
+    ('Temperature AH O/L Secondary Air', 'Tsao'),
+    ('Temperature AH O/L Sec Air', 'Tsao'),
+    ('Temperature AH O/L Secondry Air', 'Tsao'),
+    ('Temperature AH OUT SA', 'Tsao'),
+    ('Temperature AH OUT Secondary Air', 'Tsao'),
+    ('Temperature AH OUT Sec Air', 'Tsao'),
+    ('Temperature AH OUT Secondry Air', 'Tsao'),
+    ('Temperature GAH Outlet SA', 'Tsao'),
+    ('Temperature GAH Outlet Secondary Air', 'Tsao'),
+    ('Temperature GAH Outlet Sec Air', 'Tsao'),
+    ('Temperature GAH Outlet Secondry Air', 'Tsao'),
+    ('Temperature GAH Out SA', 'Tsao'),
+    ('Temperature GAH Out Secondary Air', 'Tsao'),
+    ('Temperature GAH Out Sec Air', 'Tsao'),
+    ('Temperature GAH Out Secondry Air', 'Tsao'),
+    ('Temperature GAH O/L SA', 'Tsao'),
+    ('Temperature GAH O/L Secondary Air', 'Tsao'),
+    ('Temperature GAH O/L Sec Air', 'Tsao'),
+    ('Temperature GAH O/L Secondry Air', 'Tsao'),
+    ('Temperature GAH OUT SA', 'Tsao'),
+    ('Temperature GAH OUT Secondary Air', 'Tsao'),
+    ('Temperature GAH OUT Sec Air', 'Tsao'),
+    ('Temperature GAH OUT Secondry Air', 'Tsao'),
+    ('TMP APH Outlet SA', 'Tsao'),
+    ('TMP APH Outlet Secondary Air', 'Tsao'),
+    ('TMP APH Outlet Sec Air', 'Tsao'),
+    ('TMP APH Outlet Secondry Air', 'Tsao'),
+    ('TMP APH Out SA', 'Tsao'),
+    ('TMP APH Out Secondary Air', 'Tsao'),
+    ('TMP APH Out Sec Air', 'Tsao'),
+    ('TMP APH Out Secondry Air', 'Tsao'),
+    ('TMP APH O/L SA', 'Tsao'),
+    ('TMP APH O/L Secondary Air', 'Tsao'),
+    ('TMP APH O/L Sec Air', 'Tsao'),
+    ('TMP APH O/L Secondry Air', 'Tsao'),
+    ('TMP APH OUT SA', 'Tsao'),
+    ('TMP APH OUT Secondary Air', 'Tsao'),
+    ('TMP APH OUT Sec Air', 'Tsao'),
+    ('TMP APH OUT Secondry Air', 'Tsao'),
+    ('TMP Air Preheater Outlet SA', 'Tsao'),
+    ('TMP Air Preheater Outlet Secondary Air', 'Tsao'),
+    ('TMP Air Preheater Outlet Sec Air', 'Tsao'),
+    ('TMP Air Preheater Outlet Secondry Air', 'Tsao'),
+    ('TMP Air Preheater Out SA', 'Tsao'),
+    ('TMP Air Preheater Out Secondary Air', 'Tsao'),
+    ('TMP Air Preheater Out Sec Air', 'Tsao'),
+    ('TMP Air Preheater Out Secondry Air', 'Tsao'),
+    ('TMP Air Preheater O/L SA', 'Tsao'),
+    ('TMP Air Preheater O/L Secondary Air', 'Tsao'),
+    ('TMP Air Preheater O/L Sec Air', 'Tsao'),
+    ('TMP Air Preheater O/L Secondry Air', 'Tsao'),
+    ('TMP Air Preheater OUT SA', 'Tsao'),
+    ('TMP Air Preheater OUT Secondary Air', 'Tsao'),
+    ('TMP Air Preheater OUT Sec Air', 'Tsao'),
+    ('TMP Air Preheater OUT Secondry Air', 'Tsao'),
+    ('TMP Air Pre Heater Outlet SA', 'Tsao'),
+    ('TMP Air Pre Heater Outlet Secondary Air', 'Tsao'),
+    ('TMP Air Pre Heater Outlet Sec Air', 'Tsao'),
+    ('TMP Air Pre Heater Outlet Secondry Air', 'Tsao'),
+    ('TMP Air Pre Heater Out SA', 'Tsao'),
+    ('TMP Air Pre Heater Out Secondary Air', 'Tsao'),
+    ('TMP Air Pre Heater Out Sec Air', 'Tsao'),
+    ('TMP Air Pre Heater Out Secondry Air', 'Tsao'),
+    ('TMP Air Pre Heater O/L SA', 'Tsao'),
+    ('TMP Air Pre Heater O/L Secondary Air', 'Tsao'),
+    ('TMP Air Pre Heater O/L Sec Air', 'Tsao'),
+    ('TMP Air Pre Heater O/L Secondry Air', 'Tsao'),
+    ('TMP Air Pre Heater OUT SA', 'Tsao'),
+    ('TMP Air Pre Heater OUT Secondary Air', 'Tsao'),
+    ('TMP Air Pre Heater OUT Sec Air', 'Tsao'),
+    ('TMP Air Pre Heater OUT Secondry Air', 'Tsao'),
+    ('TMP A/H Outlet SA', 'Tsao'),
+    ('TMP A/H Outlet Secondary Air', 'Tsao'),
+    ('TMP A/H Outlet Sec Air', 'Tsao'),
+    ('TMP A/H Outlet Secondry Air', 'Tsao'),
+    ('TMP A/H Out SA', 'Tsao'),
+    ('TMP A/H Out Secondary Air', 'Tsao'),
+    ('TMP A/H Out Sec Air', 'Tsao'),
+    ('TMP A/H Out Secondry Air', 'Tsao'),
+    ('TMP A/H O/L SA', 'Tsao'),
+    ('TMP A/H O/L Secondary Air', 'Tsao'),
+    ('TMP A/H O/L Sec Air', 'Tsao'),
+    ('TMP A/H O/L Secondry Air', 'Tsao'),
+    ('TMP A/H OUT SA', 'Tsao'),
+    ('TMP A/H OUT Secondary Air', 'Tsao'),
+    ('TMP A/H OUT Sec Air', 'Tsao'),
+    ('TMP A/H OUT Secondry Air', 'Tsao'),
+    ('TMP AH Outlet SA', 'Tsao'),
+    ('TMP AH Outlet Secondary Air', 'Tsao'),
+    ('TMP AH Outlet Sec Air', 'Tsao'),
+    ('TMP AH Outlet Secondry Air', 'Tsao'),
+    ('TMP AH Out SA', 'Tsao'),
+    ('TMP AH Out Secondary Air', 'Tsao'),
+    ('TMP AH Out Sec Air', 'Tsao'),
+    ('TMP AH Out Secondry Air', 'Tsao'),
+    ('TMP AH O/L SA', 'Tsao'),
+    ('TMP AH O/L Secondary Air', 'Tsao'),
+    ('TMP AH O/L Sec Air', 'Tsao'),
+    ('TMP AH O/L Secondry Air', 'Tsao'),
+    ('TMP AH OUT SA', 'Tsao'),
+    ('TMP AH OUT Secondary Air', 'Tsao'),
+    ('TMP AH OUT Sec Air', 'Tsao'),
+    ('TMP AH OUT Secondry Air', 'Tsao'),
+    ('TMP GAH Outlet SA', 'Tsao'),
+    ('TMP GAH Outlet Secondary Air', 'Tsao'),
+    ('TMP GAH Outlet Sec Air', 'Tsao'),
+    ('TMP GAH Outlet Secondry Air', 'Tsao'),
+    ('TMP GAH Out SA', 'Tsao'),
+    ('TMP GAH Out Secondary Air', 'Tsao'),
+    ('TMP GAH Out Sec Air', 'Tsao'),
+    ('TMP GAH Out Secondry Air', 'Tsao'),
+    ('TMP GAH O/L SA', 'Tsao'),
+    ('TMP GAH O/L Secondary Air', 'Tsao'),
+    ('TMP GAH O/L Sec Air', 'Tsao'),
+    ('TMP GAH O/L Secondry Air', 'Tsao'),
+    ('TMP GAH OUT SA', 'Tsao'),
+    ('TMP GAH OUT Secondary Air', 'Tsao'),
+    ('TMP GAH OUT Sec Air', 'Tsao'),
+    ('TMP GAH OUT Secondry Air', 'Tsao'),
+    ('PA Air Flow', 'Fpa'),
+    ('PA Flow Comp', 'Fpa'),
+    ('Primary Air Air Flow', 'Fpa'),
+    ('Primary Air Flow Comp', 'Fpa'),
+    ('Prim Air Flow', 'Fpa'),
+    ('Prim Air Air Flow', 'Fpa'),
+    ('Prim Air Flow Comp', 'Fpa'),
+    ('Primary Flow', 'Fpa'),
+    ('Primary Flow Comp', 'Fpa'),
+    ('Total PA Air Flow', 'Fpa'),
+    ('Total PA Flow Comp', 'Fpa'),
+    ('Total Primary Air Air Flow', 'Fpa'),
+    ('Total Primary Air Flow Comp', 'Fpa'),
+    ('Total Prim Air Flow', 'Fpa'),
+    ('Total Prim Air Air Flow', 'Fpa'),
+    ('Total Prim Air Flow Comp', 'Fpa'),
+    ('Total Primary Flow', 'Fpa'),
+    ('Total Primary Flow Comp', 'Fpa'),
+    ('Tot PA Flow', 'Fpa'),
+    ('Tot PA Air Flow', 'Fpa'),
+    ('Tot PA Flow Comp', 'Fpa'),
+    ('Tot Primary Air Flow', 'Fpa'),
+    ('Tot Primary Air Air Flow', 'Fpa'),
+    ('Tot Primary Air Flow Comp', 'Fpa'),
+    ('Tot Prim Air Flow', 'Fpa'),
+    ('Tot Prim Air Air Flow', 'Fpa'),
+    ('Tot Prim Air Flow Comp', 'Fpa'),
+    ('Tot Primary Flow', 'Fpa'),
+    ('Tot Primary Flow Comp', 'Fpa'),
+    ('SA Air Flow', 'Fsa'),
+    ('SA Flow Comp', 'Fsa'),
+    ('Secondary Air Air Flow', 'Fsa'),
+    ('Secondary Air Flow Comp', 'Fsa'),
+    ('Sec Air Flow', 'Fsa'),
+    ('Sec Air Air Flow', 'Fsa'),
+    ('Sec Air Flow Comp', 'Fsa'),
+    ('Secondry Air Flow', 'Fsa'),
+    ('Secondry Air Air Flow', 'Fsa'),
+    ('Secondry Air Flow Comp', 'Fsa'),
+    ('Total SA Air Flow', 'Fsa'),
+    ('Total SA Flow Comp', 'Fsa'),
+    ('Total Secondary Air Air Flow', 'Fsa'),
+    ('Total Secondary Air Flow Comp', 'Fsa'),
+    ('Total Sec Air Flow', 'Fsa'),
+    ('Total Sec Air Air Flow', 'Fsa'),
+    ('Total Sec Air Flow Comp', 'Fsa'),
+    ('Total Secondry Air Flow', 'Fsa'),
+    ('Total Secondry Air Air Flow', 'Fsa'),
+    ('Total Secondry Air Flow Comp', 'Fsa'),
+    ('Tot SA Flow', 'Fsa'),
+    ('Tot SA Air Flow', 'Fsa'),
+    ('Tot SA Flow Comp', 'Fsa'),
+    ('Tot Secondary Air Flow', 'Fsa'),
+    ('Tot Secondary Air Air Flow', 'Fsa'),
+    ('Tot Secondary Air Flow Comp', 'Fsa'),
+    ('Tot Sec Air Flow', 'Fsa'),
+    ('Tot Sec Air Air Flow', 'Fsa'),
+    ('Tot Sec Air Flow Comp', 'Fsa'),
+    ('Tot Secondry Air Flow', 'Fsa'),
+    ('Tot Secondry Air Air Flow', 'Fsa'),
+    ('Tot Secondry Air Flow Comp', 'Fsa'),
+    ('Bottom Ash Unburnt carbon in', 'Cba'),
+    ('Bottom Ash Unburnts in', 'Cba'),
+    ('Bottom Ash Unburnt in', 'Cba'),
+    ('UBC IN Bottom Ash', 'Cba'),
+    ('Bottom Ash UBC IN', 'Cba'),
+    ('Bottom Ash LOI', 'Cba'),
+    ('Unburnt carbon in Fly Ash', 'Cfa'),
+    ('Fly Ash Unburnt carbon in', 'Cfa'),
+    ('Fly Ash Unburnts in', 'Cfa'),
+    ('Fly Ash Unburnt in', 'Cfa'),
+    ('UBC IN Fly Ash', 'Cfa'),
+    ('Fly Ash UBC IN', 'Cfa'),
+    ('Fly Ash LOI', 'Cfa'),
+    ('Percentage Bottom Ash', 'Pba'),
+    ('Fraction Bottom Ash', 'Pba'),
+    ('Ratio Bottom Ash', 'Pba'),
+    ('Bottom Ash Percent', 'Pba'),
+    ('Bottom Ash of Total Ash', 'Pba'),
+    ('Percentage Fly Ash', 'Pfa'),
+    ('Fraction Fly Ash', 'Pfa'),
+    ('Ratio Fly Ash', 'Pfa'),
+    ('Fly Ash Percent', 'Pfa'),
+    ('Fly Ash of Total Ash', 'Pfa'),
+    ('Main Steam FLW', 'Ffw'),
+    ('MS FLW', 'Ffw'),
+    ('Steam FLW', 'Ffw'),
+    ('Feed Water Flow', 'Ffw'),
+    ('Feed Water FLW', 'Ffw'),
+    ('Feedwater FLW', 'Ffw'),
+    ('FW FLW', 'Ffw'),
+    ('M S Flow', 'Ffw'),
+    ('M S FLW', 'Ffw'),
+    ('MN STM Flow', 'Ffw'),
+    ('MN STM FLW', 'Ffw'),
+    ('Coal Flow Rate', 'Fin'),
+    ('Total Coal Flow Rate', 'Fin'),
+    ('Fuel Consumption', 'Fin'),
+    ('Fuel Feed Rate', 'Fin'),
+    ('Fuel Rate', 'Fin'),
+    ('Fuel Firing Rate', 'Fin'),
+    ('Fuel Flow Rate', 'Fin'),
+    ('Total Fuel Consumption', 'Fin'),
+    ('Total Fuel Feed Rate', 'Fin'),
+    ('Total Fuel Rate', 'Fin'),
+    ('Total Fuel Firing Rate', 'Fin'),
+    ('Total Fuel Flow Rate', 'Fin'),
+    ('Feeder A Coal Flow', 'Fin'),
+    ('Feeder A Coal Flow Rate', 'Fin'),
+    ('Feeder B Coal Flow', 'Fin'),
+    ('Feeder B Coal Flow Rate', 'Fin'),
+    ('Feeder C Coal Flow', 'Fin'),
+    ('Feeder C Coal Flow Rate', 'Fin'),
+    ('Feeder D Coal Flow', 'Fin'),
+    ('Feeder D Coal Flow Rate', 'Fin'),
+    ('Feeder E Coal Flow', 'Fin'),
+    ('Feeder E Coal Flow Rate', 'Fin'),
+    ('Feeder F Coal Flow', 'Fin'),
+    ('Feeder F Coal Flow Rate', 'Fin'),
+    ('Feeder G Coal Flow', 'Fin'),
+    ('Feeder G Coal Flow Rate', 'Fin'),
+    ('Feeder H Coal Flow', 'Fin'),
+    ('Feeder H Coal Flow Rate', 'Fin'),
+    ('Mill A Coal flow rate', 'Fin'),
+    ('Mill A Coal Flow Rate', 'Fin'),
+    ('Mill B Coal flow rate', 'Fin'),
+    ('Mill B Coal Flow Rate', 'Fin'),
+    ('Mill C Coal flow rate', 'Fin'),
+    ('Mill C Coal Flow Rate', 'Fin'),
+    ('Mill D Coal flow rate', 'Fin'),
+    ('Mill D Coal Flow Rate', 'Fin'),
+    ('Mill E Coal flow rate', 'Fin'),
+    ('Mill E Coal Flow Rate', 'Fin'),
+    ('Mill F Coal flow rate', 'Fin'),
+    ('Mill F Coal Flow Rate', 'Fin'),
+    ('Mill G Coal flow rate', 'Fin'),
+    ('Mill G Coal Flow Rate', 'Fin'),
+    ('Mill H Coal flow rate', 'Fin'),
+    ('Mill H Coal Flow Rate', 'Fin'),
+    ('in Flue Gas O2', 'O2fg'),
+    ('O2 In FG', 'O2fg'),
+    ('In FG O2', 'O2fg'),
+    ('O2 Flue Gas', 'O2fg'),
+    ('O2 FG', 'O2fg'),
+    ('FG O2', 'O2fg'),
+    ('in Flue Gas Oxygen', 'O2fg'),
+    ('Oxygen In FG', 'O2fg'),
+    ('In FG Oxygen', 'O2fg'),
+    ('Oxygen Flue Gas', 'O2fg'),
+    ('Flue Gas Oxygen', 'O2fg'),
+    ('Oxygen FG', 'O2fg'),
+    ('FG Oxygen', 'O2fg'),
+    ('in Flue Gas CO', 'COfg'),
+    ('CO In FG', 'COfg'),
+    ('In FG CO', 'COfg'),
+    ('CO Flue Gas', 'COfg'),
+    ('CO FG', 'COfg'),
+    ('FG CO', 'COfg'),
+    ('in Flue Gas CO2', 'CO2fg'),
+    ('CO2 In FG', 'CO2fg'),
+    ('In FG CO2', 'CO2fg'),
+    ('CO2 Flue Gas', 'CO2fg'),
+    ('CO2 FG', 'CO2fg'),
+    ('FG CO2', 'CO2fg'),
+    ('FG Temp', 'Tfg'),
+    ('Boiler Exit Gas Temp', 'Tfg'),
+    ('Average FG Temp', 'Tfg'),
+    ('Average FG Outlet Temp', 'Tfg'),
+    ('Average Exit Flue Gas Temp', 'Tfg'),
+    ('Average Boiler Exit Gas Temp', 'Tfg'),
+    ('Avg FG Temp', 'Tfg'),
+    ('Avg FG Outlet Temp', 'Tfg'),
+    ('Avg Exit Flue Gas Temp', 'Tfg'),
+    ('Avg Boiler Exit Gas Temp', 'Tfg'),
+    ('Avg. Flue Gas Temp', 'Tfg'),
+    ('Avg. FG Temp', 'Tfg'),
+    ('Avg. FG Outlet Temp', 'Tfg'),
+    ('Avg. Exit Flue Gas Temp', 'Tfg'),
+    ('Avg. Boiler Exit Gas Temp', 'Tfg'),
+    ('Mean Flue Gas Temp', 'Tfg'),
+    ('Mean Flue Gas Temperature', 'Tfg'),
+    ('Mean FG Temp', 'Tfg'),
+    ('Mean FG Outlet Temp', 'Tfg'),
+    ('Mean Exit Flue Gas Temp', 'Tfg'),
+    ('Mean Boiler Exit Gas Temp', 'Tfg'),
+    ('Generator Output (MW)', 'L'),
+    ('Generator MW MW', 'L'),
+    ('Generator MW (MW)', 'L'),
+    ('Gen MW MW', 'L'),
+    ('Gen MW (MW)', 'L'),
+    ('Reference Moisture', 'Md'),
+    ('Moisture Reference', 'Md'),
+    ('Reference Ash', 'Ad'),
+    ('Ash Reference', 'Ad'),
+    ('Reference Volatile Matter', 'VMd'),
+    ('Volatile Matter Reference', 'VMd'),
+    ('Reference Fixed Carbon', 'FCd'),
+    ('Fixed Carbon Reference', 'FCd'),
+    ('Reference Carbon', 'Cd'),
+    ('Carbon Reference', 'Cd'),
+    ('Reference Sulfur', 'Sd'),
+    ('Sulfur Reference', 'Sd'),
+    ('Reference Hydrogen', 'Hd'),
+    ('Hydrogen Reference', 'Hd'),
+    ('Moisture Ultimate Design', 'Md2'),
+    ('Reference Moisture Ultimate', 'Md2'),
+    ('Moisture Ultimate Reference', 'Md2'),
+    ('Reference Nitrogen', 'Nd'),
+    ('Nitrogen Reference', 'Nd'),
+    ('Reference Oxygen', 'Od'),
+    ('Oxygen Reference', 'Od'),
+    ('Ash Ultimate Design', 'Ad2'),
+    ('Reference Ash Ultimate', 'Ad2'),
+    ('Ash Ultimate Reference', 'Ad2'),
+    ('Reference GCV', 'GCVd'),
+    ('GCV Reference', 'GCVd'),
 ]
 
-
-# ── Out-of-scope examples ────────────────────────────────────────────────────
-# These are REAL plant-sheet headers that are NOT any of the 41 CENPEEP
-# fields, but share vocabulary with fields that are (steam, temp, flow,
-# pressure...). Without these as a labeled class, the classifier has no way
-# to say "I recognize boiler/plant language here, but it isn't one of my
-# fields" — it just falls back to the nearest (wrong) field by leftover
-# cosine similarity. Labeling them "OUT_OF_SCOPE" lets the model actively
-# compete that hypothesis against the real fields, which is far more
-# accurate than relying on a similarity-score cutoff alone.
-OUT_OF_SCOPE_EXAMPLES = [
-    "MS TEMP boiler outlet", "Main Steam Temp boiler outlet",
-    "MAIN STM TEMP-L", "MAIN STM TEMP-R", "MS Temp.", "MS Pressure",
-    "MS Press-L", "MS Press-R",
-    "Primary SH O/L Steam Temp", "Divi SH O/L Steam Temp", "PLN SH O/L Steam Temp",
-    "CRH Steam Press", "CRH Steam Temp", "CRH Temp", "CRH Pressure",
-    # "HPT EXHAUST STEAM TEMP" -- turbine HP-exhaust steam temperature,
-    # real CSTPS header. Same family as the HRH/CRH Steam Temp entries
-    # just above (a steam TEMPERATURE reading with no dedicated CENPEEP
-    # field), but without its own anchor it was drifting onto Ffw (Steam
-    # Flow) purely via the shared word "STEAM" -- a temperature column
-    # would otherwise get used as the flow input.
-    "HPT Exhaust Steam Temp", "HPT EXHAUST STEAM TEMP",
-    "HRH Steam Temp", "HRH Steam Press", "HRH Temp", "HRH Pressure",
-    "SH Spray Flow", "RH Spray Flow", "RH Spray Temp", "Total SH Spray", "Total RH Spray",
-    "Feedwater HP HTR inlet temp", "Feed water Eco inlet temp", "Feed water Eco outlet Temp",
-    # Real DCS-export wording for the same feedwater-side readings — these
-    # are WATER temperatures, not flue-gas temperatures, and must not be
-    # pulled into Tgi just because they also say "after economiser".
-    "FW TEMPERATURE BEFORE ECONOMISER", "FW TEMPERATURE AFTER ECONOMISER",
-    "FW Temp Before Economiser", "FW Temp After Economiser",
-    "Feed Water Temperature Before Economiser", "Feed Water Temperature After Economiser",
-    "HPH Ext STM pressure", "HPH Ext STM temp", "HPH Drain Temp",
-    "HPH I/L Feedwater Temp", "HPH O/L Feedwater Temp",
-    "Enthalpy FW HPH O/L", "Enthalpy FW HPH I/L", "Extraction Enthalpy HPH",
-    "Drip Enthalpy HPH", "Extraction Flow HPH", "MS Enthalpy", "HRH Enthalpy",
-    "CRH Enthalpy", "FW Enthalpy", "RH Flow", "Attemperation Enthalpy", "THR",
-    "Turbine Side Condenser Vacuum", "Generator Side Condenser Vacuum",
-    "Soot Blower Steam Flow", "Soot Blower Steam Press",
-    "WTR SEP MET TEMP", "SOFA SA CTL DMP POS", "SSC PWR PACK PRESS",
-    "FW SHORT SB CURR", "FDF Current", "IDF Current", "VACUUM",
-    "Coal A", "Coal B", "HEAT RATE", "DATE OF COLLECTION",
-    "Sample Collection Date", "Lab Test Number",
-    # Pressure / draft readings that share "FG"/"APH"/"inlet"/"outlet"
-    # vocabulary with the Tgi/Tgo temperature fields but are NOT
-    # temperatures — must not be averaged into a temperature field.
-    "FURNACE DRAFT", "ECO inlet FG pressure", "APH inlet FG pressure",
-    "APH O/L FG pressure", "ECO outlet FG pressure", "Draft pressure",
-    "Furnace pressure", "APH differential pressure", "Gas side draft",
-    # Abbreviated form seen on real DCS exports ("FURNACE PR") — without this,
-    # the "PR" abbreviation loses enough char-gram overlap with "pressure"
-    # that it drifted onto Fsa (Secondary Air Flow) instead, purely because
-    # both share the word "FURNACE". Windbox DP is the same kind of
-    # pressure/draft reading, also abbreviated.
-    "FURNACE PR", "Furnace Pr", "WINDBOX DP", "Windbox Differential Pressure",
-    # Furnace-exit gas temp is a real plant reading but a DIFFERENT, further
-    # upstream point in the flue-gas path (before the economizer) than the
-    # APH inlet reading Tgi represents — do not substitute.
-    "Furnace exit FG temp", "Furnace exit gas temperature",
-    "MAIN STEAM Pressure",
-    "MAIN STEAM Temp", "CRH STEAM", "HRH STEAM TEMP", "CONDENSOR VACCUM",
-    "SH SPARY FLOW(L)", "SH SPARY FLOW(R)", "RH SPARY FLOW(L)", "RH SPARY FLOW(R)",
-    "HPH-5A EXTRACTION STEAM PRESSURE", "HPH -5A EXTRACTION STEAM TEMPERATURE",
-    "PA Fan-A MTR CURRENT", "PA Fan-B MTR CURRENT", "FDF-A MTR CURRENT",
-    "FDF-B MTR CURRENT", "SCC",
-    # A pressure reading at the same location as the Feedwater Eco inlet
-    # temp (Ffw's neighboring column on many sheets) — same location, but a
-    # pressure, not a flow, so it must not be pulled into Ffw just because
-    # the location wording overlaps.
-    "Feedwater Eco inlet Press", "Feed water Eco inlet Press", "ECON FD WTR INLT PRESS",
-    # "O2 AT ECO INLET" (LHS/RHS split) -- real CSTPS header. This is a
-    # DIFFERENT, further-upstream reading than "O2 AT ECO OUTLET"/"O2 AT
-    # OUTLET" (mapped to O2in above): the ECO inlet is right at the
-    # furnace/superheater exit, well before the economizer, not the
-    # APH-inlet point CENPEEP's O2in wants. Explicitly rejecting it here
-    # (rather than leaving it to fall through) stops it from being pulled
-    # into O2in and averaged together with the correct ECO-outlet reading
-    # -- which would silently blend two different physical locations into
-    # one "average" instead of keeping the correct one.
-    "O2 AT ECO INLET", "O2 AT ECO INLET LHS", "O2 AT ECO INLET RHS",
-    # "FLUE GAS TEMP BEFORE ECO" (LHS/RHS split) -- real CSTPS header, a
-    # further-upstream reading (furnace/superheater exit) than "FLUE GAS
-    # TEMP BEFORE APH", which is the real, dedicated APH-inlet column
-    # already present on the same sheet (see the bare-phrasing Tgi anchor
-    # above). Rejecting this explicitly stops the two from being averaged
-    # together as if they were the same reading -- same reasoning as the
-    # "O2 AT ECO INLET" rejection just above.
-    "FLUE GAS TEMP BEFORE ECO", "FLUE GAS TEMP BEFORE ECO LHS", "FLUE GAS TEMP BEFORE ECO RHS",
-    "MS pressure boiler outlet(Left)", "MS pressure boiler outlet(Right)",
-    "MS TEMP (left) boiler outlet", "MS TEMP (Right) boiler outlet",
-    "HRH temp left boiler outlet", "HRH temp right boiler outlet",
-    "CRH Press left", "CRH Press Right",
-    "Primary SH Inlet Steam Temp Left", "Primary SH Inlet Steam Temp Right",
-    "Primary SH Inlet Steam Press Left", "Primary SH Inlet Steam Press Right",
-    # Metal/tube temperatures — real readings, but not a CENPEEP input field.
-    "FSH Metal Temp", "PSH Metal Temp", "DIVISH Metal Temp", "RH Metal Temp",
-    "LTSH Metal Temp", "LTRH Metal Temp",
-    # Hydraulic system pressure — unrelated to any CENPEEP field.
-    "SSC HYD PR", "SSC HYD PR Hourly average", "SSC HYD PR hourly maximum",
-    "SSC PWR PACK PRESS",
-    # "GAH" = this plant's alternate name for APH; these are draft/pressure
-    # readings (not temperatures), same rejection reasoning as the "APH
-    # inlet/outlet FG pressure" entries above.
-    "GAH inlet pressure (Left)", "GAH inlet pressure (Right)",
-    "GAH O/L pressure (Left)", "GAH O/L pressure (Right)",
-    "FDF A CURRENT", "FDF B CURRENT", "IDF A CURRENT", "IDF B CURRENT",
-    "FURNACE DRAFT",
-    # Text-valued column naming which coal grade is blended in (e.g. "GAR
-    # 4200"), not a numeric percentage reading — shares "blend"/"ratio"
-    # vocabulary with Pfa/Pba but is not interchangeable with either.
-    "Coal blend ratio", "Coal Blend Grade", "GRADE 1", "GRADE 2",
-    # "Total Air Flow" is a real sensor reading, not a structural/ID column
-    # (previously it was wrongly hard-coded into NON_FIELD_HEADERS below,
-    # which silently dropped it before it was ever scored). It also isn't
-    # one of the 42 CENPEEP fields — Fpa/Fsa cover primary/secondary air
-    # flow separately, but there's no "total air flow" field id — so
-    # forcing a guess (it was landing on Fpa via "TOTAL PA FLOW") would be
-    # wrong too. OUT_OF_SCOPE correctly reports it as "recognised, but not
-    # a mappable field" rather than either silently excluding it or
-    # mismatching it. Flag to the business team: either add a field id for
-    # it, or confirm it should stay unmapped.
-    "Total Air flow", "Total Air Flow", "TOTAL AIR FLOW",
-    # ── Abbreviated real DCS/hourly-export headers that were being pulled
-    #    into a real field by leftover char n-gram overlap. Each is a real
-    #    plant reading, just not one of the 42 CENPEEP fields (or not the
-    #    field it was landing on) -- see the inline reasons.
-    # Hot Reheat steam pressure before the Intercept Valve -- a pressure
-    # reading, not O2; was drifting onto O2in via "before"/"IL"-style
-    # abbreviation overlap with the O2-at-APH-inlet examples.
-    "HR STM PR. BEFORE IV(L)", "HR STM PR. BEFORE IV(R)", "HR STM PR BEFORE IV",
-    "HR STM PR. BEFORE IV",
-    # Main steam temp before the Emergency Stop Valve (ESV) -- same family
-    # as the existing "MS TEMP (Left/Right) boiler outlet" OUT_OF_SCOPE
-    # entries, just a different abbreviated wording ("TEM 42/43 ... BEF/
-    # BEFORE ESV") that wasn't covered and was drifting onto O2in.
-    "TEM 42 MS TEMP BEFORE ESV RHS", "TEM 43 MS TEMP BEF ESV (LHS)",
-    "MS TEMP BEFORE ESV", "MS TEMP BEF ESV",
-    # Feedwater temperature before/after the economiser -- abbreviated
-    # ("FW ECO I/L TEMP") counterpart to the full-word "Feed water Eco
-    # inlet/outlet temp" entries already above; the abbreviated form was
-    # slipping past those and drifting onto Tgi (flue-gas temp) since it
-    # also says "ECO"/"TEMP".
-    "FW ECO I/L TEMP", "FW ECO O/L TEMP", "FW ECO IL TEMP", "FW ECO OL TEMP",
-    # Superheater/reheater attemperator (spray) water flow -- same physical
-    # quantity as the existing "SH Spray Flow"/"RH Spray Flow"/"Total SH
-    # Spray"/"Total RH Spray" entries, just using the "ATT."/"ATTAMP"
-    # plant-tag abbreviation for "attemperator", which wasn't covered and
-    # was drifting onto Ffw (steam/feedwater flow) via the word "FLOW".
-    "SH ATT. WATER FLOW (LHS)", "SH ATT. WATER FLOW (RHS)", "SH ATT WATER FLOW",
-    "RH ATT. WATER FLOW (LHS)", "RH ATT. WATER FLOW (RHS)", "RH ATT WATER FLOW",
-    "SH 2ND STG ATTAMP FLOW LHS", "SH 2ND STG ATTAMP FLOW RHS", "SH ATTAMP FLOW",
-    "RH ATTEM FLOW", "RH ATTEM TEMP", "SH ATTEM FLOW",
-    # Boiler Feed Pump suction/discharge pressure -- a pump-side pressure
-    # reading, not a temperature; "BFP-A SUC PR AFTER BSTR PMP 2X OUT" was
-    # drifting onto Tgo via shared "2X OUT" wording with real Tgo examples.
-    "BFP-A SUC PR AFTER BSTR PMP 2X OUT", "BFP-B SUC PR AFTER BSTR PMP 2X OUT",
-    "BFP-C SUC PR AFT BSTR PMP 2X OUT", "BFP SUC PR AFTER BSTR PMP",
-    "BFP DISC. HDR PR 1O2", "BFP DISCHARGE TEMP",
-    # Boiler Feed Pump suction/discharge TEMPERATURE -- same BFP family as
-    # the pressure entries above, but the temperature side. This is the
-    # feedwater temperature at the pump, not an air/gas temperature -- it
-    # was previously drifting onto Tsao (Secondary Air Temp Out) via
-    # incidental "...2X OUT"/"TEMP" overlap with real Tsao examples.
-    # Explicit anchor makes the rejection deliberate rather than a side
-    # effect of the pressure fix above.
-    "BFP-A SUC TEMP 2X OUT", "BFP-B SUC TEMP 2X OUT", "BFP-C SUC TEMP 2X OUT",
-    "BFP-A DIS TEMP 2X OUT", "BFP-B DIS TEMP 2X SEL", "BFP-C DIS TEMP 2X SEL",
-    # Flue gas PRESSURE (draft) at the air heater, abbreviated "AH" form --
-    # a pressure/draft reading, not O2 or temperature; the existing
-    # "APH inlet FG pressure"/"APH O/L FG pressure" OUT_OF_SCOPE entries
-    # used the full "APH" spelling, so the bare-"AH" plant-tag form wasn't
-    # covered and was drifting onto O2in / Tgo respectively.
-    "FG PR. AT AH-A INLET", "FG PR. AT AH-B INLET", "FG PR AT AH INLET",
-    "FG PR. AFTER AH-A", "FG PR. AFTER AH-B", "FG PR AFTER AH",
-    "DP ACROSS AH-A 1O2", "DP ACROSS AH-B 1O2",
-    # Induced Draft (ID) fan inlet draught -- same draft/pressure family as
-    # the existing "Draft pressure"/"Furnace pressure" entries; was
-    # drifting onto O2in via the word "inlet".
-    "ID A INLET DRAUGHT", "ID B INLET DRAUGHT", "ID INLET DRAUGHT",
-    # Coal feeder motor current (amps) -- an electrical reading, not coal
-    # flow; shares the word "FEEDER" with the real Fin feeder-flow
-    # examples, which was enough to pull it onto Fin.
-    "FEEDER A AMPS", "FEEDER B AMPS", "FEEDER C AMPS", "FEEDER D AMPS",
-    "FEEDER E AMPS", "FEEDER F AMPS", "FEEDER AMPS",
-    # Truncated/ambiguous PA fan reading -- not enough context to be any
-    # specific field; siblings "PA FAN C/D/E/F COMP 2XSEL" already reject
-    # correctly, this one (missing the word "FAN") was borderline-matching
-    # Tpao instead.
-    "PA B COMP 2X SEL", "PA FAN B COMP 2X SEL", "PA A COMP 2X SEL",
-    # Text-valued "which mills are in service" columns (e.g. cell values
-    # like "ABDEF") -- not a numeric reading at all, but the word "Mill"
-    # was pulling these toward Fin's "Mill X Coal Flow" examples (or, before
-    # that fix, toward Tpai). Neither is right: this column doesn't carry a
-    # coal-flow or temperature number.
-    "Mill Running", "Mill Service", "Mill Combination", "Mill in Service",
-    # ── Primary/Secondary air PRESSURE readings at the APH inlet/outlet ──
-    # These share almost all of their wording with the real Tpai/Tpao/
-    # Tsai/Tsao TEMPERATURE examples ("APH-<side> I/L/O/L ... AIR", "HOT
-    # ... AIR") differing only in the trailing "PR" vs "TMP"/"TEMP" — on a
-    # real plant sheet with both a pressure and a temperature column at
-    # the same duct location, the pressure column was winning the
-    # temperature field (e.g. "APH-B I/L PRIMARY AIR PR" scored higher for
-    # Tpai than the actual temperature column) purely on that bulk overlap.
-    # Same reasoning as the existing "FG PR. AT AH-<side> INLET" / "APH
-    # inlet FG pressure" rejections above, just for the air (not flue-gas)
-    # side of the APH.
-    "APH-A I/L PRIMARY AIR PR", "APH-B I/L PRIMARY AIR PR",
-    "APH-A O/L HOT PRIMARY AIR PR", "APH-B O/L HOT PRIMARY AIR PR",
-    "APH-A I/L SEC AIR PR", "APH-B I/L SEC AIR PR",
-    "APH-A O/L HOT SEC AIR PR", "APH-B O/L HOT SEC AIR PR",
-    "BLR RHS HOT SEC AIR PR-1", "BLR RHS HOT SEC AIR PR-2",
-    "BLR LHS HOT SEC AIR PR-1", "BLR LHS HOT SEC AIR PR-2",
-    "PA-A O/L PR", "PA-B O/L PR", "FD-A O/L PR", "FD-B O/L PR",
-    "HOT PA HDR PRESSURE",
-    # Gas temperature measured behind the furnace rear-wall gas damper --
-    # a real flue-gas reading, but at a DIFFERENT point in the gas path
-    # than any Tgi/Tgo/Tsao duct, and it shares "FURNACE"/"REAR"/"SIDE"
-    # wording with the real Tsao "Furnace <side> Side Inlet SA Temp"
-    # examples even though it is a GAS temperature, not an AIR temperature.
-    "GAS TEMP BEHIND FURNACE REAR SIDE GAS DAMPER (R.W)",
-    "GAS TEMP BEHIND FURNACE REAR SIDE GAS DAMPER (F.W)",
-    "GAS TEMP BEHIND FURNACE FRONT SIDE GAS DAMPER (R.W)",
-    "GAS TEMP BEHIND FURNACE FRONT SIDE GAS DAMPER (F.W)",
-    # Boiler drum metal/steam temperature and pressure -- shares the word
-    # "BOTTOM"/"TOP" with the Cba/Pba "Bottom Ash" examples purely by
-    # coincidence (drum bottom/top vs ash bottom/top are unrelated
-    # physical locations), was drifting a drum temperature reading onto
-    # Cba (Unburnt Carbon in Bottom Ash) on a real plant sheet.
-    "DRUM RHS BOTTOM TEMP", "DRUM LHS BOTTOM TEMP",
-    "DRUM RHS TOP TEMP", "DRUM LHS TOP TEMP", "DRUM PRESSURE",
-    # Inherent Moisture (IM) -- a real lab reading, reported alongside
-    # Total Moisture (TM) on the same Coal Analysis sheet, but a smaller,
-    # different quantity that CENPEEP's "M" field must not be filled from
-    # (see the M/Moisture training-data note above).
-    "IM %", "IM%", "Inherent Moisture", "Inherent Moisture %",
-    # TDBFP (Turbine-Driven Boiler Feed Pump) suction inlet temperature --
-    # feedwater temperature at the pump, not Primary Air temperature. This
-    # is the same BFP family already excluded above ("BFP-A SUC TEMP 2X
-    # OUT" etc), but that entry used the "BFP-<side> SUC/DIS TEMP 2X ..."
-    # DCS tag shape; a real plant sheet using the plainer "TDBFP-<side>
-    # I/L TEMP" / "TD BFP-<side> I/L TEMP" wording wasn't covered by it and
-    # was drifting onto Tpai (Primary Air Temp In) purely via shared
-    # "<side> I/L TEMP" wording with the real "AH A/B PA I/L TEMP"
-    # examples -- averaging a ~150 C feedwater-pump-suction reading
-    # together with the genuine ~35 C primary-air-inlet reading and
-    # silently corrupting the Tpai value.
-    "TDBFP-A I/L TEMP", "TDBFP-B I/L TEMP", "TDBFP-C I/L TEMP",
-    "TDBFP A I/L TEMP", "TDBFP B I/L TEMP", "TDBFP C I/L TEMP",
-    "TD BFP-A I/L TEMP", "TD BFP-B I/L TEMP", "TD BFP-C I/L TEMP",
-    "TDBFP A I/L PRESS", "TDBFP B I/L PRESS", "TDBFP C I/L PRESS",
-
-    # Coal-ash mineral (oxide) composition -- a real column family on Ash
-    # Fusion / XRF / mineral-analysis lab sheets (reported alongside GCV/
-    # Moisture/Ash/VM/FC on the same sheet, e.g. "COSA" -- Coal & Ash
-    # Analysis -- sheets). None of these individual oxide percentages is a
-    # CENPEEP field, but several drift onto a real field purely on "(%)"/
-    # short-token character-n-gram overlap: "Mn3O4 (%)" was scoring Ffw
-    # (Steam Flow) at 0.60 confidence, and "BaO (ppm)" was scoring COfg
-    # (Flue Gas CO) at 0.92 -- high enough to clear even COfg's raised
-    # 0.85 override bar -- silently overwriting a real flue-gas-CO reading
-    # with a barium-oxide percentage from an unrelated lab sheet. The rest
-    # (SiO2/Al2O3/Fe2O3/CaO/MgO/Na2O/K2O/TiO2/SO3/P2O5/"Undetermined") were
-    # scoring O2fg (Flue Gas O2) in the 0.3-0.66 range on the same "(%)"
-    # overlap; several already sit below O2fg's 0.85 override, but are
-    # added here anyway so they can't tip over as training data grows, and
-    # so ordinary (non-overridden) fields aren't put at risk either.
-    "SiO2 (%)", "Al2O3 (%)", "Fe2O3 (%)", "CaO (%)", "MgO (%)",
-    "Na2O (%)", "K2O (%)", "TiO2 (%)", "Mn3O4 (%)", "SO3 (%)", "P2O5 (%)",
-    "BaO (ppm)", "BaO (%)", "Undetermined (%)",
-
-    # Coal/ash quality ratios and indices -- derived figures reported on
-    # the same Ash Fusion / Coal Analysis sheets as the mineral oxides
-    # above, not raw sensor/lab readings and not any CENPEEP field.
-    # "Fuel Ratio (FC/VM)" was drifting onto O2f (Oxygen % ultimate
-    # analysis) at 0.55 purely via the shared "%"/short-token pattern with
-    # "O2 % Fuel"; "SilicaAluminium Ratio" and "BaseAcid Ratio" were
-    # drifting onto Pfa (% Fly Ash of Total Ash) at 0.70-0.77 via the
-    # shared word "Ratio". HGI (Hardgrove Grindability Index) is a coal
-    # hardness number, not a load/generation reading, despite sharing
-    # letters with "Load"-family training text on char n-grams.
-    "Fuel Ratio (FC/VM)", "Fuel Ratio", "SilicaAluminium Ratio",
-    "Silica Aluminium Ratio", "BaseAcid Ratio", "Base Acid Ratio",
-    "Slagging Factor", "Fouling Factor", "HGI",
-
-    # Ash Fusion Temperature readings (Initial Deformation, Hemispherical,
-    # Flow temperatures, in both Reducing and Oxidising atmospheres) --
-    # real lab figures on the same sheet family, each a specific named
-    # ash-melting-behaviour temperature with no CENPEEP field of its own.
-    # "Flow (°C) Red." was drifting onto Fpa (Primary Air Flow) at 0.51
-    # purely because it contains the word "Flow" -- despite being an ash
-    # fusion temperature (measured in °C), not an air-flow rate.
-    "Initial Deformation (°C)", "Initial Deformation (°C) Red.",
-    "Initial Deformation (°C) Oxi.", "IDT (Reducing)", "IDT (Oxidising)",
-    "IDT (Oxidising) Initial Deform. (°C)",
-    "IDT (Reducing) Initial Deform. (°C)",
-    "Hemispherical (°C)", "Hemispherical (°C) Red.", "Hemispherical (°C) Oxi.",
-    "Flow (°C)", "Flow (°C) Red.", "Flow (°C) Oxi.", "Ash Fusion Flow Temperature",
-    "Softening Temperature (°C)", "Spon Comb (O/C)",
-
-    # Coal grain-size distribution ("sieve analysis") -- a real column
-    # family on the same lab sheets, reported as size-fraction
-    # percentages (e.g. "> 50mm retained", "< 3mm passing"). Already below
-    # O2fg's 0.85 override bar today, but added here so it can't tip over
-    # later, since it shares the same "(%)" pattern as the O2 examples.
-    ">50mm (%)", "<3mm (%)", "<0.5mm (%)", ">50mm", "<3mm", "<0.5mm",
-
-    # Superheater/Reheater/Turbine-bypass and intermediate-stage steam
-    # TEMPERATURE readings on real 5-minute DCS exports -- these are all
-    # temperatures at various points along the steam path (bypass valves,
-    # LP/HP turbine sections, low/high temperature superheater/reheater
-    # stages), NOT the boiler's main steam flow, and CENPEEP has no field
-    # for any of them individually. Because they all contain the word
-    # "Steam" (and several also say "Superheater"/"Turbine"), they drift
-    # onto Ffw (Steam Flow, 0.49-0.71 confidence) or SP (Steam Pressure,
-    # 0.71 confidence) purely on that shared vocabulary -- e.g.
-    # "Superheater HP Bypass Temp -A" was confidently (0.71) overwriting
-    # the real Superheater-outlet SP reading with a bypass-valve
-    # temperature in real production output on a live upload.
-    "Superheater HP Bypass Temp", "Superheater HP Bypass Temp -A",
-    "Superheater HP Bypass Temp -B", "Superheater LP Bypass Temp",
-    "LTSH Out Steam Temp", "LTSH Out Steam Temp -A", "LTSH Out Steam Temp -B",
-    "ITS IN Steam Temp", "ITS IN Steam Temp -A", "ITS IN Steam Temp -B",
-    "ITS Out Steam Temp", "ITS Out Steam Temp -A", "ITS Out Steam Temp -B",
-    "HTS IN Steam Temp", "HTS IN Steam Temp -A", "HTS IN Steam Temp -B",
-    "HTS Out Steam Temp", "HTS Out Steam Temp -A", "HTS Out Steam Temp -B",
-    "LTR IN Steam Temp", "LTR IN Steam Temp -A", "LTR IN Steam Temp -B",
-    "LTR Out Steam Temp", "LTR Out Steam Temp -A", "LTR Out Steam Temp -B",
-    "HTR Out Steam Temp", "HTR Out Steam Temp -A", "HTR Out Steam Temp -B",
-    "HP Turbine CRH Steam Temp", "HP Turbine CRH Steam Temp-A",
-    "HP Turbine CRH Steam Temp-B", "HP Turbine CRH Steam Press",
-    "HTS Out Steam Press", "LTR IN Steam Press", "LTS TUBE MET",
-    "ITS TUBE MET", "HTS TUBE MET", "LTR TUBE MET", "HTR TUBE MET",
-
-    # Flue Gas Recirculation (FGR) flow -- a real, separate gas stream
-    # (recirculated flue gas fed back into the furnace/windbox) measured
-    # on its own DCS tag, not Primary Air. "FGR FLOW" was drifting onto
-    # Fpa (Primary Air Flow, 0.79 confidence) purely via the shared word
-    # "Flow" with the real "PA Flow" training examples, which would
-    # silently blend a flue-gas-recirculation reading into the primary-air
-    # flow average.
-    "FGR FLOW", "FGR Flow", "Flue Gas Recirculation Flow", "FGR TEMP", "FGR Temp",
+OUT_OF_SCOPE_EXAMPLES = list(OUT_OF_SCOPE_EXAMPLES) + [
+    'Ash Fusion Flow Temperature',
+    'BFP DISC. HDR PR 1O2',
+    'BFP DISCHARGE TEMP',
+    'BFP SUC PR AFTER BSTR PMP',
+    'BFP-A DIS TEMP 2X OUT',
+    'BFP-A SUC PR AFTER BSTR PMP 2X OUT',
+    'BFP-A SUC TEMP 2X OUT',
+    'BFP-B DIS TEMP 2X SEL',
+    'BFP-B SUC PR AFTER BSTR PMP 2X OUT',
+    'BFP-B SUC TEMP 2X OUT',
+    'BFP-C DIS TEMP 2X SEL',
+    'BFP-C SUC PR AFT BSTR PMP 2X OUT',
+    'BFP-C SUC TEMP 2X OUT',
+    'CRH Press left',
+    'CRH STEAM',
+    'DATE OF COLLECTION',
+    'FEEDER AMPS',
+    'FG PR. AFTER AH-A',
+    'FG PR. AFTER AH-B',
+    'FG PR. AT AH-A INLET',
+    'FG PR. AT AH-B INLET',
+    'FW ECO IL TEMP',
+    'FW ECO OL TEMP',
+    'FW TEMPERATURE AFTER ECONOMISER',
+    'FW TEMPERATURE BEFORE ECONOMISER',
+    'FW Temp After Economiser',
+    'FW Temp Before Economiser',
+    'HEAT RATE',
+    'HP Turbine CRH Steam Press',
+    'HP Turbine CRH Steam Temp',
+    'HP Turbine CRH Steam Temp-A',
+    'HP Turbine CRH Steam Temp-B',
+    'HPT EXHAUST STEAM TEMP',
+    'HR STM PR. BEFORE IV(L)',
+    'HR STM PR. BEFORE IV(R)',
+    'HRH STEAM TEMP',
+    'HRH temp left boiler outlet',
+    'HRH temp right boiler outlet',
+    'HTR Out Steam Temp -A',
+    'HTR Out Steam Temp -B',
+    'HTS IN Steam Temp -A',
+    'HTS IN Steam Temp -B',
+    'HTS Out Steam Temp -A',
+    'HTS Out Steam Temp -B',
+    'IDT (Oxidising) Initial Deform. (°C)',
+    'IDT (Reducing) Initial Deform. (°C)',
+    'ITS IN Steam Temp -A',
+    'ITS IN Steam Temp -B',
+    'ITS Out Steam Temp -A',
+    'ITS Out Steam Temp -B',
+    'LTR IN Steam Temp -A',
+    'LTR IN Steam Temp -B',
+    'LTR Out Steam Temp -A',
+    'LTR Out Steam Temp -B',
+    'LTSH Out Steam Temp -A',
+    'LTSH Out Steam Temp -B',
+    'Lab Test Number',
+    'MAIN STEAM Pressure',
+    'MAIN STEAM Temp',
+    'MAIN STM TEMP-L',
+    'MAIN STM TEMP-R',
+    'MS Press-L',
+    'MS Press-R',
+    'MS TEMP (Right) boiler outlet',
+    'MS TEMP (left) boiler outlet',
+    'MS TEMP boiler outlet',
+    'MS Temp.',
+    'MS pressure boiler outlet(Left)',
+    'MS pressure boiler outlet(Right)',
+    'Main Steam Temp boiler outlet',
+    'RH ATT WATER FLOW',
+    'RH ATT. WATER FLOW (LHS)',
+    'RH ATT. WATER FLOW (RHS)',
+    'RH ATTEM FLOW',
+    'RH SPARY FLOW(L)',
+    'RH SPARY FLOW(R)',
+    'RH Spray Temp',
+    'SCC',
+    'SH 2ND STG ATTAMP FLOW LHS',
+    'SH 2ND STG ATTAMP FLOW RHS',
+    'SH ATT WATER FLOW',
+    'SH ATT. WATER FLOW (LHS)',
+    'SH ATT. WATER FLOW (RHS)',
+    'SH ATTAMP FLOW',
+    'SH ATTEM FLOW',
+    'SH SPARY FLOW(L)',
+    'SH SPARY FLOW(R)',
+    'Sample Collection Date',
+    'TD BFP-A I/L TEMP',
+    'TD BFP-B I/L TEMP',
+    'TD BFP-C I/L TEMP',
+    'TDBFP A I/L PRESS',
+    'TDBFP A I/L TEMP',
+    'TDBFP B I/L PRESS',
+    'TDBFP B I/L TEMP',
+    'TDBFP C I/L PRESS',
+    'TDBFP C I/L TEMP',
+    'TDBFP-A I/L TEMP',
+    'TDBFP-B I/L TEMP',
+    'TDBFP-C I/L TEMP',
 ]
+
 
 def get_training_data():
     """Returns (texts, labels) as parallel lists for sklearn, including the
@@ -1027,55 +2932,28 @@ def get_field_ids():
     return sorted(set(l for _, l in TRAINING_EXAMPLES))
 
 
-# ── Explicit exclusion list ──────────────────────────────────────────────────
+# ── Explicit exclusion list ──────────────────────────────────────────────
 # Headers that should NEVER be matched to a CENPEEP field, even if cosine
-# similarity is high (e.g. "Date" vs "Coal Rate" can share characters).
-# Checked as an exact (normalized, lowercased) match before the classifier
-# even runs, so these short-circuit to "no match" regardless of confidence.
+# similarity is high. Checked as an exact (normalized, lowercased) match
+# before the classifier even runs, so these short-circuit to "no match"
+# regardless of confidence. (Kept as a flat set, not matrix-generated —
+# these are structural/ID column names, not physical-quantity phrasings,
+# so there is no meaningful axis of variation to cross.)
 NON_FIELD_HEADERS = {
     'date', 'hrs', 'hr', 'hour', 'hours', 'count', 'sr no', 'sr. no', 'sl no',
     's no', 'time', 'shift', 'remarks', 'remark', 'notes', 'note',
     'id', 'unit', 'unit no', 'plant', 'particulars', 'description',
     'sample no', 'sample', 'test no', 'reading no', 'day', 'month', 'year',
-    # NOTE: 'total air flow' was removed from this exclusion list — it is a
-    # real sensor reading (not a structural/ID column like Date or Sr No)
-    # that a plant sheet may require; it was previously force-excluded here
-    # by mistake, silently dropping it before the classifier ever saw it.
-    # No CENPEEP field id currently corresponds to it, so for now it will
-    # fall through to 'rejected_low_confidence' instead of 'excluded' —
-    # flag to the business team so a target field/aggregation rule can be
-    # defined for it.
     'sox fgd i/l', 'sox', 'nox', 'sox fgd inlet',
     'ssc current', 'burner tilt corner 1', 'burner tilt',
-    # Bare generic column-header words carry NO information about which
-    # physical quantity they hold -- "Value"/"Reading"/"Amount"/"Data"/
-    # "Result"/"Figure" show up as a column header on all kinds of
-    # completely unrelated small reference tables (e.g. a
-    # "Particulars/UOM/Formula/Value" cost-savings sheet), and letting the
-    # ML fallback confidently guess a specific field for one of these
-    # (seen: a bare "Value" column scoring GCV at ~0.55 confidence, then
-    # averaging together Unit Capacity/Coal Cost/THERMACT dosing kg -- all
-    # completely unrelated numbers -- into a garbage "GCV" figure) is worse
-    # than leaving it unmatched. Exact match only, so a real header that
-    # merely CONTAINS one of these words (e.g. "MS Flow Value") is
-    # unaffected.
     'value', 'reading', 'amount', 'data', 'result', 'figure', 'qty', 'quantity',
+    # NEW — found on the CSTPS U-9 sheet, missed by the token/exact-match
+    # checks above:
+    'opacity', 'bt1', 'bt2', 'bt3', 'bt4', 'symbol', 'formula', 'uom',
+    'parameters', "parameter's", 'without thermact', 'with thermact',
 }
 
-# Tokens that are unambiguous non-field markers even when they only appear
-# as ONE WORD inside a longer header (unlike NON_FIELD_HEADERS above, which
-# is only ever checked as an exact *whole-header* match). Real plant tags
-# almost never report SOx/NOx bare on their own — they show up as e.g.
-# "SOX IN FLUE GAS", "SOX FGD I/L", "NOX EMISSION" — and neither CENPEEP
-# nor BEE has a field for either. Left unguarded, the ML classifier's
-# character-n-gram similarity treats "SOX IN FLUE GAS" as close to "O2 IN
-# FLUE GAS" / "OXYGEN IN FLUE GAS" (shared "OX" and "IN FLUE GAS"
-# substrings) and confidently mismaps it onto O2fg (seen: 0.83 confidence,
-# on a SOx reading in the hundreds/thousands of ppm — nowhere near a
-# physically valid 0-21% O2 figure). That silently poisons every
-# downstream formula that divides by (21 - O2fg), e.g. BEE-2 Indirect's
-# excess-air step, and can push the final Boiler Efficiency above 100%.
-NON_FIELD_TOKENS = {'sox', 'nox'}
+NON_FIELD_TOKENS = {'sox', 'nox', 'opacity'}
 
 
 def is_non_field_header(text):
@@ -1083,7 +2961,10 @@ def is_non_field_header(text):
     contains one of the unambiguous non-field tokens below anywhere in it
     (not just as the whole header string — see NON_FIELD_TOKENS)."""
     norm = str(text).strip().lower()
-    norm = norm.replace('.', '').replace('-', ' ').strip()
+    # NEW: strip commas too — real headers like "Opacity, mg/nm3" left a
+    # trailing comma glued onto the token ("opacity,"), which silently
+    # broke the NON_FIELD_TOKENS set-membership check below.
+    norm = norm.replace('.', '').replace('-', ' ').replace(',', ' ').strip()
     norm = ' '.join(norm.split())
     if norm in NON_FIELD_HEADERS:
         return True

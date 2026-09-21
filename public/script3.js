@@ -788,7 +788,7 @@ function initUpload() {
     form.append('file', file);
 
     try {
-      const res  = await fetch('/api/upload', { method: 'POST', body: form });
+      const res  = await Auth.authFetch('/api/upload', { method: 'POST', body: form });
       const data = await res.json();
 
       if (!data.ok) throw new Error(data.error || 'Upload failed');
@@ -947,7 +947,7 @@ async function saveSession() {
     },
   };
   try {
-    const res  = await fetch('/api/sessions', {
+    const res  = await Auth.authFetch('/api/sessions', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(payload),
@@ -1023,7 +1023,7 @@ async function downloadFieldReport() {
     missingFields: data.missingFields,
   };
   try {
-    const res = await fetch('/api/report', {
+    const res = await Auth.authFetch('/api/report', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(payload),

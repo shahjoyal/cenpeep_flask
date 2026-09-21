@@ -313,7 +313,7 @@ function initUpload() {
     form.append('file', file);
 
     try {
-      const res  = await fetch('/api/upload', { method: 'POST', body: form });
+      const res  = await Auth.authFetch('/api/upload', { method: 'POST', body: form });
       const data = await res.json();
 
       if (!data.ok) throw new Error(data.error || 'Upload failed');
@@ -388,7 +388,7 @@ async function downloadFieldReportBS2885() {
   };
 
   try {
-    const res = await fetch('/api/report', {
+    const res = await Auth.authFetch('/api/report', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(payload),

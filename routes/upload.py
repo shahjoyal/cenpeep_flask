@@ -53,6 +53,8 @@ import random
 import statistics
 from flask import Blueprint, request, jsonify
 
+from security import login_required
+
 try:
     from dateutil import parser as _dateutil_parser
     HAS_DATEUTIL = True
@@ -3896,6 +3898,7 @@ ALLOWED_EXTS = {'.xlsx', '.xls', '.xlsm'}
 
 
 @upload_bp.route('/', methods=['POST'])
+@login_required
 def upload_file():
     if 'file' not in request.files:
         return jsonify({'ok': False, 'error': 'No file uploaded'}), 400
@@ -3960,6 +3963,7 @@ def upload_file():
 
 
 @upload_bp.route('/retrain', methods=['POST'])
+@login_required
 def retrain_model():
     """
     Retrains the ML field classifier from the current contents of

@@ -32,6 +32,8 @@ import io
 import re
 from flask import Blueprint, request, send_file, jsonify
 
+from security import login_required
+
 report_bp = Blueprint('report', __name__)
 
 # Same palette/labels as r.py's build_report(), kept in sync on purpose —
@@ -112,6 +114,7 @@ def _add_field_section(doc, heading, field_detail, extracted, missing_fields, le
 
 
 @report_bp.route('', methods=['POST'])
+@login_required
 def generate_report():
     """
     Body (JSON):

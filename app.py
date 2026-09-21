@@ -1,5 +1,5 @@
 import os
-from flask import Flask, send_from_directory
+from flask import Flask, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 import pymongo
@@ -8,6 +8,19 @@ load_dotenv()
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 CORS(app)
+
+# Secret used to SIGN login tokens (see security.py). Falls back to a
+# randomly-generated key so the app still runs in local dev without an
+# .env entry, but that means every server restart invalidates every
+# logged-in session — set JWT_SECRET in .env (a long random string) for
+# any real/shared deployment so restarts don't silently log everyone out,
+# and so the signing key doesn't change every time the process restarts.
+import secrets
+app.config['SECRET_KEY'] = os.getenv('JWT_SECRET') or secrets.token_hex(32)
+if not os.getenv('JWT_SECRET'):
+    print('⚠️  JWT_SECRET not set in .env — using a random one-time key '
+          '(sessions will not survive a server restart). Set JWT_SECRET '
+          'in .env for production.')
 app.config['MAX_CONTENT_LENGTH'] = 250 * 1024 * 1024  # 250 MB (was 100MB — some real
                                                         # plant workbooks with many
                                                         # months of hourly tag data
@@ -39,14 +52,98 @@ else:
 
 app.config['DB'] = db
 
+# One-time seed: create the default admin account IN THE DATABASE, hashed,
+# the first time the app runs against an empty users collection. This
+# replaces the old hardcoded `username === 'admin' && password ===
+# 'admin123'` check that used to live in public/index.html — the
+# credentials are unchanged (still admin / admin123) so nothing about how
+# you log in changes, but the check now happens server-side against a
+# hashed value in Mongo instead of being readable in the page source.
+# CHANGE THIS PASSWORD after first login (see POST /api/auth/change-password)
+# — leaving it as admin123 in a real deployment defeats the point of moving
+# it into the database in the first place.
+if db is not None:
+    try:
+        from security import hash_password
+        if db.users.count_documents({}) == 0:
+            db.users.insert_one({
+                'username': 'admin',
+                'passwordHash': hash_password('admin123'),
+                'role': 'admin',
+            })
+            print("✅ Seeded default admin user (admin / admin123) — "
+                  "change this password after first login.")
+    except Exception as e:
+        print(f'❌ Admin user seed failed: {e}')
+
 # Register blueprints
+from routes.auth import auth_bp
 from routes.upload import upload_bp
 from routes.sessions import sessions_bp
 from routes.report import report_bp
 
+app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(upload_bp, url_prefix='/api/upload')
 app.register_blueprint(sessions_bp, url_prefix='/api/sessions')
 app.register_blueprint(report_bp, url_prefix='/api/report')
+
+# ── Transport security ────────────────────────────────────────────────────
+# "Hashing" API responses so no one in between can read them isn't
+# possible (hashes can't be turned back into the JSON the page needs) —
+# what actually stops that is HTTPS/TLS on the connection itself. If
+# you're deploying on Vercel (vercel.json is already in this repo), Vercel
+# terminates HTTPS for you automatically and this is a no-op. If you're
+# running this Flask app directly behind your own domain, set FORCE_HTTPS=1
+# in .env once you have a TLS certificate in front of it.
+@app.after_request
+def add_security_headers(response):
+    if os.getenv('FORCE_HTTPS') == '1':
+        response.headers['Strict-Transport-Security'] = 'max-age=63072000; includeSubDomains'
+    return response
+
+
+# ── Response payload encryption ───────────────────────────────────────────
+# Wraps every JSON API response body as { enc: true, n, c } (AES-256-GCM),
+# decrypted on the client in public/auth.js's Auth.authFetch(). See the long
+# comment on RESPONSE_ENCRYPTION_KEY in security.py for exactly what this
+# does and doesn't protect against — short version: it's on top of HTTPS,
+# not instead of it.
+#
+# Two things are deliberately left unwrapped:
+#   - /api/health and /api/auth/login: login is how the browser gets the
+#     decryption key in the first place (see routes/auth.py), so it can't
+#     itself be encrypted with that key — chicken/egg. /api/health is left
+#     plain so uptime monitors and `curl` can read it without a session.
+#   - 401 responses: these fire for requests with no/expired token, i.e.
+#     exactly the case where the browser may not hold a key yet. The
+#     client only needs the HTTP status code to know to redirect to
+#     login, not the body, so there's nothing lost by leaving these plain.
+_UNENCRYPTED_PATHS = {'/api/health', '/api/auth/login'}
+
+
+@app.after_request
+def encrypt_json_responses(response):
+    if (request.path in _UNENCRYPTED_PATHS
+            or response.status_code == 401
+            or response.mimetype != 'application/json'):
+        return response
+    import json as _json
+    from security import encrypt_response_payload
+    try:
+        payload = _json.loads(response.get_data(as_text=True))
+    except ValueError:
+        return response
+    response.set_data(_json.dumps(encrypt_response_payload(payload)))
+    return response
+
+
+if os.getenv('FORCE_HTTPS') == '1':
+    @app.before_request
+    def redirect_to_https():
+        from flask import redirect, request as _req
+        if _req.headers.get('X-Forwarded-Proto', _req.scheme) != 'https':
+            return redirect(_req.url.replace('http://', 'https://', 1), code=301)
+
 
 # Health check
 @app.route('/api/health')

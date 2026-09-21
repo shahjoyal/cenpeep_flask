@@ -124,7 +124,7 @@ function initUpload() {
     form.append('file', file);
 
     try {
-      const res  = await fetch('/api/upload', { method: 'POST', body: form });
+      const res  = await Auth.authFetch('/api/upload', { method: 'POST', body: form });
       const data = await res.json();
 
       if (!data.ok) throw new Error(data.error || 'Upload failed');

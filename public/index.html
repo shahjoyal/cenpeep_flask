@@ -392,21 +392,48 @@ body::after {
 </div>
 
 <script src="particles.js"></script>
+<script src="auth.js"></script>
 <script>
-function login() {
+async function login() {
   const username = document.getElementById('username').value;
   const password = document.getElementById('password').value;
-  if (username === 'admin' && password === 'admin123') {
-    sessionStorage.setItem('loggedIn', 'true');
+  const errorMsg = document.getElementById('errorMsg');
+  const btn = document.querySelector('.btn-login');
+
+  function showError(text) {
+    if (text) errorMsg.textContent = text;
+    errorMsg.classList.remove('show');
+    void errorMsg.offsetWidth;
+    errorMsg.classList.add('show');
+  }
+
+  if (!username || !password) {
+    showError('Enter your username and password.');
+    return;
+  }
+
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      showError(data.error || 'Incorrect username or password!');
+      return;
+    }
+    Auth.setSession(data.token, data.user, data.encKey);
     // Boiler type is now picked from a popup card on the calculator
     // page itself (see boiler-gate.js), not on a separate screen here,
     // so go straight in. The boiler-box markup below is left in place
     // and unused rather than removed.
     window.location.href = 'calculator.html';
-  } else {
-    document.getElementById('errorMsg').classList.remove('show');
-    void document.getElementById('errorMsg').offsetWidth;
-    document.getElementById('errorMsg').classList.add('show');
+  } catch (e) {
+    showError('Could not reach the server. Please try again.');
+  } finally {
+    btn.disabled = false;
   }
 }
 

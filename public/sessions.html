@@ -62,15 +62,12 @@
 
 <script src="particles.js"></script>
 <script src="boiler-badge.js"></script>
+<script src="auth.js"></script>
 <script src="boiler-gate.js"></script>
 <script>
-if (!sessionStorage.getItem('loggedIn')) {
-  window.location.href = 'index.html';
-}
+Auth.requireAuth();
 function logout() {
-  sessionStorage.removeItem('loggedIn');
-  sessionStorage.removeItem('boilerType');
-  window.location.href = 'index.html';
+  Auth.logout();
 }
 
 // ── DB health pill ─────────────────────────────────────────────────────
@@ -105,7 +102,7 @@ async function loadSessions() {
   const el = document.getElementById('sessions-content');
   el.innerHTML = `<div class="empty-state"><div class="empty-icon">⏳</div><div class="empty-title">Loading…</div></div>`;
   try {
-    const res  = await fetch('/api/sessions');
+    const res  = await Auth.authFetch('/api/sessions');
     const data = await res.json();
     if (!data.ok) throw new Error(data.error);
 
@@ -190,7 +187,7 @@ async function deleteSession(e, id) {
   e.stopPropagation();
   if (!confirm('Delete this session?')) return;
   try {
-    await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+    await Auth.authFetch(`/api/sessions/${id}`, { method: 'DELETE' });
     loadSessions();
   } catch {}
 }
