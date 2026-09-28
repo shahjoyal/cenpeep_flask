@@ -1,5 +1,5 @@
 import os
-from flask import Flask, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 import pymongo
@@ -45,8 +45,12 @@ if MONGO_URI and '<username>' not in MONGO_URI:
         client.server_info()
         db = client.get_default_database()
         print('✅ MongoDB connected')
+        from pagerduty import resolve_db_connection_alert
+        resolve_db_connection_alert()
     except Exception as e:
         print(f'❌ MongoDB connection failed: {e}')
+        from pagerduty import alert_db_connection_failed
+        alert_db_connection_failed()
 else:
     print('⚠️  MONGODB_URI not set — sessions disabled')
 
@@ -102,6 +106,44 @@ def add_security_headers(response):
     return response
 
 
+# ── PagerDuty alerting on API failures ────────────────────────────────────
+# Fires for ANY route that ends up returning a 5xx — whether that's a route
+# catching its own exception and returning `{'ok': False, ...}, 500` (the
+# pattern used throughout routes/*.py) or something genuinely unhandled
+# (caught by the errorhandler right below, which exists specifically so
+# this hook has a 5xx response to see instead of the request just failing
+# without a response Flask can process here).
+#
+# Only `request.endpoint` — a fixed name from the route's own @app.route /
+# @blueprint.route definition, e.g. "sessions.create_session" — is ever
+# read. It cannot contain a filename, a request body, a query string, a
+# database value, or an exception message; see pagerduty.py for the one
+# place that actually builds the alert text. 4xx responses (bad login,
+# not found, validation errors) are left alone — those are normal
+# application behavior, not something worth paging someone for.
+@app.after_request
+def alert_on_api_failure(response):
+    if response.status_code >= 500 and request.path.startswith('/api/'):
+        from pagerduty import alert_api_failure
+        alert_api_failure(request.endpoint)
+    return response
+
+
+# Safety net for exceptions that escape a route's own try/except (every
+# route in routes/*.py already catches Exception itself, so in practice
+# this only fires for a genuine bug outside those blocks) — without this,
+# an unhandled exception wouldn't reach alert_on_api_failure above at all
+# and, in production, would otherwise render Flask/Werkzeug's default
+# error page (which is not JSON, and can include internal detail) back to
+# the caller instead of the same generic shape every other route uses.
+@app.errorhandler(Exception)
+def handle_unexpected_error(e):
+    return jsonify({'ok': False, 'error': 'Internal server error.'}), 500
+
+@app.route('/api/test-pagerduty')
+def test_pagerduty():
+    return "Test error", 500
+    
 # ── Response payload encryption ───────────────────────────────────────────
 # Wraps every JSON API response body as { enc: true, n, c } (AES-256-GCM),
 # decrypted on the client in public/auth.js's Auth.authFetch(). See the long
