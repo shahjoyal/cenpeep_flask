@@ -164,9 +164,10 @@
             <label for="boilerTypeSelect">Boiler Type</label>
             <div class="select-wrap">
               <select id="boilerTypeSelect">
-                <option value="PF Fired">PF Fired</option>
-                <option value="AFBC">AFBC</option>
+                <option value="CFBC">CFBC</option>
                 <option value="Pulverized Coal">Pulverized Coal</option>
+                <option value="AFBC">AFBC</option>
+                <option value="Bagasse Fired">Bagasse Fired</option>
               </select>
             </div>
           </div>

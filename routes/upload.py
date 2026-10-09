@@ -285,6 +285,19 @@ LABEL_ALIASES = {
     'oxygen in flue gaslah ol': 'O2out',
     'oxygen in flue gasrah ol': 'O2out',
     'unburnt bottom': 'Cba', 'unburnt fly': 'Cfa',
+    # UBC ("Coal & Combustible") sheets headline the unburnt-carbon columns
+    # with a bare 2-letter abbreviation (BA = Bottom Ash, FA = Fly Ash) under
+    # a merged "COMBUSTIBLE" group label. The abbreviation alone is too
+    # short for the rule/ML matchers, so _stitch_stacked_headers joins it
+    # with the group label above it and these exact aliases resolve it.
+    'combustible ba': 'Cba', 'combustible fa': 'Cfa',
+    'combustibles ba': 'Cba', 'combustibles fa': 'Cfa',
+    'combustible in ba': 'Cba', 'combustible in fa': 'Cfa',
+    'combustible in bottom ash': 'Cba', 'combustible in fly ash': 'Cfa',
+    'combustibles in bottom ash': 'Cba', 'combustibles in fly ash': 'Cfa',
+    'unburnt ba': 'Cba', 'unburnt fa': 'Cfa',
+    'unburnt carbon ba': 'Cba', 'unburnt carbon fa': 'Cfa',
+    'ubc ba': 'Cba', 'ubc fa': 'Cfa',
     'unburnts in bottom ash': 'Cba', 'unburnts in fly ash': 'Cfa',
     'unburnt in bottom ash': 'Cba', 'unburnt in fly ash': 'Cfa',
     'bottom ash unburnts': 'Cba', 'fly ash unburnts': 'Cfa',
@@ -764,6 +777,42 @@ def _match_tag_patterns(norm):
                 if is_sa:
                     return 'Tsai'
 
+    # APH temperature tags the generic block above can't resolve: "BFR"
+    # (before) isn't in its inlet vocabulary, "SEC" (secondary) isn't in its
+    # secondary-air vocabulary, and a hyphen-glued side letter ("APH-L",
+    # "APH-R") collapses to "aphl"/"aphr", which never equals the plain
+    # "aph" token. That left e.g. "FG TEMP BFR APH L", "FG TEMP AFT APH-R"
+    # and "SEC AIR TEMP AFT APH L" to the ML fallback, which mixed up
+    # before/after and gas/air. This runs only AFTER the generic block, so
+    # anything it already resolved keeps resolving exactly as before.
+    #   FG  AFT APH -> Tgo (avg of L & R)    FG  BFR APH -> Tgi
+    #   SEC AFT APH -> Tsao (avg of L & R)   SEC BFR APH -> Tamb (ambient)
+    #   PA  AFT APH -> Tpao                  PA  BFR APH -> Tpai
+    _has_aph = any(re.fullmatch(r'aph[a-hlr]?\d*', t) for t in tokens)
+    _is_temp = bool({'temp', 'tmp', 'temperature'} & tokens)
+    if _has_aph and _is_temp and not (tokens & GAS_ANALYSIS_TOKENS) \
+            and not (tokens & PRESSURE_UNIT_TOKENS):
+        _after = bool({'aft', 'after', 'aftr'} & tokens)
+        _before = bool({'bfr', 'bfore', 'befor'} & tokens)
+        _fg = bool({'fg', 'flue'} & tokens)
+        _sa = bool({'sec', 'secondary', 'sa'} & tokens)
+        _pa = bool({'pa', 'primary'} & tokens)
+        if _after != _before:
+            if _fg and not (_sa or _pa):
+                return 'Tgo' if _after else 'Tgi'
+            if _sa and not (_fg or _pa):
+                return 'Tsao' if _after else 'Tamb'
+            if _pa and not (_fg or _sa):
+                return 'Tpao' if _after else 'Tpai'
+
+    # Plant's own precomputed/raw "TOT COAL FLW" (total coal flow, t/h) --
+    # the real Total Coal Flow column. Without a deterministic rule it fell
+    # to the ML fallback, which preferred an unrelated per-mill outlet
+    # TEMPERATURE column ("MILL D O/L TMP") for Fin.
+    if {'coal'} <= tokens and ({'flw', 'flow'} & tokens) and ({'tot', 'total'} & tokens) \
+            and not ({'temp', 'tmp', 'temperature'} & tokens):
+        return 'Fin'
+
     # Secondary air arriving at the furnace after the APH — real plant tags
     # sometimes name this from the furnace's point of view ("FURNACE L_SIDE
     # INL SA T" / "FURNACE R_SIDE INL SA T") rather than the APH's point of
@@ -955,6 +1004,13 @@ def _unit_conflicts_with_field(header, fid):
     """True if header's own unit/quantity wording physically rules out fid."""
     norm = re.sub(r'[^a-z0-9 ]', '', str(header).lower())
     tokens = set(norm.split())
+    # Total Coal Flow is a flow, never a temperature (a "MILL D O/L TMP"
+    # column was being ML-matched to it), and a coal-mill outlet temperature
+    # is not the air temperature entering the APH (Tpai/Tsai).
+    if fid == 'Fin' and (tokens & {'temp', 'tmp', 'temperature'}):
+        return True
+    if fid in ('Tpai', 'Tsai') and 'mill' in tokens:
+        return True
     if fid == 'Tfg':
         return bool(tokens & PRESSURE_UNIT_TOKENS) or bool(tokens & GAS_ANALYSIS_TOKENS) \
             or bool(tokens & PRIMARY_SECONDARY_AIR_TOKENS)
@@ -1138,6 +1194,16 @@ def _forward_fill_merged_row(row):
     return filled
 
 
+# "BA" / "FA" (Bottom Ash / Fly Ash) -- a header cell that is just one of
+# these two abbreviations is meaningless on its own but unambiguous once the
+# group label above it (e.g. "COMBUSTIBLE") is attached. Only these two exact
+# cells are ever stitched this way, so no other header's handling changes.
+def _is_ash_abbrev_cell(cell):
+    if cell is None:
+        return False
+    return re.sub(r'[^a-z]', '', str(cell).lower()) in ('ba', 'fa')
+
+
 def _stitch_stacked_headers(rows_above, header_row):
     """
     Combines a chosen header row with any group-label text sitting in the
@@ -1162,7 +1228,7 @@ def _stitch_stacked_headers(rows_above, header_row):
     filled_rows_above = [_forward_fill_merged_row(r) for r in rows_above]
     stitched = []
     for col_idx, cell in enumerate(header_row):
-        if not _is_bare_header_cell(cell):
+        if not _is_bare_header_cell(cell) and not _is_ash_abbrev_cell(cell):
             stitched.append(cell)
             continue
         label = None
@@ -1331,6 +1397,15 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
                     col_confidence[col_idx] = 1.0
             continue
 
+        if _is_ash_abbrev_cell(effective_hdr) and stitched_hdr \
+                and str(stitched_hdr).strip() != str(effective_hdr).strip():
+            fid_ash = _label_to_field_exact(str(stitched_hdr))
+            if fid_ash in ('Cba', 'Cfa'):
+                col_map[col_idx] = fid_ash
+                col_source[col_idx] = 'rule'
+                col_confidence[col_idx] = 1.0
+                continue
+
         fid = _label_to_field(str(effective_hdr))
         if fid and fid in NEVER_AUTO_DETECT:
             # Always-manual field (see NEVER_AUTO_DETECT) — treat the column
@@ -1387,6 +1462,8 @@ def _map_columns_to_fields(headers, use_ml=True, ml_threshold=DEFAULT_CONFIDENCE
 # Out") already promises an average of both sides.
 MULTI_COLUMN_AVERAGE_FIELDS = {
     'O2in', 'O2out', 'Tgi', 'Tgo', 'Tpai', 'Tpao', 'Tsai', 'Tsao',
+    # Ambient temp (SEC AIR TEMP BFR APH-L / -R) is the same L/R dual-duct reading.
+    'Tamb',
     # SP ("Steam Pressure") is read at the superheater outlet, which (like
     # the APH/flue-gas ducts above) is commonly wired as separate L-side/
     # R-side sensors (e.g. "SH O/L MS PRESSURE-L" + "...-R") that should be
@@ -3467,6 +3544,28 @@ def parse_workbook(file_bytes, filename, use_ml=True):
     # Tpai to the same value as Tsai instead of leaving it blank/missing.
     # This only fires when Tpai is absent from every sheet — it never
     # overrides an actually-detected Tpai value.
+    # Chain step before it: some sheets log the air entering the APH only as
+    # "SEC AIR TEMP BFR APH-L/-R" (which maps to Ambient Temperature, Tamb).
+    # That is physically the Secondary Air APH inlet temperature too, so
+    # when Tsai genuinely wasn't found anywhere, default it from that same
+    # reading (then Tpai defaults from Tsai just below). Never overrides a
+    # detected Tsai.
+    if 'Tsai' not in merged_extracted and 'Tamb' in merged_extracted \
+            and merged_field_detail.get('Tamb', {}).get('source') == 'rule' \
+            and 'bfr' in str(merged_field_detail.get('Tamb', {}).get('header') or '').lower():
+        merged_extracted['Tsai'] = merged_extracted['Tamb']
+        _tamb_src = merged_field_source.get('Tamb')
+        if _tamb_src:
+            merged_field_source['Tsai'] = _tamb_src
+        _tamb_detail = merged_field_detail.get('Tamb', {})
+        merged_field_detail['Tsai'] = {
+            'sheet': _tamb_detail.get('sheet'),
+            'label': FIELD_LABELS.get('Tsai', 'Tsai'),
+            'header': f"defaulted = Ambient Temperature ({_tamb_detail.get('header')})",
+            'source': 'derived_fallback',
+            'confidence': _tamb_detail.get('confidence', 1.0),
+        }
+
     if 'Tpai' not in merged_extracted and 'Tsai' in merged_extracted:
         merged_extracted['Tpai'] = merged_extracted['Tsai']
         tsai_source = merged_field_source.get('Tsai')
@@ -3780,6 +3879,19 @@ def parse_workbook(file_bytes, filename, use_ml=True):
         _vals = _row.get('values') or {}
         if all(f in _vals for f in ('M', 'VM', 'FC')):
             _vals['A'] = round(100 - _vals['M'] - _vals['VM'] - _vals['FC'], 4)
+
+    # Fields that are defaulted from another field (Tpai <- Tsai,
+    # Tsai <- Tamb, Tfg <- Tgo) must follow that field's per-row values too.
+    # Otherwise they stay a single whole-file constant and show the SAME
+    # number for every date range (e.g. identical Pre and Post), instead of
+    # tracking the field they're copied from.
+    for _derived, _src in (('Tsai', 'Tamb'), ('Tpai', 'Tsai'), ('Tfg', 'Tgo')):
+        if merged_field_detail.get(_derived, {}).get('source') != 'derived_fallback':
+            continue
+        for _row in primary_dated_rows:
+            _vals = _row.get('values') or {}
+            if _src in _vals and _derived not in _vals:
+                _vals[_derived] = _vals[_src]
 
     # CenPeep-column layout is a single authoritative value per field, not
     # a time series, so there's no meaningful date range to slice it by —
