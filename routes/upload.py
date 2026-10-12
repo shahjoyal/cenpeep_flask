@@ -189,6 +189,10 @@ NEVER_AUTO_DETECT = {
     # reports, so it gets the same never-auto-detect / never-flagged-
     # missing treatment as the rest of this set.
     'L6',
+    # BEE-2 Indirect -- GCV of Bottom Ash / GCV of Fly Ash. Lab-reported
+    # one-off figures (not a DCS/log column), so they are manual entry on
+    # public/tab3.html (default 0) and are never auto-filled from an upload.
+    'GCVba', 'GCVfa',
 }
 
 # ─── Full list of CENPEEP input fields the calculator needs ──────────────────

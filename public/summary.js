@@ -65,7 +65,7 @@ const BEE_DEFAULTS = {
   BL:20, SP:66,
   O2fg:9, COfg:800, CO2fg:10.67, Tfg:180, Tamb:29.3, Hum:0.1977,
   C:53.65, H2:3.25, N2:1.11, O2f:8.68, S:0.34, M:14.43, A:18.54, GCV:4291,
-  Cba:0.11, Cfa:4.89, GCVba:889, GCVfa:395,
+  Cba:0.11, Cfa:4.89, GCVba:0, GCVfa:0,
   L6:1,
 };
 
@@ -95,7 +95,7 @@ const CENPEEP_DETECTABLE = ['L','Ffw','Fin','Cba','Cfa','M','A','VM','FC','GCV',
   'O2in','O2out','COout','Tgi','Tgo','Tpai','Tpao','Tsai','Tsao','Fsa','Fpa'];
 const ASME_DETECTABLE = ['M','A','VM','FC','GCV','Cba','Cfa','O2out','COout','Tgo'];
 const BEE_DETECTABLE = ['O2fg','COfg','CO2fg','Tfg','Tamb','Hum','C','H2','N2','O2f',
-  'M','A','GCV','Cba','Cfa','GCVba','GCVfa'];
+  'M','A','GCV','Cba','Cfa'];
 
 // ── Hidden calculation-engine iframes — wait for each to finish loading
 //    (each is a full existing tab page) before calling into it. ─────────

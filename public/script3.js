@@ -700,7 +700,7 @@ function resetInputs() {
     BL:20, SP:66,
     O2fg:9, COfg:800, CO2fg:10.67, Tfg:180, Tamb:29.3, Hum:0.1977,
     C:53.65, H2:3.25, N2:1.11, O2f:8.68, S:0.34, M:14.43, A:18.54, GCV:4291,
-    Cba:0.11, Cfa:4.89, GCVba:889, GCVfa:395,
+    Cba:0.11, Cfa:4.89, GCVba:0, GCVfa:0,
     L6:1,
   };
   Object.entries(d).forEach(([id, val]) => {
@@ -740,7 +740,7 @@ const ALL_FIELD_IDS = INPUT_IDS.filter(id => !INFO_ONLY_IDS.includes(id));
 // (routes/upload.py's NEVER_AUTO_DETECT) for every calculator, not just
 // this one, since lab-report sulphur figures aren't reliably a sheet
 // column.
-const MANUAL_FIELD_IDS = ['L6', 'S'];
+const MANUAL_FIELD_IDS = ['L6', 'S', 'GCVba', 'GCVfa'];
 
 // The backend's `missingFields` response is scoped to CENPEEP's own
 // required-field list (routes/upload.py's REQUIRED_FIELDS) and doesn't
