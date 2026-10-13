@@ -5,7 +5,7 @@ from security import (
     hash_password,
     issue_token,
     login_required,
-    response_encryption_key_b64,
+    get_request_json,
     verify_password,
 )
 
@@ -32,7 +32,7 @@ def login():
     if db is None:
         return jsonify({'ok': False, 'error': 'Database not connected'}), 503
 
-    body = request.get_json(force=True, silent=True) or {}
+    body = get_request_json()
     username = (body.get('username') or '').strip()
     password = body.get('password') or ''
     if not username or not password:
@@ -49,16 +49,10 @@ def login():
         return jsonify({'ok': False, 'error': 'Invalid username or password.'}), 401
 
     token = issue_token(user)
-    # encKey: the AES-256 key (base64) the client uses to decrypt every
-    # later API response body (see app.py's encrypt_json_responses and
-    # public/auth.js). Only the login response itself is sent unencrypted —
-    # it's the one response that has to be, since it's what delivers this
-    # key in the first place.
     return jsonify({
         'ok': True,
         'token': token,
         'user': serialize_user(user),
-        'encKey': response_encryption_key_b64(),
     })
 
 
@@ -90,7 +84,7 @@ def create_user():
     if db is None:
         return jsonify({'ok': False, 'error': 'Database not connected'}), 503
 
-    body = request.get_json(force=True, silent=True) or {}
+    body = get_request_json()
     username = (body.get('username') or '').strip()
     password = body.get('password') or ''
     role = body.get('role') or 'user'
@@ -157,7 +151,7 @@ def change_password():
     if db is None:
         return jsonify({'ok': False, 'error': 'Database not connected'}), 503
 
-    body = request.get_json(force=True, silent=True) or {}
+    body = get_request_json()
     current_password = body.get('currentPassword') or ''
     new_password = body.get('newPassword') or ''
     if len(new_password) < 8:

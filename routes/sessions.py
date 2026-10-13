@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, current_app
 from bson import ObjectId
 from datetime import datetime
 
-from security import login_required, encrypt_for_db, decrypt_from_db
+from security import login_required, encrypt_for_db, decrypt_from_db, get_request_json
 
 sessions_bp = Blueprint('sessions', __name__)
 
@@ -68,7 +68,7 @@ def create_session():
     if db is None:
         return jsonify({'ok': False, 'error': 'Database not connected'}), 503
     try:
-        body = request.get_json(force=True)
+        body = get_request_json()
         plain = {
             'sessionName': body.get('sessionName', ''),
             'sourceFile':  body.get('sourceFile', 'Manual Entry'),
@@ -84,8 +84,8 @@ def create_session():
             doc[field] = encrypt_for_db(plain[field])
         result = db.sessions.insert_one(doc)
 
-        # Echo back the plaintext version (this response body itself is
-        # encrypted in transit by app.py's encrypt_json_responses).
+        # Echo back the plaintext version (the response envelope itself is
+        # encrypted by app.py's encrypt_json_responses).
         plain['_id'] = str(result.inserted_id)
         plain['uploadedAt'] = plain['uploadedAt'].isoformat()
         return jsonify({'ok': True, 'session': plain})

@@ -41,6 +41,8 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 import jwt
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from flask import current_app, g, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -129,47 +131,22 @@ def admin_required(fn):
     return login_required(wrapper)
 
 
-# ── Encryption at rest / in the response body ────────────────────────────────
-# Two SEPARATE keys, on purpose:
+# ── Encryption at rest (MongoDB session fields) ─────────────────────────────
+# DB_ENCRYPTION_KEY never leaves the server. It encrypts the sensitive fields
+# of a saved session (inputs/results/etc) before they're written to MongoDB,
+# so a copy of the database on its own doesn't hand over plant data in the
+# clear. Decrypted only when a logged-in user actually reads a session back.
 #
-#   DB_ENCRYPTION_KEY       — never leaves the server. Encrypts the sensitive
-#                              fields of a saved session (inputs/results/etc)
-#                              before they're written to MongoDB, so a copy of
-#                              the database on its own (a leaked backup, an
-#                              over-permissioned DB user, a misconfigured
-#                              Atlas project) doesn't hand over plant data in
-#                              the clear. Decrypted only when a logged-in user
-#                              actually reads a session back.
+# This is SEPARATE from the API request/response encryption further down
+# (AES-256-CBC, same scheme as the Node encryption.utils.js).
 #
-#   RESPONSE_ENCRYPTION_KEY — handed to the browser once, at login (see
-#                              routes/auth.py), so the client can decrypt the
-#                              body of every later API response. This is an
-#                              EXTRA layer on top of HTTPS, not a replacement
-#                              for it — HTTPS/TLS is still what stops someone
-#                              on the network from reading the traffic AT ALL
-#                              (including the encrypted envelope's headers,
-#                              timing, the fact a request happened). What this
-#                              layer buys you specifically: a response body
-#                              that ends up somewhere HTTPS doesn't cover —
-#                              an access log, an intermediate proxy, a
-#                              browser extension reading page traffic — is
-#                              still unreadable without the key. It is NOT
-#                              protection against someone who can read the
-#                              login response too (they get the key right
-#                              there), so it isn't a defense against a full
-#                              man-in-the-middle — only TLS is. Keeping it
-#                              split from DB_ENCRYPTION_KEY means a leaked
-#                              browser-side key never exposes the database.
-#
-# Both are 32-byte (AES-256) keys, base64-encoded in .env. Generate one with:
+# 32-byte (AES-256) key, base64-encoded in .env. Generate one with:
 #   python -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
-# Falls back to a random one-time key (like JWT_SECRET in app.py) so the app
-# still runs without .env entries, but that means already-encrypted DB
-# fields become unreadable and existing sessions get logged out on every
-# restart — set both in .env for any real/shared deployment.
+# Falls back to a random one-time key if unset, which means already-encrypted
+# DB fields become unreadable after a restart — set it in .env for any real
+# deployment.
 
 _db_key: bytes | None = None
-_response_key: bytes | None = None
 
 
 def _load_key(env_name: str, purpose: str) -> bytes:
@@ -202,19 +179,6 @@ def db_encryption_key() -> bytes:
     if _db_key is None:
         _db_key = _load_key("DB_ENCRYPTION_KEY", "encrypted session fields in MongoDB")
     return _db_key
-
-
-def response_encryption_key() -> bytes:
-    global _response_key
-    if _response_key is None:
-        _response_key = _load_key("RESPONSE_ENCRYPTION_KEY", "encrypted API responses")
-    return _response_key
-
-
-def response_encryption_key_b64() -> str:
-    """Base64 form handed to the client at login (see routes/auth.py) so
-    the browser can decrypt subsequent responses with Web Crypto."""
-    return base64.b64encode(response_encryption_key()).decode()
 
 
 def _aes_encrypt(plaintext: bytes, key: bytes) -> tuple[str, str]:
@@ -254,8 +218,72 @@ def decrypt_from_db(value):
     return json.loads(plaintext)
 
 
-# ── API response payload encryption ──────────────────────────────────────────
-def encrypt_response_payload(payload: dict) -> dict:
-    plaintext = json.dumps(payload).encode("utf-8")
-    nonce_b64, ct_b64 = _aes_encrypt(plaintext, response_encryption_key())
-    return {"enc": True, "n": nonce_b64, "c": ct_b64}
+# ── API request/response encryption (AES-256-CBC) ────────────────────────────
+# Mirrors the Node encryption.utils.js exactly so both services interoperate:
+#   * algorithm : aes-256-cbc (PKCS#7 padding)
+#   * key / IV  : 32-byte key, 16-byte IV (UTF-8 strings)
+#   * plaintext : JSON
+#   * ciphertext: lower-case hex string
+#   * envelope  : { "encryptedData": "<hex>" } for BOTH requests and responses
+#
+# The key and IV default to the same values as the Node reference file so it
+# works out of the box; override them with API_SECRET_KEY / API_IV in .env
+# (and VITE_API_SECRET_KEY / VITE_API_IV when building the client) so the
+# real values aren't sitting in source control.
+_DEFAULT_API_KEY = "qwertyuiopasdfghjklzxcvbnm123456"
+_DEFAULT_API_IV = "1234567890123456"
+
+
+def _api_key_iv() -> tuple[bytes, bytes]:
+    key = os.getenv("API_SECRET_KEY", _DEFAULT_API_KEY).encode("utf-8")
+    iv = os.getenv("API_IV", _DEFAULT_API_IV).encode("utf-8")
+    if len(key) != 32:
+        raise RuntimeError(f"API_SECRET_KEY must be exactly 32 bytes (got {len(key)}).")
+    if len(iv) != 16:
+        raise RuntimeError(f"API_IV must be exactly 16 bytes (got {len(iv)}).")
+    return key, iv
+
+
+def encrypt_data(data) -> str:
+    """JSON-serialise `data` and return AES-256-CBC ciphertext as hex
+    (Node: encryptData)."""
+    key, iv = _api_key_iv()
+    plaintext = json.dumps(data, separators=(",", ":"), ensure_ascii=False, default=str).encode("utf-8")
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(plaintext) + padder.finalize()
+    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    return (encryptor.update(padded) + encryptor.finalize()).hex()
+
+
+def decrypt_data(encrypted_hex: str):
+    """Inverse of encrypt_data (Node: decryptData). Raises ValueError on any
+    problem — bad hex, wrong key, bad padding, or non-JSON plaintext."""
+    key, iv = _api_key_iv()
+    try:
+        ciphertext = bytes.fromhex(encrypted_hex)
+        decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+        unpadder = padding.PKCS7(128).unpadder()
+        plaintext = unpadder.update(padded) + unpadder.finalize()
+        return json.loads(plaintext.decode("utf-8"))
+    except Exception as e:
+        raise ValueError("Decryption failed") from e
+
+
+def encrypt_response_payload(payload) -> dict:
+    return {"encryptedData": encrypt_data(payload)}
+
+
+def decrypt_request_payload(body) -> dict:
+    """Unwrap a `{ "encryptedData": "<hex>" }` request body."""
+    if not isinstance(body, dict) or not isinstance(body.get("encryptedData"), str):
+        raise ValueError("Request body must be { encryptedData: <hex> }.")
+    data = decrypt_data(body["encryptedData"])
+    return data if isinstance(data, dict) else {}
+
+
+def get_request_json() -> dict:
+    """The decrypted JSON body of the current request ({} if none). The
+    decryption itself happens once, in app.py's before_request hook; routes
+    call this instead of request.get_json()."""
+    return getattr(g, "json_body", None) or {}

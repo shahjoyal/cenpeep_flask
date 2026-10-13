@@ -1,5 +1,5 @@
 import os
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 import pymongo
@@ -144,29 +144,43 @@ def handle_unexpected_error(e):
 def test_pagerduty():
     return "Test error", 500
     
-# ── Response payload encryption ───────────────────────────────────────────
-# Wraps every JSON API response body as { enc: true, n, c } (AES-256-GCM),
-# decrypted on the client in public/auth.js's Auth.authFetch(). See the long
-# comment on RESPONSE_ENCRYPTION_KEY in security.py for exactly what this
-# does and doesn't protect against — short version: it's on top of HTTPS,
-# not instead of it.
+# ── API request/response encryption (AES-256-CBC) ─────────────────────────
+# Same scheme as the Node encryption.utils.js: every JSON request body must
+# arrive as { "encryptedData": "<hex>" } and every JSON response leaves the
+# same way. See security.py (encrypt_data / decrypt_data) for the details.
 #
-# Two things are deliberately left unwrapped:
-#   - /api/health and /api/auth/login: login is how the browser gets the
-#     decryption key in the first place (see routes/auth.py), so it can't
-#     itself be encrypted with that key — chicken/egg. /api/health is left
-#     plain so uptime monitors and `curl` can read it without a session.
-#   - 401 responses: these fire for requests with no/expired token, i.e.
-#     exactly the case where the browser may not hold a key yet. The
-#     client only needs the HTTP status code to know to redirect to
-#     login, not the body, so there's nothing lost by leaving these plain.
-_UNENCRYPTED_PATHS = {'/api/health', '/api/auth/login'}
+# Not wrapped:
+#   - /api/health — left plain so uptime monitors and `curl` can read it.
+#   - multipart file uploads (/api/upload) — the request carries a binary
+#     file, not JSON, so only the *response* to it is encrypted.
+#   - non-JSON responses (the .docx report download).
+_UNENCRYPTED_PATHS = {'/api/health'}
+
+
+@app.before_request
+def decrypt_json_requests():
+    g.json_body = None
+    if (not request.path.startswith('/api/')
+            or request.path in _UNENCRYPTED_PATHS
+            or request.method not in ('POST', 'PUT', 'PATCH', 'DELETE')
+            or request.mimetype != 'application/json'):
+        return None
+    from security import decrypt_request_payload
+    raw = request.get_data(as_text=True)
+    if not raw.strip():
+        g.json_body = {}
+        return None
+    try:
+        import json as _json
+        g.json_body = decrypt_request_payload(_json.loads(raw))
+    except ValueError:
+        return jsonify({'ok': False, 'error': 'Invalid or undecryptable request payload.'}), 400
+    return None
 
 
 @app.after_request
 def encrypt_json_responses(response):
     if (request.path in _UNENCRYPTED_PATHS
-            or response.status_code == 401
             or response.mimetype != 'application/json'):
         return response
     import json as _json

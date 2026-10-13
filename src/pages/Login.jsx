@@ -3,7 +3,7 @@ import loginCss from '../styles/login.css?raw';
 import { useInjectedStyles } from '../hooks/useInjectedStyles.js';
 import Particles from '../components/Particles.jsx';
 import { EyeIcon, EyeOffIcon, LockIcon, MailIcon } from '../components/Icons.jsx';
-import { setSession } from '../lib/auth.js';
+import { publicFetch, setSession } from '../lib/auth.js';
 import { navigate } from '../lib/router.jsx';
 
 // Login screen (public/index.html). The unused "select boiler type" box that
@@ -24,12 +24,12 @@ export default function Login() {
     if (!username || !password) { showError('Enter your username and password.'); return; }
     setBusy(true);
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await publicFetch('/api/auth/login', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }),
       });
       const data = await res.json();
       if (!res.ok || !data.ok) { showError(data.error || 'Incorrect username or password!'); return; }
-      setSession(data.token, data.user, data.encKey);
+      setSession(data.token, data.user);
       navigate('/calculator');
     } catch (e) {
       showError('Could not reach the server. Please try again.');

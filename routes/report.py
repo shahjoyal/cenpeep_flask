@@ -32,7 +32,7 @@ import io
 import re
 from flask import Blueprint, request, send_file, jsonify
 
-from security import login_required
+from security import login_required, get_request_json
 
 report_bp = Blueprint('report', __name__)
 
@@ -143,7 +143,7 @@ def generate_report():
             'error': 'python-docx is not installed on the server (add it to requirements.txt).',
         }), 500
 
-    data = request.get_json(force=True, silent=True) or {}
+    data = get_request_json()
     field_detail   = data.get('fieldDetail') or {}
     extracted      = data.get('extracted') or {}
     missing_fields = data.get('missingFields') or []
