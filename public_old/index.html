@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boiler Efficiency Calculator</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --accent: #3b82f6;
+  --accent2: #60a5fa;
+  --text: #f1f5f9;
+  --muted: #94a3b8;
+  --muted2: #64748b;
+  --border: rgba(148,163,184,0.16);
+}
+
+body {
+  font-family: 'Outfit', sans-serif;
+  background: #0A132B;
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 70% 45% at 12% -8%, rgba(255,255,255,0.07) 0%, transparent 60%),
+    radial-gradient(ellipse 55% 40% at 92% 15%, rgba(96,165,250,0.14) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 45% at 75% 105%, rgba(37,99,235,0.16) 0%, transparent 60%),
+    linear-gradient(180deg, #0A132B 0%, #101d42 55%, #0A132B 100%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,0.05) 48%, rgba(255,255,255,0.09) 50%, rgba(255,255,255,0.05) 52%, transparent 70%);
+  background-size: 220% 220%;
+  pointer-events: none;
+  z-index: 0;
+  mix-blend-mode: screen;
+}
+
+#bg-particles { opacity: 0.85; }
+
+.screen {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+}
+
+/* ── Left brand panel ─────────────────────────────────────────── */
+.brand-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 40px;
+  position: relative;
+}
+
+.brand-logo-ring {
+  width: 108px;
+  height: 108px;
+  margin-bottom: 28px;
+  animation: logoFloat 3.8s ease-in-out infinite;
+  filter: drop-shadow(0 8px 24px rgba(37,99,235,0.35));
+}
+.brand-logo-ring .inner {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+}
+.brand-logo-ring img { width: 100%; height: 100%; object-fit: contain; }
+
+@keyframes logoFloat {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-10px); }
+}
+
+.brand-title {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 42px;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: -1px;
+  line-height: 1.15;
+  margin-bottom: 6px;
+  opacity: 0;
+  animation: fadeUp 0.7s 0.1s ease forwards;
+}
+.brand-title .accent {
+  background: linear-gradient(135deg, #60a5fa, #93c5fd);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.brand-rule {
+  width: 56px; height: 3px; border-radius: 2px; margin: 16px 0 20px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  opacity: 0;
+  animation: fadeUp 0.7s 0.2s ease forwards;
+}
+
+.brand-sub {
+  max-width: 380px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.6;
+  margin-bottom: 44px;
+  opacity: 0;
+  animation: fadeUp 0.7s 0.3s ease forwards;
+}
+
+.stat-row { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; opacity: 0; animation: fadeUp 0.7s 0.4s ease forwards; }
+.stat-chip {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(14px);
+  border-radius: 14px;
+  padding: 14px 20px;
+  min-width: 130px;
+  animation: floatChip 4.5s ease-in-out infinite;
+}
+.stat-chip:nth-child(2) { animation-delay: 0.6s; }
+.stat-chip:nth-child(3) { animation-delay: 1.2s; }
+.stat-chip .n { font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700; color: #93c5fd; }
+.stat-chip .l { font-size: 11px; color: var(--muted2); text-transform: uppercase; letter-spacing: 0.6px; margin-top: 4px; }
+
+@keyframes floatChip { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ── Right login panel ────────────────────────────────────────── */
+.form-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+
+.login-box {
+  background: rgba(15,22,45,0.55);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  padding: 44px 40px 34px;
+  width: 100%;
+  max-width: 400px;
+  box-shadow: 0 24px 60px -12px rgba(0,0,0,0.55);
+  opacity: 0;
+  animation: fadeUp 0.6s 0.15s cubic-bezier(0.16,1,0.3,1) forwards;
+}
+
+.login-logo-icon {
+  width: 80px; height: 80px;
+  margin: 0 auto 20px;
+  display: flex; align-items: center; justify-content: center;
+  animation: logoFloat 3.8s ease-in-out infinite;
+  filter: drop-shadow(0 6px 18px rgba(37,99,235,0.4));
+}
+.login-logo-icon img { width: 100%; height: 100%; object-fit: contain; }
+
+.login-title {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 25px;
+  font-weight: 700;
+  color: #fff;
+  text-align: center;
+  margin-bottom: 6px;
+}
+.login-sub {
+  font-size: 13.5px;
+  color: var(--muted);
+  text-align: center;
+  margin-bottom: 16px;
+}
+.login-divider {
+  width: 44px; height: 2px; margin: 0 auto 26px; border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+}
+
+.error-msg {
+  display: none;
+  background: rgba(239,68,68,0.12);
+  border: 1px solid rgba(248,113,113,0.35);
+  color: #fca5a5;
+  font-size: 13px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  margin-bottom: 16px;
+  font-weight: 500;
+  text-align: center;
+}
+.error-msg.show { display: block; animation: shake 0.35s ease; }
+@keyframes shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+
+.form-group { margin-bottom: 16px; position: relative; }
+.form-group .icon {
+  position: absolute; left: 15px; top: 50%; transform: translateY(-50%);
+  color: var(--muted); pointer-events: none; display: flex;
+}
+.form-group input {
+  width: 100%;
+  padding: 13px 14px 13px 44px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 14.5px;
+  color: var(--text);
+  background: rgba(255,255,255,0.03);
+  outline: none;
+  transition: all 0.2s;
+}
+.form-group input::placeholder { color: var(--muted2); }
+.form-group input:focus {
+  border-color: var(--accent);
+  background: rgba(59,130,246,0.06);
+  box-shadow: 0 0 0 3px rgba(59,130,246,0.14);
+}
+.toggle-eye {
+  position: absolute; right: 13px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; cursor: pointer; color: var(--muted);
+  padding: 4px; display: flex; transition: color 0.2s;
+}
+.toggle-eye:hover { color: var(--text); }
+
+.btn-login {
+  width: 100%;
+  padding: 14px;
+  background: linear-gradient(135deg, #2563eb 0%, #60a5fa 100%);
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 8px 24px rgba(59,130,246,0.35);
+  margin-top: 8px;
+}
+.btn-login:hover { transform: translateY(-1px); box-shadow: 0 10px 32px rgba(59,130,246,0.45); }
+.btn-login:active { transform: scale(0.98); }
+
+.login-footer {
+  text-align: center;
+  margin-top: 26px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--muted2);
+}
+.login-footer b { color: #93c5fd; font-weight: 700; }
+
+/* ── Boiler-type selection (shown right after login) ─────────────── */
+.boiler-box { display: none; }
+.boiler-box.show { display: block; }
+.boiler-icon {
+  width: 64px; height: 64px;
+  margin: 0 auto 18px;
+  border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, rgba(59,130,246,0.18), rgba(96,165,250,0.10));
+  border: 1px solid rgba(96,165,250,0.3);
+  color: #93c5fd;
+}
+.form-group label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 8px;
+  letter-spacing: 0.2px;
+}
+.select-wrap { position: relative; }
+.select-wrap select {
+  width: 100%;
+  padding: 13px 40px 13px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 14.5px;
+  color: var(--text);
+  background: rgba(255,255,255,0.03);
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.select-wrap select:focus {
+  border-color: var(--accent);
+  background: rgba(59,130,246,0.06);
+  box-shadow: 0 0 0 3px rgba(59,130,246,0.14);
+}
+.select-wrap select option { background: #101d42; color: var(--text); }
+.select-wrap::after {
+  content: '';
+  position: absolute; right: 16px; top: 50%;
+  width: 9px; height: 9px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
+@media (max-width: 880px) {
+  .screen { grid-template-columns: 1fr; }
+  .brand-panel { display: none; }
+  .form-panel { padding: 24px; }
+}
+</style>
+</head>
+<body>
+
+<div class="screen">
+  <div class="brand-panel">
+    <div class="brand-logo-ring"><div class="inner"><img src="images/abhitech-logo.png" alt="ABHITECH"></div></div>
+    <div class="brand-title">Boiler <span class="accent">Efficiency</span> Calculator</div>
+    <div class="brand-rule"></div>
+
+    <div class="stat-row">
+      <div class="stat-chip"><div class="n">87%</div><div class="l">Boiler Eff.</div></div>
+      <div class="stat-chip"><div class="n">5.8%</div><div class="l">Dry Gas Loss</div></div>
+      <div class="stat-chip"><div class="n">1.2%</div><div class="l">Unburnt C</div></div>
+    </div>
+  </div>
+
+  <div class="form-panel">
+    <div class="login-box" id="loginBox">
+      <div class="login-logo-icon"><img src="images/abhitech-logo.png" alt="ABHITECH"></div>
+      <div class="login-title">Welcome</div>
+      <div class="login-sub">Sign in to access the Efficiency Calculator</div>
+      <div class="login-divider"></div>
+      <div class="error-msg" id="errorMsg">Incorrect username or password!</div>
+      <div class="form-group">
+        <span class="icon">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="m2 7 10 6 10-6"></path></svg>
+        </span>
+        <input type="text" id="username" placeholder="Username" autocomplete="username" />
+      </div>
+      <div class="form-group">
+        <span class="icon">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+        </span>
+        <input type="password" id="password" placeholder="Password" autocomplete="current-password" />
+        <button type="button" class="toggle-eye" id="toggleEye" aria-label="Show password">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+        </button>
+      </div>
+      <button class="btn-login" onclick="login()">Login</button>
+      <div class="login-footer">Powered by <b>ABHITECH EnergyCon Ltd.</b></div>
+    </div>
+
+    <!-- Boiler-type selection — shown right after a successful login,
+         before the calculator loads. Selection is stored in
+         sessionStorage as 'boilerType' so it can be shown in the
+         navbar badge and carried into saved sessions/reports. ────── -->
+    <div class="login-box boiler-box" id="boilerBox">
+      <div class="boiler-icon">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15h18"/><path d="M5 15V6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v9"/><path d="M8 15v4"/><path d="M16 15v4"/><path d="M9 8h.01"/><path d="M13 8h.01"/></svg>
+      </div>
+      <div class="login-title">Select Your Boiler Type</div>
+      <div class="login-sub">This helps tailor the calculation to your plant</div>
+      <div class="login-divider"></div>
+      <div class="form-group">
+        <label for="boilerType">Boiler Type</label>
+        <div class="select-wrap">
+          <select id="boilerType">
+            <option value="CFBC">CFBC</option>
+            <option value="Pulverized Coal">Pulverized Coal</option>
+            <option value="AFBC">AFBC</option>
+            <option value="Bagasse Fired">Bagasse Fired</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn-login" onclick="continueToCalculator()">Continue</button>
+      <div class="login-footer">Powered by <b>ABHITECH EnergyCon Ltd.</b></div>
+    </div>
+  </div>
+</div>
+
+<script src="particles.js"></script>
+<script src="auth.js"></script>
+<script>
+async function login() {
+  const username = document.getElementById('username').value;
+  const password = document.getElementById('password').value;
+  const errorMsg = document.getElementById('errorMsg');
+  const btn = document.querySelector('.btn-login');
+
+  function showError(text) {
+    if (text) errorMsg.textContent = text;
+    errorMsg.classList.remove('show');
+    void errorMsg.offsetWidth;
+    errorMsg.classList.add('show');
+  }
+
+  if (!username || !password) {
+    showError('Enter your username and password.');
+    return;
+  }
+
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      showError(data.error || 'Incorrect username or password!');
+      return;
+    }
+    Auth.setSession(data.token, data.user, data.encKey);
+    // Boiler type is now picked from a popup card on the calculator
+    // page itself (see boiler-gate.js), not on a separate screen here,
+    // so go straight in. The boiler-box markup below is left in place
+    // and unused rather than removed.
+    window.location.href = 'calculator.html';
+  } catch (e) {
+    showError('Could not reach the server. Please try again.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function continueToCalculator() {
+  const boilerType = document.getElementById('boilerType').value;
+  sessionStorage.setItem('boilerType', boilerType);
+  window.location.href = 'calculator.html';
+}
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  if (document.getElementById('boilerBox').classList.contains('show')) {
+    continueToCalculator();
+  } else {
+    login();
+  }
+});
+
+const pwd = document.getElementById('password');
+const eyeBtn = document.getElementById('toggleEye');
+eyeBtn.addEventListener('click', () => {
+  const show = pwd.type === 'password';
+  pwd.type = show ? 'text' : 'password';
+  eyeBtn.innerHTML = show
+    ? '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a20.6 20.6 0 0 1 5.06-5.94M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a20.6 20.6 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>'
+    : '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"></path><circle cx="12" cy="12" r="3"></circle></svg>';
+});
+</script>
+</body>
+</html>

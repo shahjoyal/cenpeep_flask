@@ -1,0 +1,87 @@
+/* Copied verbatim from the injected <style> in public/boiler-gate.js */
+      /* ── Locked state: tab switching + upload disabled until a boiler
+         type is picked for this session ───────────────────────────── */
+      body.boiler-locked .nav-link,
+      body.boiler-locked .tab-btn,
+      body.boiler-locked .btn-upload {
+        pointer-events: none;
+        opacity: 0.4;
+        filter: grayscale(0.4);
+        cursor: not-allowed;
+      }
+      body.boiler-locked #upload-file-input { pointer-events: none; }
+
+      /* ── "Select Boiler Type" banner ──────────────────────────────── */
+      .boiler-lock-banner {
+        display: none;
+        align-items: center;
+        gap: 14px;
+        background: var(--accent-light, rgba(96,165,250,0.14));
+        border: 1.5px solid var(--border, rgba(255,255,255,0.12));
+        border-radius: var(--radius, 16px);
+        padding: 14px 18px;
+        margin: 0 0 20px;
+      }
+      .boiler-lock-banner-icon {
+        width: 40px; height: 40px; flex-shrink: 0;
+        border-radius: 12px;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(96,165,250,0.18);
+        border: 1px solid rgba(96,165,250,0.3);
+        color: #93c5fd;
+      }
+      .boiler-lock-banner-text { flex: 1 1 auto; min-width: 180px; }
+      .boiler-lock-banner-text strong { display: block; font-size: 14.5px; color: var(--text, #f1f5f9); margin-bottom: 2px; }
+      .boiler-lock-banner-text span { font-size: 13px; color: var(--muted, #94a3b8); }
+      .boiler-lock-banner .btn { flex-shrink: 0; }
+
+      /* ── Boiler-type popup card (reuses the app's existing modal look) ── */
+      .boiler-select-modal { max-width: 400px; text-align: center; }
+      .boiler-select-modal .modal-body { padding: 26px 28px 30px; }
+      .boiler-select-icon {
+        width: 56px; height: 56px; margin: 0 auto 16px;
+        border-radius: 14px;
+        display: flex; align-items: center; justify-content: center;
+        background: linear-gradient(135deg, rgba(59,130,246,0.18), rgba(96,165,250,0.10));
+        border: 1px solid rgba(96,165,250,0.3);
+        color: #93c5fd;
+      }
+      .boiler-select-sub { font-size: 13.5px; color: var(--muted, #94a3b8); margin-bottom: 20px; }
+      .boiler-select-field { text-align: left; margin-bottom: 20px; }
+      .boiler-select-field label {
+        display: block; font-size: 12.5px; font-weight: 600;
+        color: var(--muted, #94a3b8); margin-bottom: 8px; letter-spacing: 0.2px;
+      }
+      .select-wrap { position: relative; }
+      .select-wrap select {
+        width: 100%;
+        padding: 13px 40px 13px 14px;
+        border: 1.5px solid var(--border, rgba(255,255,255,0.12));
+        border-radius: 12px;
+        font-family: 'Outfit', sans-serif;
+        font-size: 14.5px;
+        color: var(--text, #f1f5f9);
+        background: rgba(255,255,255,0.03);
+        outline: none;
+        appearance: none;
+        -webkit-appearance: none;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      .select-wrap select:focus {
+        border-color: var(--accent, #60a5fa);
+        background: rgba(59,130,246,0.06);
+        box-shadow: 0 0 0 3px rgba(59,130,246,0.14);
+      }
+      .select-wrap select option { background: #101d42; color: var(--text, #f1f5f9); }
+      .select-wrap::after {
+        content: '';
+        position: absolute; right: 16px; top: 50%;
+        width: 9px; height: 9px;
+        border-right: 2px solid var(--muted, #94a3b8);
+        border-bottom: 2px solid var(--muted, #94a3b8);
+        transform: translateY(-70%) rotate(45deg);
+        pointer-events: none;
+      }
+      #boilerSelectOk { width: 100%; justify-content: center; }
+    
