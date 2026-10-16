@@ -4,6 +4,7 @@ import { navigate, usePath } from './lib/router.jsx';
 import Login from './pages/Login.jsx';
 import Cenpeep from './pages/Cenpeep.jsx';
 import Bs2885 from './pages/Bs2885.jsx';
+import Is13890 from './pages/Is13890.jsx';
 import Asme from './pages/Asme.jsx';
 import Bee from './pages/Bee.jsx';
 import Summary from './pages/Summary.jsx';
@@ -12,6 +13,7 @@ import Sessions from './pages/Sessions.jsx';
 const ROUTES = {
   '/calculator': Cenpeep,
   '/bs-2885': Bs2885,
+  '/is-13890': Is13890,
   '/asme-ptc-4-1': Asme,
   '/bee': Bee,
   '/summary': Summary,

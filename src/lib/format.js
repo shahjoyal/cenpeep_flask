@@ -55,6 +55,7 @@ export function stashForSummary(data, sourceTab) {
       sheetNameBS2885: data.sheetNameBS2885,
       extracted: data.extracted || {},
       extractedBS2885: data.extractedBS2885 || {},
+      extractedIS13890: data.extractedIS13890 || {},
       sourceTab,
       savedAt: Date.now(),
     }));

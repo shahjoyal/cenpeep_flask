@@ -6,6 +6,7 @@ import { useBoiler } from '../hooks/BoilerContext.jsx';
 export const NAV_LINKS = [
   { to: '/calculator', label: 'CENPEEP' },
   { to: '/bs-2885', label: 'BS-2885' },
+  { to: '/is-13890', label: 'IS-13890' },
   { to: '/asme-ptc-4-1', label: 'ASME-PTC 4.1' },
   { to: '/bee', label: 'BEE' },
   { to: '/summary', label: 'Summary' },

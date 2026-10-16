@@ -47,6 +47,11 @@ METHOD_COLORS = {
     # the CENPEEP/BEE entries above.
     "grid": "D9EAD3",
     "label": "D6E4F0",
+    # IS-13890 (routes/upload_is13890.py) methods — additive.
+    "is_colour": "D9EAD3",
+    "is_label": "D6E4F0",
+    "is_column": "D6E4F0",
+    "is_ml": "EADCF4",
 }
 METHOD_LABELS = {
     "cenpeep_column": "CenPeep layout (exact)",
@@ -55,6 +60,10 @@ METHOD_LABELS = {
     "derived_fallback": "Defaulted from another field",
     "grid": "BS-2885 Sl. No. grid (Method A)",
     "label": "Label/symbol match (Method B)",
+    "is_colour": "Label + input-colour cell (IS-13890)",
+    "is_label": "Label/symbol match (IS-13890)",
+    "is_column": "Column header match (IS-13890)",
+    "is_ml": "AI (ML) match (IS-13890)",
 }
 
 

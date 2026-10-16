@@ -51,6 +51,8 @@ const BS2885_DEFAULTS = {
   bs807:10.2, bs907:0, bs909:1.2, bs910:0.3,
 };
 
+import { DEFAULTS as IS13890_DEFAULTS, IS13890_INPUT_IDS as IS13890_DETECTABLE } from './calc/is13890.js';
+
 // ── Per-method "auto-detectable" field lists ─────────────────────────────
 // Mirrors each tab's own ALL_FIELD_IDS — used only to show a coverage
 // note ("8/10 fields detected from your file"), never for calculation.
@@ -60,4 +62,5 @@ const ASME_DETECTABLE = ['M','A','VM','FC','GCV','Cba','Cfa','O2out','COout','Tg
 const BEE_DETECTABLE = ['O2fg','COfg','CO2fg','Tfg','Tamb','Hum','C','H2','N2','O2f',
   'M','A','GCV','Cba','Cfa'];
 
+export { IS13890_DEFAULTS, IS13890_DETECTABLE };
 export { CENPEEP_DEFAULTS, ASME_DEFAULTS, BEE_DEFAULTS, BS2885_DEFAULTS, CENPEEP_DETECTABLE, ASME_DETECTABLE, BEE_DETECTABLE };

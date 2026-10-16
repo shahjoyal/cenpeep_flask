@@ -9,8 +9,10 @@ import { runCalculation as runCenpeep } from '../lib/calc/cenpeep.js';
 import { runCalculation as runAsme } from '../lib/calc/asme.js';
 import { runCalculation as runBee } from '../lib/calc/bee.js';
 import { runBS2885Calculation } from '../lib/calc/bs2885.js';
+import { runIS13890Calculation } from '../lib/calc/is13890.js';
 import {
   ASME_DEFAULTS, ASME_DETECTABLE, BEE_DEFAULTS, BEE_DETECTABLE, BS2885_DEFAULTS, CENPEEP_DEFAULTS, CENPEEP_DETECTABLE,
+  IS13890_DEFAULTS, IS13890_DETECTABLE,
 } from '../lib/summaryDefaults.js';
 
 const fmt2 = (n) => (typeof n === 'number' && isFinite(n)) ? n.toFixed(2) : '—';
@@ -27,6 +29,7 @@ function coverageOf(extracted, ids) {
 function computeAllEfficiencies(data) {
   const extracted = data.extracted || {};
   const extractedBS = data.extractedBS2885 || {};
+  const extractedIS = data.extractedIS13890 || {};
   const out = {};
   try {
     const r = runCenpeep({ ...CENPEEP_DEFAULTS, ...extracted });
@@ -47,6 +50,10 @@ function computeAllEfficiencies(data) {
       coverage: { found: Object.keys(extractedBS).length, total: Object.keys(BS2885_DEFAULTS).length },
     };
   } catch (e) { out.bs2885 = { ok: false, error: e.message }; }
+  try {
+    const r = runIS13890Calculation({ ...IS13890_DEFAULTS, ...extractedIS });
+    out.is13890 = { ok: true, eff: r.efficiency, coverage: coverageOf(extractedIS, IS13890_DETECTABLE), detected: Object.keys(extractedIS).length > 0 };
+  } catch (e) { out.is13890 = { ok: false, error: e.message }; }
   return out;
 }
 
@@ -88,18 +95,18 @@ function SummaryPage() {
     if (!stored || !stored.extracted) return;
     try {
       const res = computeAllEfficiencies(stored);
-      const okCount = ['cenpeep', 'bs2885', 'asme', 'bee'].filter((k) => res[k].ok).length;
+      const okCount = ['cenpeep', 'bs2885', 'asme', 'bee', 'is13890'].filter((k) => res[k].ok).length;
       setResults(res);
       setSourceNote(
         `Auto-loaded from your last upload on the ${stored.sourceTab || 'another'} tab ` +
-        `("${stored.filename || 'file'}", ${timeAgo(stored.savedAt)}) — ${okCount}/4 methods calculated. ` +
+        `("${stored.filename || 'file'}", ${timeAgo(stored.savedAt)}) — ${okCount}/5 methods calculated. ` +
         'Upload a new file above to recalculate.'
       );
     } catch (e) { /* fall back to the empty state */ }
   }, []);
 
   const handleUpload = async (file) => {
-    setUploadStatus({ cls: 'loading', text: '⏳ Parsing sheet and running all four methods…' });
+    setUploadStatus({ cls: 'loading', text: '⏳ Parsing sheet and running all five methods…' });
     const form = new FormData();
     form.append('file', file);
     try {
@@ -110,16 +117,16 @@ function SummaryPage() {
       setSourceNote('');
       const r = computeAllEfficiencies(data);
       setResults(r);
-      const okCount = ['cenpeep', 'bs2885', 'asme', 'bee'].filter((k) => r[k].ok).length;
-      setUploadStatus({ cls: 'success', text: `✓ ${okCount}/4 methods calculated from "${data.filename}"` });
-      showToast(`Summary updated — ${okCount}/4 methods calculated`, okCount === 4 ? 'success' : 'error');
+      const okCount = ['cenpeep', 'bs2885', 'asme', 'bee', 'is13890'].filter((k) => r[k].ok).length;
+      setUploadStatus({ cls: 'success', text: `✓ ${okCount}/5 methods calculated from "${data.filename}"` });
+      showToast(`Summary updated — ${okCount}/5 methods calculated`, okCount === 5 ? 'success' : 'error');
     } catch (err) {
       setUploadStatus({ cls: 'error', text: `✗ ${err.message}` });
       showToast(err.message, 'error');
     }
   };
 
-  const c = results && results.cenpeep, bs = results && results.bs2885, a = results && results.asme, b = results && results.bee;
+  const c = results && results.cenpeep, bs = results && results.bs2885, a = results && results.asme, b = results && results.bee, is = results && results.is13890;
 
   return (
     <div className="container">
@@ -127,12 +134,12 @@ function SummaryPage() {
       <div className="section-header" style={{ marginTop: 0 }}><div className="section-label">Summary — All Methods</div><div className="section-line"></div></div>
 
       <UploadBanner
-        description="Upload one data sheet — CENPEEP, BS-2885, ASME-PTC 4.1 and BEE efficiencies are all calculated from it, each using only its own required input fields."
+        description="Upload one data sheet — CENPEEP, BS-2885, IS-13890, ASME-PTC 4.1 and BEE efficiencies are all calculated from it, each using only its own required input fields."
         onFile={handleUpload} status={uploadStatus} />
 
       {!results && (
         <div id="summary-empty" style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--muted)', fontSize: '14px' }}>
-          Upload a data sheet above — or upload one on any other tab and come back here — to see Boiler Efficiency computed by all four methods side by side.
+          Upload a data sheet above — or upload one on any other tab and come back here — to see Boiler Efficiency computed by all five methods side by side.
         </div>
       )}
 
@@ -149,6 +156,9 @@ function SummaryPage() {
             <Card cls="kpi-blue" label="BS-2885 — Method B (indirect)"
               sub={bs.ok ? `Method A (direct): ${fmt2(bs.effA)}% · ${bs.coverage.found}/${bs.coverage.total} fields` : (bs.error || 'Could not calculate')}
               value={bs.ok ? <Pct v={bs.effB} /> : '—'} />
+            <Card cls="kpi-green" label="IS-13890 — Heat Loss Method"
+              sub={is.ok ? (is.detected ? `${is.coverage.found}/${is.coverage.total} fields detected` : 'No IS-13890 form found in this file — sample values shown') : (is.error || 'Could not calculate')}
+              value={is.ok && is.detected ? <Pct v={is.eff} /> : '—'} />
             <Card cls="kpi-amber" label="ASME PTC 4.1"
               sub={a.ok ? `${a.coverage.found}/${a.coverage.total} fields detected` : (a.error || 'Could not calculate')}
               value={a.ok ? <Pct v={a.eff} /> : '—'} />

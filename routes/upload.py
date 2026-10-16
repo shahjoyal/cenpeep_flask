@@ -89,6 +89,12 @@ from ml.training_data import is_non_field_header
 # changes how CENPEEP or BEE fields are found.
 from routes.upload_bs2885 import extract_bs2885
 
+# IS-13890 (boiler efficiency, heat-loss method) detection — same pattern as
+# BS-2885 above: a separate module with its own field catalog, colour/legend
+# logic and its own ML classifier (ml/training_data_is13890.py), contributing
+# only extra `…IS13890` keys to this endpoint's response.
+from routes.upload_is13890 import extract_is13890
+
 upload_bp = Blueprint('upload', __name__)
 
 # ─── Chunking config ───────────────────────────────────────────────────────────
@@ -4044,6 +4050,13 @@ def upload_file():
         except Exception:
             bs2885_result = {'extracted': {}, 'missingFields': [], 'sheetName': None, 'fieldDetail': {}}
 
+        # IS-13890 detection — additive only, same isolation as BS-2885 above.
+        try:
+            is13890_result = extract_is13890(file_bytes)
+        except Exception as e:
+            is13890_result = {'extracted': {}, 'missingFields': [], 'sheetName': None, 'fieldDetail': {},
+                              'legend': None, 'warnings': [f'IS-13890 detection failed: {type(e).__name__}']}
+
         return jsonify({
             'ok': True,
             'filename': f.filename,
@@ -4058,6 +4071,13 @@ def upload_file():
             'missingFieldsBS2885': bs2885_result['missingFields'],
             'sheetNameBS2885':    bs2885_result['sheetName'],
             'fieldDetailBS2885':  bs2885_result.get('fieldDetail', {}),
+            # IS-13890-specific keys (namespaced the same way).
+            'extractedIS13890':     is13890_result['extracted'],
+            'missingFieldsIS13890': is13890_result['missingFields'],
+            'sheetNameIS13890':     is13890_result['sheetName'],
+            'fieldDetailIS13890':   is13890_result.get('fieldDetail', {}),
+            'legendIS13890':        is13890_result.get('legend'),
+            'warningsIS13890':      is13890_result.get('warnings', []),
         })
     except MemoryError:
         return jsonify({
@@ -4082,9 +4102,10 @@ def upload_file():
 @login_required
 def retrain_model():
     """
-    Retrains the ML field classifier from the current contents of
-    ml/training_data.py and persists it to disk. Call this after editing
-    training_data.py (adding new header phrasings, fixing a mislabeled
+    Retrains the ML field classifiers from the current contents of
+    ml/training_data.py (CENPEEP/BEE) and ml/training_data_is13890.py
+    (IS-13890) and persists them to disk. Call this after editing either
+    file (adding new header phrasings, fixing a mislabeled
     example, etc.) so changes take effect without restarting the server.
     """
     # Vercel's filesystem is read-only under /var/task. Retraining and saving
@@ -4097,12 +4118,14 @@ def retrain_model():
         }), 400
 
     try:
-        from ml.field_classifier import retrain_and_save
+        from ml.field_classifier import retrain_and_save, retrain_and_save_is13890
         clf = retrain_and_save()
+        is_clf = retrain_and_save_is13890()
         return jsonify({
             'ok': True,
             'trainingExamples': len(clf.train_labels),
-            'message': 'Field classifier retrained successfully.',
+            'trainingExamplesIS13890': len(is_clf.train_labels),
+            'message': 'Field classifiers (CENPEEP/BEE and IS-13890) retrained successfully.',
         })
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
